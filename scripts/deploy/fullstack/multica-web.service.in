@@ -1,0 +1,23 @@
+[Unit]
+Description=Multica web (Next.js standalone)
+After=network-online.target multica.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=multica
+Group=multica
+WorkingDirectory=@@WEB_ROOT@@
+Environment=NODE_ENV=production
+Environment=PORT=@@NEXT_PORT@@
+Environment=HOSTNAME=127.0.0.1
+ExecStart=@@NODE_BIN@@ apps/web/server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

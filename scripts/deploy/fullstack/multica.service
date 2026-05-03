@@ -1,0 +1,24 @@
+[Unit]
+Description=Multica Go API server
+Documentation=https://github.com/multica-ai/multica
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=multica
+Group=multica
+WorkingDirectory=/opt/multica
+EnvironmentFile=-/opt/multica/.env
+ExecStartPre=/opt/multica/bin/migrate up
+ExecStart=/opt/multica/bin/server
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/multica/data
+
+[Install]
+WantedBy=multi-user.target
