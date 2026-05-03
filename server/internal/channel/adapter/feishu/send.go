@@ -1,0 +1,94 @@
+package feishu
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/multica-ai/multica/server/internal/channel"
+	"github.com/multica-ai/multica/server/internal/channel/port"
+)
+
+// sendText handles the outbound text-reply path used by Adapter.Send. It is
+// extracted from adapter.go to keep that file focused on lifecycle / the
+// Channel interface plumbing — and so the Retryable judgement (which is
+// non-trivial and likely to grow as we discover more Feishu error codes)
+// has a single home.
+func (a *Adapter) sendText(ctx context.Context, msg port.OutboundMessage) (port.SendResult, error) {
+	if msg.ChatID == "" {
+		// 4xx-class: no point retrying, the caller built a malformed
+		// outbound message. Surface as Retryable=false so the outbound
+		// queue (T8/T15) drops it instead of looping.
+		return port.SendResult{Retryable: false}, errors.New("feishu: OutboundMessage.ChatID is empty")
+	}
+
+	// Feishu wraps even plain text in a JSON envelope. We marshal here
+	// (rather than on the SDK side) so the seam Client only deals with a
+	// pre-baked content string — that is exactly the shape the OpenAPI
+	// expects, so concrete clients become a thin transport layer.
+	contentJSON, err := json.Marshal(feishuTextContent{Text: msg.Text})
+	if err != nil {
+		// Practically unreachable (json.Marshal of a single string field
+		// cannot fail), but treating it as a non-retryable client-side
+		// programming bug is the right classification.
+		return port.SendResult{Retryable: false}, fmt.Errorf("feishu: marshal text content: %w", err)
+	}
+
+	resp, err := a.client.SendMessage(ctx, SendRequest{
+		ReceiveIDType: "chat_id",
+		ReceiveID:     msg.ChatID,
+		MsgType:       "text",
+		Content:       string(contentJSON),
+	})
+	if err != nil {
+		return port.SendResult{Retryable: isRetryable(err)}, fmt.Errorf("feishu: send message: %w", err)
+	}
+	return port.SendResult{
+		PlatformMessageID: resp.MessageID,
+		Retryable:         false,
+	}, nil
+}
+
+// sendCard is the SendCard entry point for the adapter. The MVP scope
+// explicitly defers card rendering to T16, so this is a pinned stub that
+// returns channel.ErrNotImplemented — callers must check via errors.Is, so
+// flipping this from "not implemented" to "implemented" later is a single
+// edit at this site with zero changes elsewhere.
+func (a *Adapter) sendCard(ctx context.Context, _ port.OutboundCardMessage) (port.SendResult, error) {
+	_ = ctx
+	return port.SendResult{Retryable: false}, channel.ErrNotImplemented
+}
+
+// retryableError is the error type concrete Client implementations should
+// wrap transient failures in (or use the shorthand RetryableError helper).
+// Keeping the type internal to the feishu package — rather than in port —
+// reflects DESIGN §3.1: the Retryable judgement is platform-specific (Feishu
+// 5xx vs 4xx vs token-rotation errors), and pushing the type up would force
+// every other adapter to share Feishu's error vocabulary.
+type retryableError struct{ inner error }
+
+func (e *retryableError) Error() string { return e.inner.Error() }
+func (e *retryableError) Unwrap() error { return e.inner }
+
+// RetryableError marks an error as worth retrying by the outbound queue.
+// Concrete Client implementations should call this for network errors and
+// 5xx responses; 4xx-class platform errors stay un-marked.
+func RetryableError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &retryableError{inner: err}
+}
+
+// isRetryable reports whether the outbound queue should re-enqueue an error.
+// It only returns true for explicitly-marked retryable errors — the safe
+// default is "do not retry" so a buggy concrete Client cannot cause an
+// infinite send loop.
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var re *retryableError
+	return errors.As(err, &re)
+}

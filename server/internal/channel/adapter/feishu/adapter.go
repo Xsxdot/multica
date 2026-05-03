@@ -1,0 +1,240 @@
+package feishu
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+
+	"github.com/multica-ai/multica/server/internal/channel/port"
+)
+
+// channelName is the registry key feishu adapters register under. Kept as a
+// package-level constant rather than a config field because it is also the
+// value the dispatcher routes on (see DESIGN §4.1) — making it configurable
+// would let two operators register conflicting "feishu" adapters.
+const channelName = "feishu"
+
+// Config carries the static configuration the adapter needs at construction
+// time. Network credentials (AppID / AppSecret / EncryptKey / VerifyToken)
+// are read from the environment at the wiring site (T7) and passed through
+// here so the adapter struct itself stays platform-credential-aware but
+// transport-agnostic — the same struct can be used in tests with a fake
+// Client and zero credentials.
+type Config struct {
+	// AppID is the Feishu open-platform application id ("cli_…").
+	AppID string
+	// AppSecret is the matching app secret used to sign OpenAPI requests.
+	// Stored as a plain string (not a *secret.Token) for symmetry with the
+	// rest of the server's config; the wiring site is responsible for
+	// reading it from a secret manager.
+	AppSecret string
+	// EncryptKey enables Feishu's webhook payload encryption. Optional —
+	// when empty the SDK falls back to an unencrypted channel.
+	EncryptKey string
+	// VerifyToken is the legacy webhook verification token. Required only
+	// for the HTTP webhook fallback; the WebSocket transport this adapter
+	// uses authenticates via app credentials only.
+	VerifyToken string
+}
+
+// Adapter implements port.Channel for Feishu / Lark. The struct is small by
+// design: it holds the seam Client, a fan-out channel to downstream
+// consumers, and the lifecycle bookkeeping needed to satisfy the Channel
+// contract's Disconnect-closes-Events guarantee.
+type Adapter struct {
+	cfg    Config
+	client Client
+
+	// out is the platform-neutral fan-out channel. It is a separate
+	// channel from the one Client.Subscribe() returns so the adapter can
+	// drop / reshape events without leaking SDK lifecycle (e.g. Stop()
+	// closing Subscribe's chan must not crash downstream consumers
+	// mid-iteration).
+	out chan port.InboundEvent
+
+	mu      sync.Mutex
+	started bool
+	stopped bool
+	cancel  context.CancelFunc
+	pumpWG  sync.WaitGroup
+}
+
+// NewAdapter constructs an Adapter ready to be Connect()ed. The Client
+// argument is the SDK seam — production callers pass a real SDK-backed
+// Client (wired in T7), tests pass a fakeFeishuClient that implements the
+// same interface.
+//
+// The adapter only validates the seam (a non-nil Client) — credential
+// validation is the concrete Client's job, because what counts as "valid"
+// is platform-specific and may change with SDK versions.
+func NewAdapter(client Client, cfg Config) *Adapter {
+	if client == nil {
+		// Fail-fast: a nil Client would only surface as a nil-pointer
+		// deref deep inside the pump goroutine. Panicking at construction
+		// time gives the caller a clean stack trace pointing at the
+		// wiring bug.
+		panic("feishu.NewAdapter: client must not be nil")
+	}
+	return &Adapter{
+		cfg:    cfg,
+		client: client,
+		out:    make(chan port.InboundEvent, 16),
+	}
+}
+
+// Name implements port.Channel.
+func (a *Adapter) Name() string { return channelName }
+
+// Connect implements port.Channel. It boots the SDK seam (Client.Start) and
+// kicks off a goroutine that pumps RawEvents → InboundEvents into the fan-
+// out channel. Connect is safe to call concurrently; the second call returns
+// nil without re-starting.
+func (a *Adapter) Connect(ctx context.Context) error {
+	a.mu.Lock()
+	if a.started {
+		a.mu.Unlock()
+		return nil
+	}
+	if a.stopped {
+		a.mu.Unlock()
+		return errors.New("feishu: adapter already disconnected; create a new instance to reconnect")
+	}
+
+	if err := a.client.Start(ctx); err != nil {
+		a.mu.Unlock()
+		return fmt.Errorf("feishu: start client: %w", err)
+	}
+	a.started = true
+
+	pumpCtx, cancel := context.WithCancel(context.Background())
+	a.cancel = cancel
+	a.pumpWG.Add(1)
+	a.mu.Unlock()
+
+	go a.pump(pumpCtx)
+	return nil
+}
+
+// Disconnect implements port.Channel. After it returns, Events()' channel is
+// closed. It is safe to call multiple times — only the first call performs
+// the teardown; subsequent calls return nil immediately.
+func (a *Adapter) Disconnect(ctx context.Context) error {
+	a.mu.Lock()
+	if a.stopped {
+		a.mu.Unlock()
+		return nil
+	}
+	a.stopped = true
+	cancel := a.cancel
+	started := a.started
+	a.mu.Unlock()
+
+	// Cancelling the pump context wakes the pump goroutine so it exits
+	// without waiting for one more event from Subscribe(). We then call
+	// Client.Stop, which closes the Subscribe channel — order matters:
+	// cancel first so the pump cannot read a half-closed channel.
+	if cancel != nil {
+		cancel()
+	}
+	var stopErr error
+	if started {
+		stopErr = a.client.Stop(ctx)
+	}
+
+	// Wait for the pump goroutine to finish before closing `out`. Closing
+	// `out` while the pump might still write into it would panic (send on
+	// closed channel) — TC-port-3's 1s timeout would fire as a flake but
+	// the underlying bug would be a goroutine race. Joining first
+	// eliminates the race window entirely.
+	a.pumpWG.Wait()
+	close(a.out)
+	return stopErr
+}
+
+// Events implements port.Channel.
+func (a *Adapter) Events() <-chan port.InboundEvent { return a.out }
+
+// Send implements port.Channel for plain-text outbound messages. Routes to
+// sendText so the per-message-type logic (and Retryable judgement) stays in
+// send.go.
+func (a *Adapter) Send(ctx context.Context, msg port.OutboundMessage) (port.SendResult, error) {
+	return a.sendText(ctx, msg)
+}
+
+// SendCard implements port.Channel. The MVP returns ErrNotImplemented; T16
+// will replace the body with the real card-rendering call.
+func (a *Adapter) SendCard(ctx context.Context, msg port.OutboundCardMessage) (port.SendResult, error) {
+	return a.sendCard(ctx, msg)
+}
+
+// GetChatInfo implements port.Channel. The adapter projects the SDK's chat
+// metadata into the platform-neutral port.ChatInfo so callers never see a
+// Feishu-shaped response.
+func (a *Adapter) GetChatInfo(ctx context.Context, chatID string) (port.ChatInfo, error) {
+	resp, err := a.client.GetChatInfo(ctx, chatID)
+	if err != nil {
+		return port.ChatInfo{}, fmt.Errorf("feishu: get chat info: %w", err)
+	}
+	return port.ChatInfo{
+		ID:   resp.ID,
+		Name: resp.Name,
+		Type: mapChatType(resp.Type),
+	}, nil
+}
+
+// GetUserInfo implements port.Channel.
+func (a *Adapter) GetUserInfo(ctx context.Context, userID string) (port.UserInfo, error) {
+	resp, err := a.client.GetUserInfo(ctx, userID)
+	if err != nil {
+		return port.UserInfo{}, fmt.Errorf("feishu: get user info: %w", err)
+	}
+	return port.UserInfo{
+		ID:   resp.OpenID,
+		Name: resp.Name,
+	}, nil
+}
+
+// pump is the inbound goroutine: read RawEvents from the seam Client,
+// normalise them into port.InboundEvents, and fan them out on `out`.
+//
+// Lifecycle:
+//   - The goroutine exits when either pumpCtx is cancelled (Disconnect
+//     called) or the Client's Subscribe channel is closed (the SDK shut
+//     itself down).
+//   - We deliberately do NOT close `out` here. Disconnect owns that
+//     responsibility (after pumpWG.Wait), to avoid a "send on closed
+//     channel" race if Stop closes Subscribe before the pump notices the
+//     ctx cancellation.
+//   - Malformed events are dropped silently (not surfaced to `out`) — a
+//     future task can plumb a logger / metric counter through Config; the
+//     MVP keeps the package import-free.
+func (a *Adapter) pump(pumpCtx context.Context) {
+	defer a.pumpWG.Done()
+	src := a.client.Subscribe()
+	for {
+		select {
+		case <-pumpCtx.Done():
+			return
+		case raw, ok := <-src:
+			if !ok {
+				return
+			}
+			ev, emit, err := normaliseEvent(channelName, a.client.BotUserID(), raw)
+			if err != nil || !emit {
+				continue
+			}
+			select {
+			case <-pumpCtx.Done():
+				return
+			case a.out <- ev:
+			}
+		}
+	}
+}
+
+// Compile-time assertion: the adapter satisfies port.Channel. Keeps method
+// signatures in sync with the interface — drift here surfaces as a build
+// error at this single line rather than at every (registry, dispatcher,
+// test) call site.
+var _ port.Channel = (*Adapter)(nil)
