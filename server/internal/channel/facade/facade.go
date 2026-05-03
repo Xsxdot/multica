@@ -19,14 +19,18 @@ type IssueFacade interface {
 }
 
 // CommentFacade is the channel-layer entry point for comment operations.
+// Same single-direction dependency contract as IssueFacade (DESIGN §3.2): the
+// channel layer reaches comment behaviour exclusively through this interface
+// and never touches the persistence layer directly.
 type CommentFacade interface {
 	AddComment(ctx context.Context, req AddCommentReq) (Comment, error)
 }
 
-// issueFacade is the unexported concrete implementation. Callers wire it via
-// NewIssueFacade and only ever see the IssueFacade interface — see the
-// Green-phase guidance in Orion's Red review (item 2: "构造函数返回 interface
-// 而非具体类型").
+// issueFacade is the unexported concrete implementation of IssueFacade. It is
+// kept unexported so callers wire by the interface contract rather than the
+// struct — that way the implementation can be swapped (e.g. for an
+// instrumentation decorator, or a future direct-to-service binding) without
+// updating any call site.
 type issueFacade struct {
 	svc IssueService
 }
@@ -62,7 +66,8 @@ func (f *issueFacade) ListMyTodos(ctx context.Context, workspaceID, userID pgtyp
 	return f.svc.ListMyTodos(ctx, workspaceID, userID)
 }
 
-// commentFacade is the unexported concrete implementation for CommentFacade.
+// commentFacade is the unexported concrete implementation of CommentFacade.
+// See issueFacade for the rationale on keeping the type unexported.
 type commentFacade struct {
 	svc CommentService
 }
