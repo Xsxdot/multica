@@ -26,6 +26,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/multica-ai/multica/server/internal/util"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // ---------------------------------------------------------------------------
@@ -453,4 +454,28 @@ func freshEventID(t *testing.T, provider, prefix string) string {
 			provider, id)
 	})
 	return id
+}
+
+// newChannelTestPipeline composes the standard three-step inbound
+// pipeline used by the M1 acceptance tests:
+//
+//	dedup  →  identity-bind  →  dispatch (caller-supplied)
+//
+// The first two steps are always the same — production-shaped real
+// implementations of dedup and identity-bind that touch testPool. The
+// dispatch step varies per test (recordingStep for the
+// "did the pipeline reach dispatch?" tests, createIssueDispatchStep for
+// the "did the pipeline produce a real side effect?" tests).
+//
+// Returning a *inbound.Pipeline (vs the steps individually) keeps every
+// TC-int-* call site to one line and makes future step insertions
+// (e.g. an outbound logger after dispatch in M2) a single-edit change
+// here rather than a sweep across four tests.
+func newChannelTestPipeline(pool *pgxpool.Pool, registry *channel.Registry, dispatch inbound.Step) *inbound.Pipeline {
+	queries := db.New(pool)
+	return inbound.NewPipeline(
+		inbound.NewDedupStep(inbound.NewDBDedupStore(queries)),
+		newIdentityBindStep(pool, registry, binding.NewTokenIssuer(queries)),
+		dispatch,
+	)
 }

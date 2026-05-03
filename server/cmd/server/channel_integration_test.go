@@ -107,15 +107,10 @@ func TestChannelIntegration_TC_int_1_BindingFlow_EndToEnd(t *testing.T) {
 	// what events reached it, so we can prove identity-bind fired Skip
 	// the first time and Continue the second time without depending on
 	// any service.
-	tokenIssuer := binding.NewTokenIssuer(queries)
 	tokenConsumer := binding.NewTokenConsumer(queries)
 
 	dispatch := newRecordingStep("dispatch")
-	pipeline := inbound.NewPipeline(
-		inbound.NewDedupStep(inbound.NewDBDedupStore(queries)),
-		newIdentityBindStep(testPool, registry, tokenIssuer),
-		dispatch,
-	)
+	pipeline := newChannelTestPipeline(testPool, registry, dispatch)
 
 	// First @ Bot: unbound. Pipeline must Skip at identity-bind, push a
 	// binding link via the fake channel, and leave consumed_at NULL.
@@ -242,7 +237,6 @@ func TestChannelIntegration_TC_int_2_GroupCreatesIssue(t *testing.T) {
 			`DELETE FROM issue WHERE title = $1`, expectedTitle)
 	})
 
-	queries := db.New(testPool)
 	registry := channel.NewRegistry()
 	fake := newFakeChannel(provider)
 	if err := registry.Register(fake); err != nil {
@@ -259,11 +253,7 @@ func TestChannelIntegration_TC_int_2_GroupCreatesIssue(t *testing.T) {
 
 	dispatch := newCreateIssueDispatchStep(testPool, registry, issueFacade)
 
-	pipeline := inbound.NewPipeline(
-		inbound.NewDedupStep(inbound.NewDBDedupStore(queries)),
-		newIdentityBindStep(testPool, registry, binding.NewTokenIssuer(queries)),
-		dispatch,
-	)
+	pipeline := newChannelTestPipeline(testPool, registry, dispatch)
 
 	evt := port.InboundEvent{
 		ChannelName: provider,
@@ -372,7 +362,6 @@ func TestChannelIntegration_TC_int_3_UnbindCascadeAndStopResponse(t *testing.T) 
 	bindChatToWorkspace(t, provider, externalChatID, port.ChatTypeGroup, wsID, testUserID)
 	bindUserToMulticaUser(t, provider, externalUserID, testUserID)
 
-	queries := db.New(testPool)
 	registry := channel.NewRegistry()
 	fake := newFakeChannel(provider)
 	if err := registry.Register(fake); err != nil {
@@ -382,11 +371,7 @@ func TestChannelIntegration_TC_int_3_UnbindCascadeAndStopResponse(t *testing.T) 
 	issueSvc := newDirectIssueService(testPool)
 	issueFacade := facade.NewIssueFacade(issueSvc)
 	dispatch := newCreateIssueDispatchStep(testPool, registry, issueFacade)
-	pipeline := inbound.NewPipeline(
-		inbound.NewDedupStep(inbound.NewDBDedupStore(queries)),
-		newIdentityBindStep(testPool, registry, binding.NewTokenIssuer(queries)),
-		dispatch,
-	)
+	pipeline := newChannelTestPipeline(testPool, registry, dispatch)
 
 	// 2. Confirm the chat binding exists, then DELETE the workspace and
 	//    confirm CASCADE removed the binding.
@@ -477,7 +462,6 @@ func TestChannelIntegration_TC_int_4_StrangerCannotDispatch(t *testing.T) {
 			`DELETE FROM issue WHERE title = $1`, strangerTitle)
 	})
 
-	queries := db.New(testPool)
 	registry := channel.NewRegistry()
 	fake := newFakeChannel(provider)
 	if err := registry.Register(fake); err != nil {
@@ -487,11 +471,7 @@ func TestChannelIntegration_TC_int_4_StrangerCannotDispatch(t *testing.T) {
 	bindChatToWorkspace(t, provider, externalChatID, port.ChatTypeGroup, testWorkspaceID, testUserID)
 
 	dispatch := newRecordingStep("dispatch")
-	pipeline := inbound.NewPipeline(
-		inbound.NewDedupStep(inbound.NewDBDedupStore(queries)),
-		newIdentityBindStep(testPool, registry, binding.NewTokenIssuer(queries)),
-		dispatch,
-	)
+	pipeline := newChannelTestPipeline(testPool, registry, dispatch)
 
 	evt := port.InboundEvent{
 		ChannelName: provider,
