@@ -15,6 +15,12 @@ var (
 	// ErrChannelNotFound is returned by Get and Unregister when the requested
 	// channel does not exist in the registry.
 	ErrChannelNotFound = errors.New("channel not found")
+
+	// ErrNotImplemented is returned by adapters from optional methods that
+	// have not yet been wired up for a given platform (e.g. SendCard before
+	// T16). Callers MUST check via errors.Is so a future implementation
+	// flipping from "not implemented" to "implemented" is transparent.
+	ErrNotImplemented = errors.New("channel: not implemented")
 )
 
 // Registry holds the set of active port.Channel adapters. It is safe for

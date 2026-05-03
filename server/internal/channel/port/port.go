@@ -1,61 +1,145 @@
 package port
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
-// InboundEvent represents an event received from an external channel (e.g. Slack,
-// Discord, Telegram). It is the common envelope consumed by the channel layer.
+// EventType identifies the kind of inbound event the channel layer is
+// observing. Adapters normalise the platform-specific event names into this
+// closed enum so the dispatcher (T9–T11) does not need to know per-platform
+// vocabulary. New variants are added here, not by passing strings.
+type EventType string
+
+const (
+	// EventTypeMessageReceived is emitted when a user sends a message that the
+	// adapter has decided is addressed to the bot (e.g. an @-mention in a
+	// group, or any direct message). Filtering is the adapter's job — by the
+	// time an InboundEvent of this type leaves Events(), downstream code can
+	// assume the message is intended for processing.
+	EventTypeMessageReceived EventType = "message_received"
+)
+
+// ChatType distinguishes between a one-on-one (direct) chat and a group chat.
+// The dispatcher uses this to apply different policies (e.g. PRD §F7 path
+// rules: "group commands require workspace membership; private chat is
+// reserved for the binding flow and notification delivery").
+type ChatType string
+
+const (
+	// ChatTypeGroup is a multi-user group / channel.
+	ChatTypeGroup ChatType = "group"
+	// ChatTypeDirect is a private 1:1 chat with the bot.
+	ChatTypeDirect ChatType = "direct"
+)
+
+// InboundEvent is the canonical, platform-agnostic envelope every adapter
+// emits on its Events() channel. The shape is deliberately platform-neutral —
+// adapter-specific quirks (e.g. Feishu's @_user_xxx mention markers) are
+// stripped during normalisation so downstream code (intent parsing,
+// dispatching, idempotency) never needs to know which platform an event
+// originated on.
+//
+// Field-level rationale (DESIGN §3.1, §4.1):
+//
+//   - ChannelName matches the registry key (port.Channel.Name()), e.g. "feishu".
+//     It lets the dispatcher route per-platform without a type assertion.
+//   - EventID is the platform's native event id, used as the de-duplication key
+//     by the inbound de-dup table (T6). Adapters must NOT generate their own
+//     uuid here — re-deliveries from the platform's replay buffer must collide
+//     with prior receipts so the dedup table can drop them.
+//   - Text is the user-visible message body with mention markers stripped
+//     (e.g. "@_user_xxx hi" → "hi"). Keeping the canonical form here lets the
+//     intent parser (T9) match against a clean string.
+//   - RawPayload preserves the platform's original JSON for incident
+//     debugging. Type is json.RawMessage rather than `any` so we can log or
+//     re-marshal it without a re-encoding step (and so a nil payload is
+//     trivially distinguishable from an empty object).
 type InboundEvent struct {
-	// Type identifies the event category (e.g. "message", "reaction", "join").
-	Type string
-	// Payload carries the raw event data.
-	Payload any
+	ChannelName string
+	EventID     string
+	Type        EventType
+	ChatID      string
+	ChatType    ChatType
+	SenderID    string
+	SenderName  string
+	Text        string
+	MessageID   string
+	RawPayload  json.RawMessage
 }
 
 // ChatInfo holds metadata about a chat room / channel / thread.
 type ChatInfo struct {
 	ID   string
 	Name string
+	Type ChatType
 }
 
 // UserInfo holds metadata about a user on the external channel.
 type UserInfo struct {
-	ID       string
-	Name     string
-	Username string
+	ID   string
+	Name string
 }
 
 // OutboundMessage is a plain text message to be sent to the external channel.
+// Text is the canonical field name (mirroring InboundEvent.Text) so call sites
+// reading and writing share vocabulary.
 type OutboundMessage struct {
-	ChatID  string
-	Content string
+	ChatID string
+	Text   string
 }
 
-// OutboundCardMessage is a structured (rich) message to be sent to the external
-// channel. Adapters that do not support cards may fall back to text.
+// OutboundCardMessage is a structured (rich) message to be sent to the
+// external channel. Card rendering is T16 — for the M1 MVP, adapters return
+// ErrNotImplemented from SendCard; the field shape is fixed now to avoid
+// churning every channel adapter when card support lands.
 type OutboundCardMessage struct {
-	ChatID  string
-	Title   string
-	Content string
+	ChatID string
+	Title  string
+	Body   string
 }
 
 // SendResult carries the outcome of a Send or SendCard call.
+//
+// PlatformMessageID is the id assigned by the external platform, persisted by
+// the outbound logger (T8) so reactions and edits can be correlated back to
+// the originating Multica event.
+//
+// Retryable signals to the outbound queue whether a transient failure should
+// be re-enqueued (true ⇒ network/5xx-class) or surfaced as a permanent error
+// (false ⇒ client-side / 4xx). The convention removes the need for callers to
+// inspect the underlying error type.
 type SendResult struct {
-	MessageID string
+	PlatformMessageID string
+	Retryable         bool
 }
 
-// Channel is the abstraction over an external messaging platform. Each adapter
-// (Slack, Discord, Telegram, …) implements this interface so the rest of the
-// server can treat channels uniformly.
+// Channel is the abstraction over an external messaging platform. Each
+// adapter (Feishu, Slack, Discord, …) implements this interface so the rest
+// of the server can treat channels uniformly.
 type Channel interface {
-	// Name returns the human-readable channel identifier (e.g. "slack").
+	// Name returns the human-readable channel identifier (e.g. "feishu").
 	Name() string
 
-	// Connect establishes the connection to the external platform.
+	// Connect establishes the connection to the external platform. For
+	// long-lived transports (WebSocket), Connect kicks off the read loop and
+	// returns once the initial handshake completes.
 	Connect(ctx context.Context) error
 
-	// Events returns a receive-only channel of inbound events. The channel must
-	// be closed after Disconnect returns so that downstream consumers terminate
-	// cleanly.
+	// Disconnect tears down the connection. After Disconnect returns, the
+	// channel returned by Events() must be closed so downstream consumers
+	// terminate cleanly.
+	Disconnect(ctx context.Context) error
+
+	// Send delivers a plain text message.
+	Send(ctx context.Context, msg OutboundMessage) (SendResult, error)
+
+	// SendCard delivers a structured / rich message. Adapters that have not
+	// yet implemented cards return ErrNotImplemented (T16).
+	SendCard(ctx context.Context, msg OutboundCardMessage) (SendResult, error)
+
+	// Events returns a receive-only channel of inbound events. The channel
+	// must be closed after Disconnect returns.
 	Events() <-chan InboundEvent
 
 	// GetChatInfo fetches metadata for a chat room.
@@ -63,14 +147,4 @@ type Channel interface {
 
 	// GetUserInfo fetches metadata for a user.
 	GetUserInfo(ctx context.Context, userID string) (UserInfo, error)
-
-	// Send delivers a plain text message.
-	Send(ctx context.Context, msg OutboundMessage) (SendResult, error)
-
-	// SendCard delivers a structured / rich message.
-	SendCard(ctx context.Context, msg OutboundCardMessage) (SendResult, error)
-
-	// Disconnect tears down the connection. After Disconnect returns, the
-	// channel returned by Events() must be closed.
-	Disconnect(ctx context.Context) error
 }
