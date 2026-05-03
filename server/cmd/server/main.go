@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/analytics"
+	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -242,6 +243,10 @@ func main() {
 		slog.Info("realtime: REDIS_URL not set — using in-memory hub (single-node mode)")
 	}
 	registerListeners(bus, broadcaster)
+
+	// M1-T1: channel port registry — assembly point for external messaging adapters.
+	channelRegistry := channel.NewRegistry()
+	_ = channelRegistry // will be wired into router / service layer in future milestones
 
 	analyticsClient := analytics.NewFromEnv()
 	defer analyticsClient.Close()
