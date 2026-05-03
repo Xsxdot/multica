@@ -13,6 +13,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/channel"
+	"github.com/multica-ai/multica/server/internal/channel/leader"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -248,6 +249,41 @@ func main() {
 	channelRegistry := channel.NewRegistry()
 	_ = channelRegistry // will be wired into router / service layer in future milestones
 
+	// M1-T7: Postgres advisory-lock leader election.
+	//
+	// Single-writer coordination for adapters whose upstream platforms
+	// (e.g. Feishu WS) deliver events to exactly one subscriber. The
+	// elector picks one replica per advisory-lock id; non-leaders sit in
+	// a 5s ping loop until the leader's connection drops.
+	//
+	// The OnAcquire / OnRelease callbacks are intentionally stubbed at
+	// the boot site for M1-T7. The real Feishu adapter wiring lands in
+	// a follow-up wiring task (post-T5/T7) once the SDK seam config is
+	// pulled from the environment; until then the elector still runs so
+	// operators can observe leader rotation in pg_locks and confirm the
+	// crash-handover behaviour without requiring Feishu credentials.
+	leaderCtx, leaderCancel := context.WithCancel(context.Background())
+	channelLeader := leader.NewElector(pool, leader.ChannelFeishuLockID, 5*time.Second)
+	channelLeader.OnAcquire(func(ctx context.Context) error {
+		slog.Info("channel leader: acquired", "lock_id", leader.ChannelFeishuLockID)
+		// TODO(T5-wiring): channelRegistry.Get("feishu").Connect(ctx)
+		return nil
+	})
+	channelLeader.OnRelease(func(ctx context.Context) error {
+		slog.Info("channel leader: released", "lock_id", leader.ChannelFeishuLockID)
+		// TODO(T5-wiring): channelRegistry.Get("feishu").Disconnect(ctx)
+		return nil
+	})
+	go func() {
+		if err := channelLeader.Run(leaderCtx); err != nil {
+			// Run only returns non-nil on a structural error (pool /
+			// callback misbehaviour). Log and continue — the server
+			// stays up; the elector is best-effort coordination, not
+			// a critical-path dependency for HTTP traffic.
+			slog.Error("channel leader: run terminated with error", "error", err)
+		}
+	}()
+
 	analyticsClient := analytics.NewFromEnv()
 	defer analyticsClient.Close()
 
@@ -328,6 +364,11 @@ func main() {
 	slog.Info("shutting down server")
 	sweepCancel()
 	autopilotCancel()
+	// Stop the channel leader before HTTP shutdown: OnRelease may want
+	// to send a final "going down" message via the still-up service
+	// layer; doing it after API shutdown would race the http.Server's
+	// drain.
+	leaderCancel()
 
 	apiShutdownCtx, apiShutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := srv.Shutdown(apiShutdownCtx); err != nil {
