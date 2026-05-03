@@ -34,6 +34,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -120,7 +121,7 @@ func TestChannelIntegration_TC_int_1_BindingFlow_EndToEnd(t *testing.T) {
 	// binding link via the fake channel, and leave consumed_at NULL.
 	first := port.InboundEvent{
 		ChannelName: provider,
-		EventID:     "evt_int1_first",
+		EventID:     freshEventID(t, provider, "evt_int1_first"),
 		Type:        port.EventTypeMessageReceived,
 		ChatID:      externalChatID,
 		ChatType:    port.ChatTypeGroup,
@@ -189,7 +190,7 @@ func TestChannelIntegration_TC_int_1_BindingFlow_EndToEnd(t *testing.T) {
 	// and reach dispatch.
 	second := port.InboundEvent{
 		ChannelName: provider,
-		EventID:     "evt_int1_second",
+		EventID:     freshEventID(t, provider, "evt_int1_second"),
 		Type:        port.EventTypeMessageReceived,
 		ChatID:      externalChatID,
 		ChatType:    port.ChatTypeGroup,
@@ -232,6 +233,14 @@ func TestChannelIntegration_TC_int_2_GroupCreatesIssue(t *testing.T) {
 	const externalUserID = "ou_int2_carol"
 	const externalChatID = "oc_int2_chat"
 	const provider = "feishu"
+	// Title is unique per test run so a re-run does not collide on the
+	// "exactly 1 issue" assertion. The Cleanup deletes the row regardless.
+	titleSuffix := fmt.Sprintf("-%d", time.Now().UnixNano())
+	expectedTitle := "integration test creates issue from group" + titleSuffix
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(),
+			`DELETE FROM issue WHERE title = $1`, expectedTitle)
+	})
 
 	queries := db.New(testPool)
 	registry := channel.NewRegistry()
@@ -258,12 +267,12 @@ func TestChannelIntegration_TC_int_2_GroupCreatesIssue(t *testing.T) {
 
 	evt := port.InboundEvent{
 		ChannelName: provider,
-		EventID:     "evt_int2_create",
+		EventID:     freshEventID(t, provider, "evt_int2_create"),
 		Type:        port.EventTypeMessageReceived,
 		ChatID:      externalChatID,
 		ChatType:    port.ChatTypeGroup,
 		SenderID:    externalUserID,
-		Text:        "create issue: integration test creates issue from group",
+		Text:        "create issue: " + expectedTitle,
 		MessageID:   "om_int2_create",
 	}
 	out, err := pipeline.Run(ctx, evt)
@@ -282,22 +291,19 @@ func TestChannelIntegration_TC_int_2_GroupCreatesIssue(t *testing.T) {
 	)
 	if err := testPool.QueryRow(ctx, `
 		SELECT count(*) FROM issue
-		WHERE workspace_id = $1
-		  AND title LIKE 'integration test creates issue from group%'
-	`, testWorkspaceID).Scan(&issueCount); err != nil {
+		WHERE workspace_id = $1 AND title = $2
+	`, testWorkspaceID, expectedTitle).Scan(&issueCount); err != nil {
 		t.Fatalf("count created issues: %v", err)
 	}
 	if issueCount != 1 {
-		t.Fatalf("expected exactly 1 issue created, got %d", issueCount)
+		t.Fatalf("expected exactly 1 issue created with title %q, got %d", expectedTitle, issueCount)
 	}
 
 	if err := testPool.QueryRow(ctx, `
 		SELECT i.number, w.issue_prefix
 		FROM issue i JOIN workspace w ON w.id = i.workspace_id
-		WHERE i.workspace_id = $1
-		  AND i.title LIKE 'integration test creates issue from group%'
-		ORDER BY i.created_at DESC LIMIT 1
-	`, testWorkspaceID).Scan(&latestNumber, &issuePrefix); err != nil {
+		WHERE i.workspace_id = $1 AND i.title = $2
+	`, testWorkspaceID, expectedTitle).Scan(&latestNumber, &issuePrefix); err != nil {
 		t.Fatalf("read created issue identifier: %v", err)
 	}
 	expectedIdent := fmt.Sprintf("%s-%d", issuePrefix, latestNumber)
@@ -336,6 +342,11 @@ func TestChannelIntegration_TC_int_3_UnbindCascadeAndStopResponse(t *testing.T) 
 	const externalChatID = "oc_int3_chat"
 	const provider = "feishu"
 	const wsSlug = "integration-tests-channel-cascade"
+	rejectedTitle := fmt.Sprintf("should be rejected-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(),
+			`DELETE FROM issue WHERE title = $1`, rejectedTitle)
+	})
 
 	// Best-effort cleanup of any leftover from a previous run.
 	cleanupChatBindings(ctx, provider, externalChatID)
@@ -409,12 +420,12 @@ func TestChannelIntegration_TC_int_3_UnbindCascadeAndStopResponse(t *testing.T) 
 	//    WS_NOT_BOUND reply and create no issue rows.
 	evt := port.InboundEvent{
 		ChannelName: provider,
-		EventID:     "evt_int3_orphan",
+		EventID:     freshEventID(t, provider, "evt_int3_orphan"),
 		Type:        port.EventTypeMessageReceived,
 		ChatID:      externalChatID,
 		ChatType:    port.ChatTypeGroup,
 		SenderID:    externalUserID,
-		Text:        "create issue: should be rejected",
+		Text:        "create issue: " + rejectedTitle,
 		MessageID:   "om_int3_orphan",
 	}
 	if _, err := pipeline.Run(ctx, evt); err != nil {
@@ -431,10 +442,9 @@ func TestChannelIntegration_TC_int_3_UnbindCascadeAndStopResponse(t *testing.T) 
 
 	// And no issue rows should have leaked through.
 	var issueCount int
-	if err := testPool.QueryRow(ctx, `
-		SELECT count(*) FROM issue
-		WHERE title LIKE 'should be rejected%'
-	`).Scan(&issueCount); err != nil {
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM issue WHERE title = $1`, rejectedTitle,
+	).Scan(&issueCount); err != nil {
 		t.Fatalf("count post-cascade issues: %v", err)
 	}
 	if issueCount != 0 {
@@ -461,6 +471,11 @@ func TestChannelIntegration_TC_int_4_StrangerCannotDispatch(t *testing.T) {
 	const externalUserID = "ou_int4_eve_stranger"
 	const externalChatID = "oc_int4_chat"
 	const provider = "feishu"
+	strangerTitle := fmt.Sprintf("stranger trying to file-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(),
+			`DELETE FROM issue WHERE title = $1`, strangerTitle)
+	})
 
 	queries := db.New(testPool)
 	registry := channel.NewRegistry()
@@ -480,12 +495,12 @@ func TestChannelIntegration_TC_int_4_StrangerCannotDispatch(t *testing.T) {
 
 	evt := port.InboundEvent{
 		ChannelName: provider,
-		EventID:     "evt_int4_stranger",
+		EventID:     freshEventID(t, provider, "evt_int4_stranger"),
 		Type:        port.EventTypeMessageReceived,
 		ChatID:      externalChatID,
 		ChatType:    port.ChatTypeGroup,
 		SenderID:    externalUserID,
-		Text:        "create issue: stranger trying to file",
+		Text:        "create issue: " + strangerTitle,
 		MessageID:   "om_int4_stranger",
 	}
 	out, err := pipeline.Run(ctx, evt)
@@ -502,9 +517,9 @@ func TestChannelIntegration_TC_int_4_StrangerCannotDispatch(t *testing.T) {
 	// And — defence in depth — no issue with the stranger's title was
 	// created.
 	var issueCount int
-	if err := testPool.QueryRow(ctx, `
-		SELECT count(*) FROM issue WHERE title LIKE 'stranger trying to file%'
-	`).Scan(&issueCount); err != nil {
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM issue WHERE title = $1`, strangerTitle,
+	).Scan(&issueCount); err != nil {
 		t.Fatalf("count post-stranger issues: %v", err)
 	}
 	if issueCount != 0 {

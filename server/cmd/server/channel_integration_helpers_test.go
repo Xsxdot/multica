@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -428,4 +429,28 @@ func cleanupChannelUserBinding(ctx context.Context, provider, externalUserID str
 	_, _ = testPool.Exec(ctx,
 		`DELETE FROM channel_bind_token WHERE provider=$1 AND external_user_id=$2`,
 		provider, externalUserID)
+}
+
+// freshEventID returns a per-run-unique event id with the supplied
+// prefix. The integration tests share the channel_inbound_event_dedup
+// table (a real DB table, not a per-test fixture), so reusing the same
+// "evt_int1_first" string across re-runs of `go test` would have the
+// dedup step short-circuit the pipeline before reaching identity-bind /
+// dispatch. The time.Now().UnixNano() suffix gives us guaranteed
+// uniqueness without needing a UUID dependency.
+//
+// Cleanup is centralised here: every freshEventID call registers a
+// t.Cleanup that deletes the dedup row keyed on (provider, eventID).
+// That keeps the dedup table tidy across test runs and matches the
+// "explicit fixture cleanup" idiom the rest of the cmd/server tests
+// use.
+func freshEventID(t *testing.T, provider, prefix string) string {
+	t.Helper()
+	id := fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(),
+			`DELETE FROM channel_inbound_event_dedup WHERE provider=$1 AND event_id=$2`,
+			provider, id)
+	})
+	return id
 }

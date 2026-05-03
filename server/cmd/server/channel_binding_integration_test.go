@@ -84,7 +84,7 @@ func freshBindToken(t *testing.T, externalUserID string, ttl time.Duration) (pla
 // state.
 func TestChannelBindToken_Consume_Expired_RejectedBySQL(t *testing.T) {
 	if testPool == nil {
-		t.Skip("integration tests skipped: no database")
+		t.Fatal("M1 acceptance test requires a real Postgres (DATABASE_URL); set up the dev DB before running T4 R1 / T8 tests")
 	}
 	plaintext, hash := freshBindToken(t, "ou_test_expired", -1*time.Second)
 
@@ -114,7 +114,7 @@ func TestChannelBindToken_Consume_Expired_RejectedBySQL(t *testing.T) {
 // ErrTokenAlreadyConsumed).
 func TestChannelBindToken_Consume_OneShot(t *testing.T) {
 	if testPool == nil {
-		t.Skip("integration tests skipped: no database")
+		t.Fatal("M1 acceptance test requires a real Postgres (DATABASE_URL); set up the dev DB before running T4 R1 / T8 tests")
 	}
 	plaintext, hash := freshBindToken(t, "ou_test_oneshot", binding.DefaultTokenTTL)
 
@@ -160,7 +160,7 @@ func TestChannelBindToken_Consume_OneShot(t *testing.T) {
 // test will catch it.
 func TestChannelBindToken_Consume_ReplayUnderConcurrency(t *testing.T) {
 	if testPool == nil {
-		t.Skip("integration tests skipped: no database")
+		t.Fatal("M1 acceptance test requires a real Postgres (DATABASE_URL); set up the dev DB before running T4 R1 / T8 tests")
 	}
 	plaintext, _ := freshBindToken(t, "ou_test_replay", binding.DefaultTokenTTL)
 
