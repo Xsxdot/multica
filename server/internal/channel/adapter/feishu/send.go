@@ -1,5 +1,34 @@
 package feishu
 
+// This file owns the outbound text-reply path and the Retryable
+// classification for Send results.
+//
+// Concrete Client implementations communicate "this error is worth retrying"
+// by wrapping the underlying error with RetryableError. The adapter probes
+// that wrapper via errors.As (not errors.Is — the wrapper carries an
+// underlying error, not a sentinel) and surfaces the verdict on
+// SendResult.Retryable. The default for any error not wrapped is "do not
+// retry", which keeps a buggy Client from triggering an infinite send loop
+// in the outbound queue (T15).
+//
+// Usage example for Client implementations:
+//
+//	resp, err := lark.SendMessage(ctx, lark.NewMessageReq().Build())
+//	switch {
+//	case err != nil:
+//	    // Local transport failure (timeout, DNS, TLS reset). Retry.
+//	    return feishu.SendResponse{}, feishu.RetryableError(err)
+//	case resp.Code/100 == 5:
+//	    // Server-side 5xx. Retry.
+//	    return feishu.SendResponse{}, feishu.RetryableError(
+//	        fmt.Errorf("feishu 5xx: code=%d msg=%s", resp.Code, resp.Msg))
+//	case resp.Code != 0:
+//	    // Client-side 4xx (bad request, permission denied, chat not
+//	    // found). Permanent — do NOT wrap.
+//	    return feishu.SendResponse{}, fmt.Errorf("feishu 4xx: code=%d msg=%s", resp.Code, resp.Msg)
+//	}
+//	return feishu.SendResponse{MessageID: resp.Data.MessageID}, nil
+
 import (
 	"context"
 	"encoding/json"
@@ -66,6 +95,10 @@ func (a *Adapter) sendCard(ctx context.Context, _ port.OutboundCardMessage) (por
 // reflects DESIGN §3.1: the Retryable judgement is platform-specific (Feishu
 // 5xx vs 4xx vs token-rotation errors), and pushing the type up would force
 // every other adapter to share Feishu's error vocabulary.
+//
+// We intentionally wrap (not embed a sentinel) so future fields like
+// RetryAfter or PlatformErrorCode can attach without churning callers — they
+// already use errors.As, which sees the typed wrapper regardless of payload.
 type retryableError struct{ inner error }
 
 func (e *retryableError) Error() string { return e.inner.Error() }
@@ -73,7 +106,8 @@ func (e *retryableError) Unwrap() error { return e.inner }
 
 // RetryableError marks an error as worth retrying by the outbound queue.
 // Concrete Client implementations should call this for network errors and
-// 5xx responses; 4xx-class platform errors stay un-marked.
+// 5xx responses; 4xx-class platform errors stay un-marked. See the package
+// doc comment at the top of send.go for a worked usage example.
 func RetryableError(err error) error {
 	if err == nil {
 		return nil

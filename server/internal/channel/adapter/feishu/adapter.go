@@ -119,6 +119,21 @@ func (a *Adapter) Connect(ctx context.Context) error {
 // Disconnect implements port.Channel. After it returns, Events()' channel is
 // closed. It is safe to call multiple times — only the first call performs
 // the teardown; subsequent calls return nil immediately.
+//
+// Teardown order is load-bearing — do NOT reorder these steps:
+//
+//  1. Cancel the pump's context. The pump's outer select wakes and exits
+//     before reading another RawEvent.
+//  2. Stop the seam Client. Stop closes the Subscribe() channel, which is
+//     the upstream of the pump's read loop.
+//  3. Wait on pumpWG. The goroutine has now either exited via the context
+//     branch or via the closed-channel branch.
+//  4. Close `out`. By step 3 the pump can no longer send into it, so this
+//     close is race-free.
+//
+// Reordering 3 and 4 would re-introduce the classic "send on closed channel"
+// panic the WaitGroup is here to prevent (the pump might still be inside
+// `case a.out <- ev:` when close runs).
 func (a *Adapter) Disconnect(ctx context.Context) error {
 	a.mu.Lock()
 	if a.stopped {
@@ -130,24 +145,23 @@ func (a *Adapter) Disconnect(ctx context.Context) error {
 	started := a.started
 	a.mu.Unlock()
 
-	// Cancelling the pump context wakes the pump goroutine so it exits
-	// without waiting for one more event from Subscribe(). We then call
-	// Client.Stop, which closes the Subscribe channel — order matters:
-	// cancel first so the pump cannot read a half-closed channel.
+	// Step 1: wake the pump goroutine so it does not read one more event
+	// from Subscribe before noticing the shutdown.
 	if cancel != nil {
 		cancel()
 	}
+	// Step 2: tear down the upstream. Stop closes Subscribe()'s channel,
+	// giving the pump a second exit path if it was already blocked on a
+	// receive when we cancelled.
 	var stopErr error
 	if started {
 		stopErr = a.client.Stop(ctx)
 	}
 
-	// Wait for the pump goroutine to finish before closing `out`. Closing
-	// `out` while the pump might still write into it would panic (send on
-	// closed channel) — TC-port-3's 1s timeout would fire as a flake but
-	// the underlying bug would be a goroutine race. Joining first
-	// eliminates the race window entirely.
+	// Step 3: join. Once Wait returns, the pump goroutine is guaranteed
+	// to have exited and cannot send into `out` again.
 	a.pumpWG.Wait()
+	// Step 4: now safe to close the fan-out channel.
 	close(a.out)
 	return stopErr
 }

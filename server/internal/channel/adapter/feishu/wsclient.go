@@ -30,52 +30,91 @@ import (
 // interface — so swapping in a fake (or, later, a different SDK version) is a
 // single dependency-injection change.
 //
-// Lifecycle:
+// Implementations must satisfy two cross-cutting contracts:
 //
-//   - Start opens the WebSocket long connection and begins delivering events
-//     on Subscribe(). It must return only after the initial handshake
-//     succeeds (or fail fast on auth errors). Reconnect / replay is the
-//     concrete implementation's responsibility (PRD AC2.1: 30s outage with
-//     no message loss is delivered by the SDK's replay buffer; T7 wires
-//     reconnect alarms).
-//   - Stop closes the events channel returned by Subscribe so downstream
-//     `for range` consumers terminate cleanly.
-//   - Subscribe returns the same channel across calls; emitting on a closed
-//     channel after Stop is a programming error.
-//   - SendMessage is synchronous — the caller (Adapter.Send) translates the
-//     response into a port.SendResult, including the Retryable judgement.
+//   - Concurrency: every method (except Subscribe, which only returns a
+//     pre-existing channel) must be safe to call from a different goroutine
+//     than the one currently consuming Subscribe(). The adapter's pump and
+//     Send paths run independently.
+//   - Error classification: SendMessage callers (currently Adapter.sendText)
+//     read Retryable off the returned error via errors.As against the
+//     concrete retryableError type produced by RetryableError(err). Wrap
+//     transient errors (5xx, network resets, token-rotation in flight) with
+//     RetryableError; leave 4xx-class errors un-wrapped. Mis-classifying
+//     here can cause infinite send loops in the outbound queue (T15).
 //
 // All DTOs (RawEvent, SendRequest, …) are defined alongside the interface so
 // test doubles only need to import this one package.
 type Client interface {
-	// Start establishes the platform connection. Idempotent: calling Start
-	// twice on the same Client returns nil the second time.
+	// Start opens the WebSocket long connection (and any other transport
+	// the SDK needs) and begins delivering events on Subscribe(). It must
+	// return only after the initial handshake succeeds, and fail fast on
+	// auth / config errors so the caller can surface a meaningful boot
+	// error instead of an opaque "no events ever arrive".
+	//
+	// Reconnect / replay is the implementation's responsibility. PRD AC2.1
+	// requires no message loss across a 30s outage, which the SDK delivers
+	// via its replay buffer; the wiring task (T7) attaches reconnect
+	// alarms / metrics on top.
+	//
+	// Idempotency: calling Start twice on the same Client must return nil
+	// the second time without re-opening the connection.
 	Start(ctx context.Context) error
 
-	// Stop tears down the platform connection. After Stop returns,
-	// Subscribe()'s channel is closed.
+	// Stop tears down the platform connection. After Stop returns, the
+	// channel returned by Subscribe() must be closed so downstream
+	// `for range` consumers terminate cleanly. Stop is the only place
+	// allowed to close that channel.
+	//
+	// Idempotency: calling Stop twice must return nil the second time;
+	// the second close is a no-op (closing an already-closed Go channel
+	// would panic).
 	Stop(ctx context.Context) error
 
 	// Subscribe returns the receive-only event stream. The same channel
-	// must be returned across calls (callers may cache the reference).
+	// must be returned across calls (callers may cache the reference and
+	// loop on it), and the channel must be created before Start returns
+	// so a goroutine that captures the reference before Start cannot
+	// observe a nil channel.
+	//
+	// Sending on the channel after Stop closes it is a programming error
+	// in the implementation, not a recoverable runtime condition.
 	Subscribe() <-chan RawEvent
 
 	// BotUserID returns the open_id of the bot account. The adapter uses
 	// this to recognise and strip @-mentions of itself from incoming text
 	// (Issue 关键实现要点 §4: "@_user_<bot_id>" must not survive into
 	// InboundEvent.Text).
+	//
+	// May be called before Start has fully completed (e.g. from a test
+	// fake) — implementations that learn the id only after handshake
+	// should block here, not return a stale empty string.
 	BotUserID() string
 
 	// SendMessage POSTs an im.v1.messages.create request to the Feishu
-	// OpenAPI. The error returned must be classifiable by IsRetryable so
-	// the adapter can populate SendResult.Retryable correctly.
+	// OpenAPI. The returned SendResponse.MessageID is surfaced as
+	// port.SendResult.PlatformMessageID; an empty MessageID with a nil
+	// error is a contract violation (the adapter treats it as a
+	// non-retryable failure).
+	//
+	// Errors must be classifiable: wrap transient ones with
+	// RetryableError so Adapter.sendText can populate
+	// SendResult.Retryable=true. Anything not wrapped is treated as a
+	// permanent failure.
 	SendMessage(ctx context.Context, req SendRequest) (SendResponse, error)
 
-	// GetChatInfo / GetUserInfo fetch metadata used by downstream commands
-	// (e.g. binding flow, intent disambiguation). MVP only requires the
-	// minimum surface; richer fields can be added without breaking tests
-	// because the adapter projects this DTO into port.ChatInfo / UserInfo.
+	// GetChatInfo fetches metadata for a chat room. Used by downstream
+	// commands (binding flow, intent disambiguation). MVP only requires
+	// the minimum surface; richer fields can be added without breaking
+	// tests because the adapter projects this DTO into port.ChatInfo.
+	//
+	// Returning an error for an unknown chat_id is acceptable —
+	// downstream code already needs to handle "chat not found" for stale
+	// references after a workspace unbind.
 	GetChatInfo(ctx context.Context, chatID string) (ChatInfoResponse, error)
+
+	// GetUserInfo fetches metadata for a user. Same minimum-surface rules
+	// as GetChatInfo apply — the adapter projects into port.UserInfo.
 	GetUserInfo(ctx context.Context, userID string) (UserInfoResponse, error)
 }
 
