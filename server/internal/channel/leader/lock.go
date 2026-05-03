@@ -98,12 +98,14 @@ func NewElector(pool *pgxpool.Pool, lockID int64, pingInterval time.Duration) *E
 
 // OnAcquire registers the callback fired when this Elector becomes the
 // leader. The callback runs on the same goroutine as Run, so a long /
-// blocking callback delays IsLeader() observers from seeing the
-// transition; if the callback itself wants to start its own goroutines,
-// it must do so explicitly. Callback errors are logged via the returned
-// error from Run but do not cause the leader to release — once Postgres
-// has handed us the lock, releasing it on application-level errors only
-// causes thrash without recovering from the underlying problem.
+// blocking callback delays nothing observable to outside watchers
+// (IsLeader is already true by the time it fires) but does delay the
+// Run goroutine's progress. If the callback wants to start its own
+// goroutines, it must do so explicitly. A non-nil error from the
+// callback is surfaced via Run's return value AFTER the lock is
+// released; it does NOT cause the leader to release early — see
+// holdLeadership for the rationale (failure thrash vs. localising the
+// alarm).
 func (e *Elector) OnAcquire(fn Callback) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -111,10 +113,12 @@ func (e *Elector) OnAcquire(fn Callback) {
 }
 
 // OnRelease registers the callback fired when this Elector relinquishes
-// leadership (context cancelled, or — in a future enhancement — its
-// connection drops). It is called BEFORE the Postgres unlock so the
-// adapter has a chance to drain in-flight work while the lock still
-// names this process as the holder.
+// leadership (context cancelled). It is called BEFORE pg_advisory_unlock
+// so the adapter can drain in-flight work or send a "going down"
+// message while the lock still names this process as the holder. The
+// callback receives a fresh context with a 5-second deadline — Run's
+// outer ctx is by definition cancelled by the time we get here, so
+// reusing it would abort any I/O the callback attempts.
 func (e *Elector) OnRelease(fn Callback) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -203,14 +207,14 @@ func (e *Elector) tryAcquire(ctx context.Context) (bool, *pgxpool.Conn, error) {
 // term. The release path is the most subtle part of the package — see
 // inline comments.
 func (e *Elector) holdLeadership(ctx context.Context, conn *pgxpool.Conn) error {
-	// Fire OnAcquire before flipping the leader flag, but after the lock
-	// is held: a watcher reading IsLeader() right after seeing the
-	// adapter's connect side-effect would otherwise read false. We
-	// invert this and set the flag first; ordering is "lock held →
-	// flag flipped → callback runs". A racer that polls IsLeader will
-	// see leader=true momentarily before the callback completes; that
-	// is acceptable because IsLeader documents "holds the lock", which
-	// is true the instant pg_try_advisory_lock returned true.
+	// Order: lock held (caller's invariant) → flag flipped → callback runs.
+	// The flag is set BEFORE OnAcquire so a watcher polling IsLeader
+	// sees true the instant Postgres handed us the lock, matching the
+	// godoc contract ("holds the lock"). A racer that polls between
+	// the flag flip and OnAcquire's first side effect sees the lock
+	// held without the side effect yet — that is intentional, since
+	// "I have the lock but my Connect is mid-flight" is the honest
+	// state of the world for those few microseconds.
 	e.leader.Store(true)
 
 	e.mu.Lock()
@@ -275,29 +279,29 @@ func (e *Elector) holdLeadership(ctx context.Context, conn *pgxpool.Conn) error 
 	}
 
 	unlockCtx, cancelUnlock := context.WithTimeout(context.Background(), 5*time.Second)
-	if _, unlockErr := conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", e.lockID); unlockErr != nil {
-		cancelUnlock()
-		conn.Release()
-		// Compose: a callback error is the more actionable signal
-		// (something the operator can fix), so prefer it when
-		// present.
-		switch {
-		case acquireErr != nil:
-			return errors.Join(fmt.Errorf("leader: on-acquire: %w", acquireErr), unlockErr, releaseErr)
-		case releaseErr != nil:
-			return errors.Join(fmt.Errorf("leader: on-release: %w", releaseErr), unlockErr)
-		default:
-			return fmt.Errorf("leader: pg_advisory_unlock: %w", unlockErr)
-		}
-	}
-	cancelUnlock()
+	defer cancelUnlock()
+	_, unlockErr := conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", e.lockID)
 	conn.Release()
 
-	switch {
-	case acquireErr != nil:
-		return fmt.Errorf("leader: on-acquire: %w", acquireErr)
-	case releaseErr != nil:
-		return fmt.Errorf("leader: on-release: %w", releaseErr)
+	// Aggregate every non-nil error from the acquire/release lifecycle.
+	// errors.Join with a single non-nil arg returns that arg; with all
+	// nils it returns nil; with several it returns a wrapper whose
+	// Unwrap() []error preserves each one for downstream errors.Is /
+	// errors.As. This avoids the previous nested switch's tendency to
+	// silently drop releaseErr when acquireErr was also set.
+	var (
+		wrapAcquire error
+		wrapRelease error
+		wrapUnlock  error
+	)
+	if acquireErr != nil {
+		wrapAcquire = fmt.Errorf("leader: on-acquire: %w", acquireErr)
 	}
-	return nil
+	if releaseErr != nil {
+		wrapRelease = fmt.Errorf("leader: on-release: %w", releaseErr)
+	}
+	if unlockErr != nil {
+		wrapUnlock = fmt.Errorf("leader: pg_advisory_unlock: %w", unlockErr)
+	}
+	return errors.Join(wrapAcquire, wrapRelease, wrapUnlock)
 }
