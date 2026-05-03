@@ -9,19 +9,25 @@ import (
 // This file holds the Step implementations whose real behaviour lives
 // outside T6:
 //
-//   - identity-bind  → T8 (looks up channel_user_binding, pushes the
-//                          one-shot binding link via the registry on miss)
-//   - intent-recog   → T9–T10 (parses the user message into IntentKind)
-//   - dispatch       → T11 (routes IntentKind to the appropriate handler)
-//   - reply          → T11 (telemetry / reply finalisation)
+//   - identity-bind  → T8 (looks up channel_user_binding; on miss,
+//                          issues a binding token via
+//                          binding.TokenIssuer and pushes the one-shot
+//                          link via channel.Registry.Get(provider).Send)
+//   - intent-recog   → T9–T10 (parses the user message into IntentKind
+//                              per PRD F5)
+//   - dispatch       → T11 (routes IntentKind to the appropriate
+//                            facade.IssueFacade / facade.CommentFacade
+//                            handler)
+//   - reply          → T11 (finalises telemetry / log lines after
+//                            dispatch has produced its output)
 //
 // In M1 every one of these is a no-op that returns Continue, so the
 // pipeline orchestration (Pipeline.Run, dedup short-circuit, the named
 // telemetry labels carried in Outcome.Terminal) can be exercised end
-// to end before the real logic lands. Replacing one of these with a
-// real implementation in a later milestone requires zero changes to
-// pipeline.go — the wiring code in cmd/server/main.go simply swaps
-// the constructor.
+// to end before the real logic lands. The Step interface is the only
+// surface the wiring code (cmd/server/main.go) couples against:
+// replacing a placeholder is a one-line constructor swap there, with
+// zero changes to pipeline.go or to upstream Steps.
 //
 // The four placeholders share the same passthrough shape, so they're
 // all built from a tiny common type rather than duplicated.
@@ -70,3 +76,8 @@ func NewDispatchStep() Step { return passthroughStep{name: "dispatch"} }
 // after dispatch has produced its output; in M1 it is a no-op so
 // Pipeline.Run can declare a stable terminal step name.
 func NewReplyStep() Step { return passthroughStep{name: "reply"} }
+
+// Compile-time interface conformance for the placeholder shape. A
+// drift in the Step signature (e.g. an added Run argument) surfaces
+// here rather than at every call site.
+var _ Step = passthroughStep{}

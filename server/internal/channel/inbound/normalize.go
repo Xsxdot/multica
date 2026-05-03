@@ -30,3 +30,6 @@ func (normalizeStep) Run(_ context.Context, evt port.InboundEvent) (port.Inbound
 	}
 	return evt, DecisionContinue, nil
 }
+
+// Compile-time interface conformance.
+var _ Step = (*normalizeStep)(nil)

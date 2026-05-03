@@ -93,8 +93,28 @@ func NewDBDedupStore(q dbQueriesTryRecorder) DedupStore {
 }
 
 // TryRecordInboundEvent translates between the sqlc :one return shape
-// (a returned row on insert, pgx.ErrNoRows on conflict) and the bool
-// the Step contract uses.
+// and the bool the Step contract uses. There are exactly three branches
+// the underlying query can take, mapped here as follows:
+//
+//   - Insert succeeded (the row was new). sqlc returns the
+//     processed_at timestamptz from RETURNING + a nil error. We
+//     translate to (true, nil).
+//
+//   - ON CONFLICT DO NOTHING fired (the row already existed, i.e. the
+//     platform replayed an event we have processed before). sqlc's
+//     :one wrapper sees zero rows from RETURNING and surfaces it as
+//     pgx.ErrNoRows. We translate to (false, nil) — the caller's
+//     "duplicate, skip the rest of the pipeline" path.
+//
+//   - Anything else (driver / network / constraint failures). We
+//     surface the underlying error so the dedup Step can propagate
+//     it and the pipeline can abort, rather than silently dropping
+//     the event.
+//
+// The pgx.ErrNoRows handling is the entire reason this adapter
+// exists: keeping it confined here means the dedup Step itself
+// (and every other file in the inbound package) stays free of pgx
+// imports.
 func (s *dbDedupStore) TryRecordInboundEvent(ctx context.Context, provider, eventID string) (bool, error) {
 	_, err := s.q.TryRecordInboundEvent(ctx, db.TryRecordInboundEventParams{
 		Provider: provider,
@@ -108,3 +128,11 @@ func (s *dbDedupStore) TryRecordInboundEvent(ctx context.Context, provider, even
 	}
 	return false, err
 }
+
+// Compile-time interface conformance: a clear compile-time error here
+// is friendlier than a confusing one at every call site if a method
+// signature drifts.
+var (
+	_ Step       = (*dedupStep)(nil)
+	_ DedupStore = (*dbDedupStore)(nil)
+)

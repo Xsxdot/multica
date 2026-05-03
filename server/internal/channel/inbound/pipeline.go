@@ -87,10 +87,30 @@ func NewPipeline(steps ...Step) *Pipeline {
 	return &Pipeline{steps: cp}
 }
 
-// Run executes each Step in order, threading the event through them.
-// It stops at the first Step that returns DecisionSkip or a non-nil
-// error. On error, the returned Outcome is the zero value and the
-// caller must inspect only the error.
+// Run executes each Step in order, threading the (possibly mutated)
+// event from one Step into the next. The loop has three exit paths:
+//
+//  1. A Step returns a non-nil error — Run aborts immediately and
+//     returns (Outcome{}, err). The zero Outcome is intentional: error
+//     and Outcome are mutually exclusive return channels, so callers
+//     can write `out, err := p.Run(...); if err != nil { ... }; use out`
+//     without worrying that a partially-populated Outcome from the
+//     failed step might leak into success-path code.
+//
+//  2. A Step returns DecisionSkip — Run terminates cleanly with the
+//     Outcome describing which Step short-circuited (Outcome.Terminal
+//     == s.Name(), Outcome.Decision == DecisionSkip). The remaining
+//     Steps are not invoked.
+//
+//  3. Every Step returns DecisionContinue — Run completes the loop and
+//     returns the final Outcome (Terminal == last Step's Name(),
+//     Decision == DecisionContinue).
+//
+// `evt` is rebound on each iteration so a Step can mutate the event
+// in-flight (e.g. identity-bind enriching SenderID with a Multica user
+// id, once that step grows real behaviour in T8); the rebinding is
+// the entire mechanism by which downstream Steps see upstream
+// modifications.
 func (p *Pipeline) Run(ctx context.Context, evt port.InboundEvent) (Outcome, error) {
 	var (
 		outcome Outcome
