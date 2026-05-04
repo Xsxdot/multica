@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -342,24 +343,33 @@ func TestLLMClassifier_Metrics_TokenUsage(t *testing.T) {
 	if collector.tokens != 456 {
 		t.Errorf("reported tokens = %d, want 456", collector.tokens)
 	}
-	if collector.source != in.SourceLLM {
-		t.Errorf("source = %q, want %q", collector.source, in.SourceLLM)
+	if collector.getSource() != in.SourceLLM {
+		t.Errorf("source = %q, want %q", collector.getSource(), in.SourceLLM)
 	}
 }
 
 // --- FakeCollector for testing ---
 
 type fakeCollector struct {
+	mu     sync.Mutex
 	tokens int64
 	source in.IntentSource
 }
 
 func (c *fakeCollector) RecordTokenUsed(tokens int64, source in.IntentSource) {
 	atomic.StoreInt64(&c.tokens, tokens)
+	c.mu.Lock()
 	c.source = source
+	c.mu.Unlock()
 }
 
 func (c *fakeCollector) RecordQuotaExhausted() {}
+
+func (c *fakeCollector) getSource() in.IntentSource {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.source
+}
 
 // --- Helpers ---
 
