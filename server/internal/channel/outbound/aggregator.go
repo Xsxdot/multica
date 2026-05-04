@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -25,7 +26,7 @@ var (
 	})
 	droppedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "channel_outbound_dropped_total",
-		Help: "Total number of notifications dropped (buffer overflow, stop, etc).",
+		Help: "Total number of notifications dropped (buffer overflow, stop, send error, etc).",
 	})
 	metricsOnce sync.Once
 )
@@ -38,9 +39,16 @@ func registerMetrics() {
 
 // CardSender is the interface used by the Aggregator to deliver merged
 // card messages. The channel adapter (or a thin wrapper) typically
-// implements this.
+// implements this. SendCard returns an error on transient failures so
+// the aggregator can log and count dropped messages.
 type CardSender interface {
-	SendCard(externalUserID string, card port.OutboundCardMessage)
+	SendCard(externalUserID string, card port.OutboundCardMessage) error
+}
+
+// pendingCard is a card ready to be sent outside the lock.
+type pendingCard struct {
+	externalUserID string
+	card           port.OutboundCardMessage
 }
 
 // notification is a single pending outbound notification for a user.
@@ -83,21 +91,50 @@ func NewAggregator(sender CardSender, interval time.Duration) *Aggregator {
 	}
 }
 
+// sendCardSafe calls sender.SendCard with panic recovery and error
+// handling. On error or panic the notification is counted as dropped
+// and logged. (C1-new, R4-new)
+func sendCardSafe(sender CardSender, externalUserID string, card port.OutboundCardMessage) {
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("outbound aggregator: send card panic",
+					"user_id", externalUserID,
+					"title", card.Title,
+					"panic", r,
+				)
+				droppedTotal.Inc()
+			}
+		}()
+		err = sender.SendCard(externalUserID, card)
+	}()
+	if err != nil {
+		slog.Error("outbound aggregator: send card failed",
+			"user_id", externalUserID,
+			"title", card.Title,
+			"error", err,
+		)
+		droppedTotal.Inc()
+		// TODO(T15): enqueue to failure queue for retry
+	}
+}
+
 // Add enqueues a notification for the given external user. If bypass is
 // true the notification is sent immediately without buffering (for P0 /
-// urgent events). If the user's buffer reaches MaxBufferSize the buffer
-// is flushed immediately and the new notification starts a fresh buffer.
+// urgent events). If the user's buffer exceeds MaxBufferSize the buffer
+// is flushed immediately and the new notification is sent directly.
 func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, bypass bool) {
 	if bypass {
-		a.sender.SendCard(externalUserID, card)
+		sendCardSafe(a.sender, externalUserID, card)
 		aggregatedTotal.Inc()
 		return
 	}
 
 	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	if a.closed {
+		a.mu.Unlock()
 		droppedTotal.Inc()
 		return
 	}
@@ -116,9 +153,7 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 		body:  card.Body,
 	})
 
-	// Buffer limit exceeded — flush immediately. The 51st notification
-	// triggers a flush of the existing 50 items, then this notification
-	// is sent directly (not buffered).
+	// Buffer limit exceeded — prepare both cards, then unlock and send.
 	if len(buf.items) > MaxBufferSize {
 		// Pop the last item (the 51st) — it will be sent directly.
 		lastIdx := len(buf.items) - 1
@@ -128,11 +163,18 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 		}
 		buf.items = buf.items[:lastIdx]
 
-		// Flush the buffered 50 items (acquires/releases lock internally).
-		a.flushUserLocked(externalUserID, buf)
+		// Prepare the merged card (50 items) — deletes buffer from map.
+		merged := prepareMerge(externalUserID, buf)
 
-		// Send the 51st notification immediately (not buffered).
-		a.sender.SendCard(externalUserID, port.OutboundCardMessage{
+		a.mu.Unlock()
+
+		// Send merged card (50 items) then the 51st — both outside the lock.
+		if merged != nil {
+			sendCardSafe(a.sender, merged.externalUserID, merged.card)
+			aggregatedTotal.Inc()
+		}
+
+		sendCardSafe(a.sender, externalUserID, port.OutboundCardMessage{
 			ChatID: externalUserID,
 			Title:  last.title,
 			Body:   last.body,
@@ -140,21 +182,32 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 		aggregatedTotal.Inc()
 		return
 	}
+
+	a.mu.Unlock()
 }
 
-// flushUser is called by the timer goroutine. It acquires the lock and
-// delegates to flushUserLocked.
+// flushUser is called by the timer goroutine. It acquires the lock,
+// prepares the merged card, then sends it outside the lock.
 func (a *Aggregator) flushUser(externalUserID string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.flushUserLocked(externalUserID, a.buffers[externalUserID])
+	pending := prepareMerge(externalUserID, a.buffers[externalUserID])
+	a.mu.Unlock()
+
+	if pending == nil {
+		return
+	}
+
+	sendCardSafe(a.sender, pending.externalUserID, pending.card)
+	aggregatedTotal.Inc()
 }
 
-// flushUserLocked merges buffered notifications into a single card and
-// sends it. Must be called with a.mu held.
-func (a *Aggregator) flushUserLocked(externalUserID string, buf *userBuffer) {
+// prepareMerge extracts a merged card from the user's buffer and removes
+// the buffer from the map. Returns nil if the buffer is empty or nil.
+// Must be called with a.mu held. Does NOT send the card — the caller
+// sends it after releasing the lock. (R1-new, R2-new)
+func prepareMerge(externalUserID string, buf *userBuffer) *pendingCard {
 	if buf == nil || len(buf.items) == 0 {
-		return
+		return nil
 	}
 
 	// Stop the timer if it hasn't fired yet (e.g. called from buffer limit).
@@ -166,21 +219,14 @@ func (a *Aggregator) flushUserLocked(externalUserID string, buf *userBuffer) {
 	count := len(buf.items)
 	mergedBody := buildMergedBody(buf.items)
 
-	// Clear the buffer before releasing the lock.
-	delete(a.buffers, externalUserID)
-	a.mu.Unlock()
-
-	mergedCard := port.OutboundCardMessage{
-		ChatID: externalUserID,
-		Title:  fmt.Sprintf("你有 %d 条新通知", count),
-		Body:   mergedBody,
+	return &pendingCard{
+		externalUserID: externalUserID,
+		card: port.OutboundCardMessage{
+			ChatID: externalUserID,
+			Title:  fmt.Sprintf("你有 %d 条新通知", count),
+			Body:   mergedBody,
+		},
 	}
-
-	a.sender.SendCard(externalUserID, mergedCard)
-	aggregatedTotal.Add(float64(count))
-
-	// Re-acquire the lock for the caller.
-	a.mu.Lock()
 }
 
 // buildMergedBody concatenates notification titles and bodies into a
@@ -219,7 +265,7 @@ func (a *Aggregator) Stop() {
 			if buf.timer != nil {
 				buf.timer.Stop()
 			}
-			droppedTotal.Add(float64(len(buf.items)))
+			droppedTotal.Inc()
 		}
 		a.buffers = make(map[string]*userBuffer)
 	})
