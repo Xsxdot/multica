@@ -133,6 +133,19 @@ func (w *RetryWorker) Run(ctx context.Context) {
 }
 
 // processBatch claims and processes a batch of pending failures.
+//
+// TOCTOU (T4 Rec-3 in retry context): the claim-then-update sequence is
+// atomic at the SQL level: ClaimPendingOutboundFailures is a single
+// UPDATE...WHERE id IN (SELECT...FOR UPDATE SKIP LOCKED) statement, so
+// the row is locked and a 5-minute cooldown is written in the same
+// statement. Subsequent IncrementOutboundFailureAttempts / MarkOutbound
+// FailureDead / DeleteOutboundFailure each run as their own statement;
+// they target a single id by primary key, so a race against another
+// replica is impossible (the row is either still present and we update
+// it, or already updated by us via the claim and we update again — both
+// idempotent in our usage). Cleanup's separate DELETE pass only touches
+// rows where status='dead' AND created_at < now()-7d, which we never
+// touch from this worker.
 func (w *RetryWorker) processBatch(ctx context.Context) {
 	failures, err := w.store.ClaimPendingOutboundFailures(ctx, RetryBatchSize)
 	if err != nil {
