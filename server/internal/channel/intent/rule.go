@@ -11,6 +11,8 @@ type IntentSource string
 const (
 	// SourceRule means the regex rule engine produced this intent.
 	SourceRule IntentSource = "rule"
+	// SourceLLM means the LLM fallback produced this intent.
+	SourceLLM IntentSource = "llm"
 )
 
 // IntentKind is the high-level command category per PRD F5 / outbound tests.
@@ -23,6 +25,7 @@ const (
 	IntentSetStatus   IntentKind = "SetStatus"
 	IntentUnsupported IntentKind = "Unsupported"
 	IntentUnknown     IntentKind = "Unknown"
+	IntentASKClarify  IntentKind = "ASK_CLARIFY"
 )
 
 // Intent is the rule engine output attached to an inbound message before
