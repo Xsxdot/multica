@@ -4,7 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { notificationPreferenceOptions } from "@multica/core/notification-preferences/queries";
 import { useUpdateNotificationPreferences } from "@multica/core/notification-preferences/mutations";
-import type { ChannelPreferences, NotificationGroupKey, NotificationPreferences } from "@multica/core/types";
+import type { ChannelPreferences, FeishuEventKey, NotificationGroupKey, NotificationPreferences } from "@multica/core/types";
+import { isFeishuEventEnabled } from "@multica/core/types";
 import { Card, CardContent } from "@multica/ui/components/ui/card";
 import { Switch } from "@multica/ui/components/ui/switch";
 import { toast } from "sonner";
@@ -42,7 +43,7 @@ const notificationGroups: {
 ];
 
 const feishuNotificationTypes: {
-  key: "issues" | "comments" | "mentions";
+  key: FeishuEventKey;
   label: string;
   description: string;
 }[] = [
@@ -84,7 +85,7 @@ export function NotificationsTab() {
     });
   };
 
-  const handleFeishuToggle = (key: "issues" | "comments" | "mentions", enabled: boolean) => {
+  const handleFeishuToggle = (key: FeishuEventKey, enabled: boolean) => {
     const currentFeishu = preferences.channel?.feishu ?? {};
     const updatedFeishu = { ...currentFeishu, [key]: enabled };
 
@@ -109,8 +110,6 @@ export function NotificationsTab() {
       onError: () => toast.error("Failed to update Feishu notification settings"),
     });
   };
-
-  const feishuPrefs = preferences.channel?.feishu ?? {};
 
   return (
     <div className="space-y-6">
@@ -164,7 +163,10 @@ export function NotificationsTab() {
         <Card>
           <CardContent className="divide-y">
             {feishuNotificationTypes.map((type) => {
-              const enabled = feishuPrefs[type.key] !== false;
+              // R4: route through the shared helper rather than inlining
+              // the "missing === enabled" rule, so the UI cannot drift
+              // from the backend default contract.
+              const enabled = isFeishuEventEnabled(preferences, type.key);
               return (
                 <div
                   key={type.key}
