@@ -264,6 +264,9 @@ func (h *Handler) UpdateNotificationPreferences(w http.ResponseWriter, r *http.R
 				append(logger.RequestAttrs(r), "error", uerr)...)
 			merged = map[string]any{}
 		}
+		if merged == nil {
+			merged = map[string]any{}
+		}
 	case errors.Is(err, pgx.ErrNoRows):
 		merged = map[string]any{}
 	default:
@@ -271,9 +274,6 @@ func (h *Handler) UpdateNotificationPreferences(w http.ResponseWriter, r *http.R
 			append(logger.RequestAttrs(r), "error", err)...)
 		writeError(w, http.StatusInternalServerError, "failed to load existing preferences")
 		return
-	}
-	if merged == nil {
-		merged = make(map[string]any)
 	}
 	merged = mergePreferences(merged, req.Preferences)
 
