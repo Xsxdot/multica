@@ -105,6 +105,8 @@ func sendCardSafe(sender CardSender, externalUserID string, card port.OutboundCa
 					"panic", r,
 				)
 				droppedTotal.Inc()
+				// TODO(T15): panic'd sends are likely unrecoverable;
+				// decide whether to enqueue or permanently drop.
 			}
 		}()
 		err = sender.SendCard(externalUserID, card)
@@ -163,9 +165,9 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 		}
 		buf.items = buf.items[:lastIdx]
 
-		// Prepare the merged card (50 items) — deletes buffer from map.
-		merged := prepareMerge(externalUserID, buf)
-		delete(a.buffers, externalUserID)
+		// Drain the buffer (now 50 items) into a merged card and remove
+		// the entry from the map so the next Add starts a fresh window.
+		merged := a.prepareMerge(externalUserID)
 
 		a.mu.Unlock()
 
@@ -191,8 +193,7 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 // prepares the merged card, then sends it outside the lock.
 func (a *Aggregator) flushUser(externalUserID string) {
 	a.mu.Lock()
-	pending := prepareMerge(externalUserID, a.buffers[externalUserID])
-	delete(a.buffers, externalUserID)
+	pending := a.prepareMerge(externalUserID)
 	a.mu.Unlock()
 
 	if pending == nil {
@@ -203,12 +204,16 @@ func (a *Aggregator) flushUser(externalUserID string) {
 	aggregatedTotal.Inc()
 }
 
-// prepareMerge extracts a merged card from the user's buffer and removes
-// the buffer from the map. Returns nil if the buffer is empty or nil.
+// prepareMerge drains the buffer for externalUserID into a merged card
+// and removes the entry from a.buffers, ensuring subsequent Adds for
+// the same user start a fresh aggregation window. Returns nil if the
+// buffer is missing or empty.
+//
 // Must be called with a.mu held. Does NOT send the card — the caller
-// sends it after releasing the lock. (R1-new, R2-new)
-func prepareMerge(externalUserID string, buf *userBuffer) *pendingCard {
-	if buf == nil || len(buf.items) == 0 {
+// sends it after releasing the lock. (R1-new, R2-new, C1-r3)
+func (a *Aggregator) prepareMerge(externalUserID string) *pendingCard {
+	buf, ok := a.buffers[externalUserID]
+	if !ok || buf == nil || len(buf.items) == 0 {
 		return nil
 	}
 
@@ -220,6 +225,9 @@ func prepareMerge(externalUserID string, buf *userBuffer) *pendingCard {
 
 	count := len(buf.items)
 	mergedBody := buildMergedBody(buf.items)
+
+	// Clear buffer state in a single place — see TestAggregator_AddAfter*.
+	delete(a.buffers, externalUserID)
 
 	return &pendingCard{
 		externalUserID: externalUserID,
