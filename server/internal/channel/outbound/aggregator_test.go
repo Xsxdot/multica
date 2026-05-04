@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // --- Mock sender ---
@@ -331,5 +332,115 @@ func TestAggregator_TimerFlushIndependent(t *testing.T) {
 	calls = sender.Calls()
 	if len(calls) != 2 {
 		t.Fatalf("expected 2 flushes total, got %d", len(calls))
+	}
+}
+
+// Regression for C1-r3: after a timer flush completes, the buffer entry
+// must be removed from the map so the next Add for the same user starts a
+// fresh aggregation window (with a new timer). On the buggy code the
+// stale entry persists, exists=true is returned, no new timer is started,
+// and subsequent notifications are silently swallowed until the buffer
+// limit forces a flush.
+func TestAggregator_AddAfterTimerFlush_StartsNewWindow(t *testing.T) {
+	sender := &mockSender{}
+	agg := NewAggregator(sender, 150*time.Millisecond)
+	defer agg.Stop()
+
+	userID := "ext-user-cycle"
+
+	// First window: 2 notifications, wait for timer flush.
+	agg.Add(userID, port.OutboundCardMessage{ChatID: userID, Title: "A1"}, false)
+	agg.Add(userID, port.OutboundCardMessage{ChatID: userID, Title: "A2"}, false)
+	time.Sleep(300 * time.Millisecond)
+
+	calls := sender.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("first window: expected 1 merged card, got %d", len(calls))
+	}
+	if calls[0].Card.Title != "你有 2 条新通知" {
+		t.Errorf("first window title = %q, want '你有 2 条新通知'", calls[0].Card.Title)
+	}
+
+	// Second window for the SAME user: 1 notification. Must trigger a
+	// fresh timer-flushed card "你有 1 条新通知".
+	agg.Add(userID, port.OutboundCardMessage{ChatID: userID, Title: "B1"}, false)
+	time.Sleep(300 * time.Millisecond)
+
+	calls = sender.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("after second Add+wait: expected 2 total cards, got %d", len(calls))
+	}
+	if calls[1].Card.Title != "你有 1 条新通知" {
+		t.Errorf("second window title = %q, want '你有 1 条新通知' (stale buffer would carry old A1/A2 items)", calls[1].Card.Title)
+	}
+	// Must contain only B1, not A1 or A2.
+	if got := calls[1].Card.Body; got != "B1" {
+		t.Errorf("second window body = %q, want %q (a leak of A1/A2 means buffer was not cleared)", got, "B1")
+	}
+}
+
+// Regression for C1-r3: after the buffer-limit path flushes 50 items + the
+// 51st as a single send, the buffer entry must be removed. On the buggy
+// code the stale 50 items remain in the buffer and the next Add appends
+// to them, eventually re-sending the same 50 already-delivered items.
+func TestAggregator_AddAfterBufferLimit_StartsNewWindow(t *testing.T) {
+	sender := &mockSender{}
+	agg := NewAggregator(sender, 200*time.Millisecond)
+	defer agg.Stop()
+
+	userID := "ext-user-limit-cycle"
+
+	// 51 notifications → 2 sends (merged 50 + 51st single).
+	for i := 0; i < 51; i++ {
+		agg.Add(userID, port.OutboundCardMessage{
+			ChatID: userID,
+			Title:  fmt.Sprintf("Issue %d", i+1),
+		}, false)
+	}
+	if got := len(sender.Calls()); got != 2 {
+		t.Fatalf("after 51 Adds: expected 2 sends, got %d", got)
+	}
+
+	// One more notification for the same user. Must start a fresh window
+	// (new timer) and flush as a single-item card "你有 1 条新通知".
+	agg.Add(userID, port.OutboundCardMessage{
+		ChatID: userID,
+		Title:  "Issue 52",
+	}, false)
+	time.Sleep(400 * time.Millisecond)
+
+	calls := sender.Calls()
+	if len(calls) != 3 {
+		t.Fatalf("after 52nd Add+wait: expected 3 total sends, got %d", len(calls))
+	}
+	third := calls[2]
+	if third.Card.Title != "你有 1 条新通知" {
+		t.Errorf("third send title = %q, want '你有 1 条新通知' (a re-merge of stale items would say '你有 50 条新通知')", third.Card.Title)
+	}
+}
+
+// Regression for R1-r3: Stop() must count each dropped notification (not
+// each user) toward droppedTotal, so the SLO metric reflects actual
+// message loss, not user count.
+func TestAggregator_StopCountsAllDroppedNotifications(t *testing.T) {
+	sender := &mockSender{}
+	agg := NewAggregator(sender, 24*time.Hour)
+
+	before := testutil.ToFloat64(droppedTotal)
+
+	// Two users, multiple notifications each, total 5 unflushed items.
+	for i := 0; i < 3; i++ {
+		agg.Add("user-A", port.OutboundCardMessage{ChatID: "user-A", Title: fmt.Sprintf("A%d", i)}, false)
+	}
+	for i := 0; i < 2; i++ {
+		agg.Add("user-B", port.OutboundCardMessage{ChatID: "user-B", Title: fmt.Sprintf("B%d", i)}, false)
+	}
+
+	agg.Stop()
+
+	after := testutil.ToFloat64(droppedTotal)
+	delta := after - before
+	if delta != 5 {
+		t.Errorf("droppedTotal delta = %v, want 5 (one per dropped notification, not one per user)", delta)
 	}
 }
