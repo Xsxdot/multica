@@ -23,8 +23,7 @@ const (
 // IntentKind is the high-level command category. Defined here (in port)
 // rather than imported from the intent package to avoid a circular
 // dependency: port is imported by intent-recog (T9/T10) which produces
-// Intents, and by dispatch (T11) which consumes them. The kind enum
-// belongs to the shared vocabulary, not to either implementation.
+// Intents, and by dispatch (T11) which consumes them.
 type IntentKind string
 
 const (
@@ -32,6 +31,7 @@ const (
 	IntentAddComment  IntentKind = "AddComment"
 	IntentQueryIssue  IntentKind = "QueryIssue"
 	IntentSetStatus   IntentKind = "SetStatus"
+	IntentDelete      IntentKind = "Delete"
 	IntentUnsupported IntentKind = "Unsupported"
 	IntentUnknown     IntentKind = "Unknown"
 	IntentASKClarify  IntentKind = "ASK_CLARIFY"
@@ -42,7 +42,7 @@ type IntentSource string
 
 const (
 	SourceRule IntentSource = "rule"
-	SourceLLM IntentSource = "llm"
+	SourceLLM  IntentSource = "llm"
 )
 
 // InboundIntent carries the parsed intent attached to an InboundEvent by
