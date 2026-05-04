@@ -271,3 +271,119 @@ func TestAdapter_Send_TextReply(t *testing.T) {
 		t.Errorf("content body = %q, want JSON containing \"text\" key and the literal payload \"ok\"", c.body)
 	}
 }
+
+// TC-adapt-2 (card path) — SendCard forwards a pre-rendered card JSON body
+// verbatim as msg_type "interactive". The Body field of OutboundCardMessage
+// is contractually the rendered JSON produced by the card sub-package; the
+// adapter does NOT wrap plain text into a card schema (per Review Issue 4 —
+// the port DTO must not be polymorphic).
+func TestAdapter_SendCard_PreRenderedJSON(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeFeishuClient("ou_bot_xxx")
+	adapter := feishu.NewAdapter(fake, feishu.Config{AppID: "cli_test"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := adapter.Connect(ctx); err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = adapter.Disconnect(context.Background()) })
+
+	preRendered := `{"header":{"title":{"tag":"plain_text","content":"[STA-2] 测试"}},"elements":[{"tag":"markdown","text":{"tag":"lark_md","content":"**状态**: done"}}]}`
+
+	res, err := adapter.SendCard(ctx, port.OutboundCardMessage{
+		ChatID: "oc_002",
+		Body:   preRendered,
+	})
+	if err != nil {
+		t.Fatalf("SendCard returned error: %v", err)
+	}
+	if res.PlatformMessageID == "" {
+		t.Error("SendResult.PlatformMessageID is empty")
+	}
+	if res.Retryable {
+		t.Error("SendResult.Retryable is true on a successful send")
+	}
+
+	calls := fake.snapshotSendCalls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d SendMessage calls, want 1", len(calls))
+	}
+	c := calls[0]
+	if c.msgType != "interactive" {
+		t.Errorf("msg_type = %q, want %q", c.msgType, "interactive")
+	}
+	if c.receiveID != "oc_002" {
+		t.Errorf("receive_id = %q, want %q", c.receiveID, "oc_002")
+	}
+	if c.receiveType != "chat_id" {
+		t.Errorf("receive_id_type = %q, want %q", c.receiveType, "chat_id")
+	}
+	// The Body must be passed through verbatim — not double-wrapped.
+	if c.body != preRendered {
+		t.Errorf("content was double-wrapped:\ngot:  %s\nwant: %s", c.body, preRendered)
+	}
+	// Sanity: it really is valid JSON.
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(c.body), &parsed); err != nil {
+		t.Errorf("content is not valid JSON: %v\nbody: %s", err, c.body)
+	}
+}
+
+// SendCard with empty ChatID must fail fast without calling the Client.
+func TestAdapter_SendCard_EmptyChatID(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeFeishuClient("ou_bot_xxx")
+	adapter := feishu.NewAdapter(fake, feishu.Config{AppID: "cli_test"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := adapter.Connect(ctx); err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = adapter.Disconnect(context.Background()) })
+
+	_, err := adapter.SendCard(ctx, port.OutboundCardMessage{
+		ChatID: "",
+		Body:   `{"header":{"title":{"tag":"plain_text","content":"x"}}}`,
+	})
+	if err == nil {
+		t.Fatal("SendCard with empty ChatID should return error")
+	}
+
+	if calls := fake.snapshotSendCalls(); len(calls) != 0 {
+		t.Errorf("expected no SendMessage calls, got %d", len(calls))
+	}
+}
+
+// SendCard with empty Body must fail fast — the contract is that Body
+// carries pre-rendered card JSON, and an empty body is a programmer bug.
+func TestAdapter_SendCard_EmptyBody(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeFeishuClient("ou_bot_xxx")
+	adapter := feishu.NewAdapter(fake, feishu.Config{AppID: "cli_test"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := adapter.Connect(ctx); err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = adapter.Disconnect(context.Background()) })
+
+	_, err := adapter.SendCard(ctx, port.OutboundCardMessage{
+		ChatID: "oc_x",
+		Body:   "",
+	})
+	if err == nil {
+		t.Fatal("SendCard with empty Body should return error")
+	}
+	if calls := fake.snapshotSendCalls(); len(calls) != 0 {
+		t.Errorf("expected no SendMessage calls, got %d", len(calls))
+	}
+}
