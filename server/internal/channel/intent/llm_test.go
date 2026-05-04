@@ -22,45 +22,65 @@ func TestIntentClassifier_Interface(t *testing.T) {
 	var _ in.IntentClassifier = (*in.LLMClassifier)(nil)
 }
 
-// --- LLMClassifier.Classify happy path ---
+// --- LLMClassifier.Classify happy path (table-driven, all IntentKinds) ---
 
 func TestLLMClassifier_Classify_HappyPath(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := in.LLMResponse{
-			Intent:     "CreateIssue",
-			Confidence: 0.92,
-			Params:     map[string]string{"title": "登录页白屏"},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(in.ChatCompletionResponse{
-			Choices: []in.Choice{{Message: in.Message{Content: mustMarshal(resp)}}},
-			Usage:   in.Usage{TotalTokens: 320},
+	tests := []struct {
+		name       string
+		intent     string
+		confidence float64
+		params     map[string]string
+		wantKind   in.IntentKind
+	}{
+		{"CreateIssue", "CreateIssue", 0.92, map[string]string{"title": "登录页白屏"}, in.IntentCreateIssue},
+		{"AddComment", "AddComment", 0.85, map[string]string{"issue_key": "STA-2", "comment": "已找产品确认"}, in.IntentAddComment},
+		{"QueryIssue", "QueryIssue", 0.88, map[string]string{"issue_key": "STA-5"}, in.IntentQueryIssue},
+		{"SetStatus", "SetStatus", 0.90, map[string]string{"issue_key": "STA-2", "status": "done"}, in.IntentSetStatus},
+		{"Unsupported", "Unsupported", 0.95, map[string]string{}, in.IntentUnsupported},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := in.LLMResponse{
+					Intent:     tt.intent,
+					Confidence: tt.confidence,
+					Params:     tt.params,
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(in.ChatCompletionResponse{
+					Choices: []in.Choice{{Message: in.Message{Content: mustMarshal(resp)}}},
+					Usage:   in.Usage{TotalTokens: 200},
+				})
+			}))
+			defer srv.Close()
+
+			clf := in.NewLLMClassifier(in.LLMClassifierConfig{
+				APIURL: srv.URL,
+				APIKey: "test-key",
+				Model:  "gpt-4o-mini",
+			})
+
+			got, err := clf.Classify(context.Background(), "test input")
+			if err != nil {
+				t.Fatalf("Classify: %v", err)
+			}
+			if got.Kind != tt.wantKind {
+				t.Errorf("Kind = %q, want %q", got.Kind, tt.wantKind)
+			}
+			if got.Confidence != tt.confidence {
+				t.Errorf("Confidence = %v, want %v", got.Confidence, tt.confidence)
+			}
+			if got.Source != in.SourceLLM {
+				t.Errorf("Source = %q, want %q", got.Source, in.SourceLLM)
+			}
+			for k, v := range tt.params {
+				if got.Params[k] != v {
+					t.Errorf("Params[%q] = %q, want %q", k, got.Params[k], v)
+				}
+			}
 		})
-	}))
-	defer srv.Close()
-
-	clf := in.NewLLMClassifier(in.LLMClassifierConfig{
-		APIURL: srv.URL,
-		APIKey: "test-key",
-		Model:  "gpt-4o-mini",
-	})
-
-	got, err := clf.Classify(context.Background(), "帮我记一个登录页白屏的问题")
-	if err != nil {
-		t.Fatalf("Classify: %v", err)
-	}
-	if got.Kind != in.IntentCreateIssue {
-		t.Errorf("Kind = %q, want CreateIssue", got.Kind)
-	}
-	if got.Confidence != 0.92 {
-		t.Errorf("Confidence = %v, want 0.92", got.Confidence)
-	}
-	if got.Source != in.SourceLLM {
-		t.Errorf("Source = %q, want %q", got.Source, in.SourceLLM)
-	}
-	if got.Params["title"] != "登录页白屏" {
-		t.Errorf("title = %q, want 登录页白屏", got.Params["title"])
 	}
 }
 
