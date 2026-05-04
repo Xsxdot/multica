@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -225,16 +223,3 @@ func isValidIntentKind(k IntentKind) bool {
 		return false
 	}
 }
-
-// clampFloat64 restricts v to [min, max].
-func clampFloat64(v, min, max float64) float64 {
-	return math.Max(min, math.Min(max, v))
-}
-
-// IsLLMOnlySource returns true if the intent came from LLM (not rule).
-func IsLLMOnlySource(s IntentSource) bool {
-	return s == SourceLLM
-}
-
-// ensure no unused import
-var _ = strings.TrimSpace
