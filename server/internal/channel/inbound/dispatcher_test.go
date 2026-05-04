@@ -204,6 +204,7 @@ func TestDispatchStep_CreateIssue_HappyPath(t *testing.T) {
 	issueSvc.createReturn = facade.Issue{
 		ID:          uuid(0xAA),
 		WorkspaceID: uuid(0x01),
+		Identifier:  "STA-39",
 		Title:       "登录页加载慢",
 		Status:      "todo",
 	}
@@ -237,6 +238,9 @@ func TestDispatchStep_CreateIssue_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(recCh.sends[0].Text, "ISSUE_CREATED") {
 		t.Errorf("reply missing ISSUE_CREATED: %q", recCh.sends[0].Text)
+	}
+	if !strings.Contains(recCh.sends[0].Text, "STA-39") {
+		t.Errorf("reply should contain identifier STA-39: %q", recCh.sends[0].Text)
 	}
 }
 
@@ -277,9 +281,10 @@ func TestDispatchStep_IgnoredSuffix_AppendsIgnoredTemplate(t *testing.T) {
 
 	cfg, issueSvc, _, recCh := buildDispatchConfig()
 	issueSvc.createReturn = facade.Issue{
-		ID:     uuid(0xBB),
-		Title:  "登录页慢",
-		Status: "todo",
+		ID:         uuid(0xBB),
+		Identifier: "STA-40",
+		Title:      "登录页慢",
+		Status:     "todo",
 	}
 	step := inbound.NewDispatchStep(cfg)
 
@@ -307,7 +312,7 @@ func TestDispatchStep_AddComment_HappyPath(t *testing.T) {
 	t.Parallel()
 
 	cfg, issueSvc, commentSvc, recCh := buildDispatchConfig()
-	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x30), Title: "t", Status: "todo"}
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x30), Identifier: "STA-2", Title: "t", Status: "todo"}
 	step := inbound.NewDispatchStep(cfg)
 
 	evt := makeEvt(port.IntentAddComment, map[string]string{
@@ -389,6 +394,37 @@ func TestDispatchStep_AddComment_IssueNotFound(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Rec-1: AddComment with invalid identifier format
+// ---------------------------------------------------------------------------
+
+func TestDispatchStep_AddComment_InvalidIdentifier_ReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, commentSvc, recCh := buildDispatchConfig()
+	step := inbound.NewDispatchStep(cfg)
+
+	for _, badKey := range []string{"abc-def", "!!-??", "STA-0", "STA-", "-39", "中文-哈哈"} {
+		evt := makeEvt(port.IntentAddComment, map[string]string{
+			"issue_key": badKey,
+			"comment":   "test",
+		})
+		_, _, err := step.Run(context.Background(), evt)
+		if err != nil {
+			t.Fatalf("Run(%q): %v", badKey, err)
+		}
+		if len(issueSvc.gotByID) != 0 {
+			t.Errorf("GetIssueByIdentifier should not be called for %q", badKey)
+		}
+		if len(commentSvc.added) != 0 {
+			t.Errorf("AddComment should not be called for %q", badKey)
+		}
+		if !strings.Contains(recCh.sends[len(recCh.sends)-1].Text, "ISSUE_NOT_FOUND") {
+			t.Errorf("reply missing ISSUE_NOT_FOUND for %q: %q", badKey, recCh.sends[len(recCh.sends)-1].Text)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // SetStatus happy path
 // ---------------------------------------------------------------------------
 
@@ -396,7 +432,7 @@ func TestDispatchStep_SetStatus_HappyPath(t *testing.T) {
 	t.Parallel()
 
 	cfg, issueSvc, _, recCh := buildDispatchConfig()
-	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x40), Title: "t", Status: "todo"}
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x40), Identifier: "STA-7", Title: "t", Status: "todo"}
 	step := inbound.NewDispatchStep(cfg)
 
 	evt := makeEvt(port.IntentSetStatus, map[string]string{
@@ -456,9 +492,10 @@ func TestDispatchStep_QueryIssue_SpecificIssue(t *testing.T) {
 
 	cfg, issueSvc, _, recCh := buildDispatchConfig()
 	issueSvc.getByIdentifierRet = facade.Issue{
-		ID:     uuid(0x50),
-		Title:  "登录页加载慢",
-		Status: "in_progress",
+		ID:         uuid(0x50),
+		Identifier: "STA-2",
+		Title:      "登录页加载慢",
+		Status:     "in_progress",
 	}
 	step := inbound.NewDispatchStep(cfg)
 
@@ -492,8 +529,8 @@ func TestDispatchStep_QueryIssue_MyTodos(t *testing.T) {
 
 	cfg, issueSvc, _, recCh := buildDispatchConfig()
 	issueSvc.listTodosReturn = []facade.Issue{
-		{ID: uuid(0x60), Title: "Issue A", Status: "todo"},
-		{ID: uuid(0x61), Title: "Issue B", Status: "in_progress"},
+		{ID: uuid(0x60), Identifier: "STA-10", Title: "Issue A", Status: "todo"},
+		{ID: uuid(0x61), Identifier: "STA-11", Title: "Issue B", Status: "in_progress"},
 	}
 	step := inbound.NewDispatchStep(cfg)
 
@@ -726,6 +763,39 @@ func TestDispatchStep_InPipeline_AllPlaceholderStepsRunInOrder(t *testing.T) {
 	}
 	if !strings.Contains(recCh.sends[0].Text, "UNKNOWN") {
 		t.Errorf("pipeline reply should contain UNKNOWN: %q", recCh.sends[0].Text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Rec-2: validIdentifierFormat unit tests
+// ---------------------------------------------------------------------------
+
+func TestValidIdentifierFormat(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{"STA-2", "STA-39", "MUL-123", "ABCDE-1", "AB-999999"}
+	for _, s := range valid {
+		if !inbound.ValidIdentifierFormat(s) {
+			t.Errorf("ValidIdentifierFormat(%q) = false, want true", s)
+		}
+	}
+
+	invalid := []string{
+		"abc-def",  // lowercase
+		"!!-??",    // special chars
+		"STA-0",    // leading zero
+		"STA-",     // missing number
+		"-39",      // missing prefix
+		"中文-哈哈", // non-ASCII
+		"A-1",      // prefix too short
+		"ABCDEF-1", // prefix too long
+		"",         // empty
+		"STA",      // no hyphen
+	}
+	for _, s := range invalid {
+		if inbound.ValidIdentifierFormat(s) {
+			t.Errorf("ValidIdentifierFormat(%q) = true, want false", s)
+		}
 	}
 }
 

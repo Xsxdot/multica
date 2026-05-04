@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -137,7 +138,7 @@ func (d *dispatchStep) handleCreateIssue(ctx context.Context, evt port.InboundEv
 		return "", fmt.Errorf("create issue: %w", err)
 	}
 
-	return fmt.Sprintf("[%s] 已创建 Issue %s：%s", replyIssueCreated, issueIdentifier(issue), issue.Title), nil
+	return fmt.Sprintf("[%s] 已创建 Issue %s：%s", replyIssueCreated, issue.Identifier, issue.Title), nil
 }
 
 func (d *dispatchStep) handleAddComment(ctx context.Context, evt port.InboundEvent) (string, error) {
@@ -145,6 +146,10 @@ func (d *dispatchStep) handleAddComment(ctx context.Context, evt port.InboundEve
 	comment, _ := evt.Intent.Params["comment"]
 	if issueKey == "" || comment == "" {
 		return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和评论内容。", replyMissingParam), nil
+	}
+
+	if !ValidIdentifierFormat(issueKey) {
+		return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), nil
 	}
 
 	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
@@ -200,12 +205,12 @@ func (d *dispatchStep) handleQueryIssue(ctx context.Context, evt port.InboundEve
 				msg += fmt.Sprintf("... 还有 %d 条\n", len(issues)-10)
 				break
 			}
-			msg += fmt.Sprintf("  %s [%s] %s\n", issueIdentifier(iss), iss.Status, iss.Title)
+			msg += fmt.Sprintf("  %s [%s] %s\n", iss.Identifier, iss.Status, iss.Title)
 		}
 		return msg, nil
 	}
 
-	if !validIdentifierFormat(issueKey) {
+	if !ValidIdentifierFormat(issueKey) {
 		return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), nil
 	}
 
@@ -214,8 +219,8 @@ func (d *dispatchStep) handleQueryIssue(ctx context.Context, evt port.InboundEve
 		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil
 	}
 
-	msg := fmt.Sprintf("📋 %s [%s]\n标题: %s\n状态: %s",
-		issueIdentifier(issue), issue.Status, issue.Title, issue.Status)
+	msg := fmt.Sprintf("📋 %s [%s] %s",
+		issue.Identifier, issue.Status, issue.Title)
 
 	if user, err := d.cfg.UserResolver.Resolve(ctx, evt.ChannelName, evt.SenderID); err == nil && user.DisplayName != "" {
 		msg += fmt.Sprintf("\n查询者: %s", user.DisplayName)
@@ -231,7 +236,7 @@ func (d *dispatchStep) handleSetStatus(ctx context.Context, evt port.InboundEven
 		return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和目标状态。", replyMissingParam), nil
 	}
 
-	if !validIdentifierFormat(issueKey) {
+	if !ValidIdentifierFormat(issueKey) {
 		return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), nil
 	}
 
@@ -273,22 +278,12 @@ func (d *dispatchStep) sendReply(ctx context.Context, evt port.InboundEvent, tex
 	return err
 }
 
-func issueIdentifier(iss facade.Issue) string {
-	if iss.ID.Valid {
-		return fmt.Sprintf("ISS-%02x%02x", iss.ID.Bytes[0], iss.ID.Bytes[1])
-	}
-	return "ISS-???"
-}
+// identifierRe matches valid issue identifiers like STA-39, MUL-123.
+// Format: 2-5 uppercase letters, hyphen, positive integer (no leading zeros).
+var identifierRe = regexp.MustCompile(`^[A-Z]{2,5}-[1-9][0-9]*$`)
 
-func validIdentifierFormat(key string) bool {
-	n := len(key)
-	if n < 4 || n > 20 {
-		return false
-	}
-	for i, c := range key {
-		if c == '-' && i >= 2 && i < n-1 {
-			return true
-		}
-	}
-	return false
+// ValidIdentifierFormat checks if an issue identifier matches the expected
+// format (e.g. STA-39, MUL-123). Exported for testing.
+func ValidIdentifierFormat(key string) bool {
+	return identifierRe.MatchString(key)
 }
