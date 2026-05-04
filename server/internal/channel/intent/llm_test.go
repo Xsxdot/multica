@@ -347,3 +347,49 @@ func mustMarshal(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+// --- Confidence out of bounds → clamped to [0,1] ---
+
+func TestLLMClassifier_Classify_ConfidenceClamped(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		confidence float64
+		wantKind   in.IntentKind
+	}{
+		{"upper bound 2.5 → clamped to 1.0 → normal", 2.5, in.IntentCreateIssue},
+		{"lower bound -0.3 → clamped to 0.0 → ASK_CLARIFY", -0.3, in.IntentASKClarify},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := in.LLMResponse{
+					Intent:     "CreateIssue",
+					Confidence: tt.confidence,
+					Params:     map[string]string{"title": "test"},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(in.ChatCompletionResponse{
+					Choices: []in.Choice{{Message: in.Message{Content: mustMarshal(resp)}}},
+					Usage:   in.Usage{TotalTokens: 200},
+				})
+			}))
+			defer srv.Close()
+
+			clf := in.NewLLMClassifier(in.LLMClassifierConfig{
+				APIURL: srv.URL,
+				APIKey: "test-key",
+				Model:  "gpt-4o-mini",
+			})
+
+			got, err := clf.Classify(context.Background(), "test")
+			if err != nil {
+				t.Fatalf("Classify: %v", err)
+			}
+			if got.Kind != tt.wantKind {
+				t.Errorf("Kind = %q, want %q", got.Kind, tt.wantKind)
+			}
+		})
+	}
+}
