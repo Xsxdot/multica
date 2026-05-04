@@ -165,6 +165,7 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 
 		// Prepare the merged card (50 items) — deletes buffer from map.
 		merged := prepareMerge(externalUserID, buf)
+		delete(a.buffers, externalUserID)
 
 		a.mu.Unlock()
 
@@ -191,6 +192,7 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 func (a *Aggregator) flushUser(externalUserID string) {
 	a.mu.Lock()
 	pending := prepareMerge(externalUserID, a.buffers[externalUserID])
+	delete(a.buffers, externalUserID)
 	a.mu.Unlock()
 
 	if pending == nil {
@@ -265,7 +267,10 @@ func (a *Aggregator) Stop() {
 			if buf.timer != nil {
 				buf.timer.Stop()
 			}
-			droppedTotal.Inc()
+			// Each buffered notification is a dropped message — count
+			// per-notification, not per-user, so the SLO metric reflects
+			// actual loss. (R1-r3)
+			droppedTotal.Add(float64(len(buf.items)))
 		}
 		a.buffers = make(map[string]*userBuffer)
 	})
