@@ -55,11 +55,13 @@ func IsRetryable(err error) bool {
 }
 
 // RetryPayload is the JSON structure stored in channel_outbound_failure.payload.
-// It captures enough information to reconstruct the original send call.
+// It captures the rendered card content for replay. Addressing comes from
+// the channel_outbound_failure.target_external_user_id column (single source
+// of truth — see ReviewBot v2 R3); the user id is intentionally NOT stored
+// here, to prevent the addressing-from-payload class of bug.
 type RetryPayload struct {
-	ExternalUserID string `json:"external_user_id"`
-	Title          string `json:"title"`
-	Body           string `json:"body"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
 }
 
 // RetrySender abstracts the channel send operation so the worker can be
@@ -153,18 +155,17 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 		return
 	}
 
-	// Use target_external_user_id column as single source of truth.
-	// If empty, fall back to payload (legacy records).
-	externalUserID := f.TargetExternalUserID.String
-	if externalUserID == "" {
-		externalUserID = payload.ExternalUserID
-	}
-	if externalUserID == "" {
-		slog.Error("retry worker: no external user id, marking dead",
+	// target_external_user_id column is the single source of truth for
+	// addressing. payload.ExternalUserID exists for audit/replay only —
+	// if the column is missing, mark dead instead of silently falling back
+	// (a fallback would hide upstream inserter bugs). See ReviewBot v2 R3.
+	if !f.TargetExternalUserID.Valid || f.TargetExternalUserID.String == "" {
+		slog.Error("retry worker: missing target_external_user_id, marking dead",
 			"id", uuidStr(f.ID))
-		w.markDead(ctx, f, "no external_user_id in failure record or payload")
+		w.markDead(ctx, f, "missing target_external_user_id (column is single source of truth)")
 		return
 	}
+	externalUserID := f.TargetExternalUserID.String
 
 	err := w.sender.SendCard(ctx, f.Provider, externalUserID, payload)
 
@@ -179,12 +180,16 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 	// Classify the error.
 	if IsRetryable(err) {
 		// Retryable — increment attempts with backoff.
-		// Use f.Attempts (current) as the backoff index: attempt 0 → 30s,
-		// attempt 1 → 2min, attempt 2 → 10min.
-		nextAttempt := int(f.Attempts) + 1
-		if nextAttempt >= int(f.MaxAttempts) {
+		// Boundary: while f.Attempts < f.MaxAttempts there are retries
+		// remaining, so schedule one. When f.Attempts == f.MaxAttempts
+		// (after this round of Increment runs at MaxAttempts-1 and
+		// f.Attempts becomes MaxAttempts) the next tick's processOne
+		// sees the row and marks it dead. With default max=3 this lets
+		// all three backoff tiers (30s/2min/10min, attempts 0/1/2) run
+		// before dead — see ReviewBot v2 C2.
+		if int(f.Attempts) >= int(f.MaxAttempts) {
 			slog.Warn("retry worker: max attempts reached, marking dead",
-				"id", uuidStr(f.ID), "attempts", nextAttempt, "error", err)
+				"id", uuidStr(f.ID), "attempts", f.Attempts, "error", err)
 			w.markDead(ctx, f, fmt.Sprintf("max attempts (%d) exhausted: %s", f.MaxAttempts, err))
 			return
 		}
@@ -200,7 +205,7 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 				"id", uuidStr(f.ID), "error", updateErr)
 		} else {
 			slog.Info("retry worker: scheduled retry",
-				"id", uuidStr(f.ID), "next_attempt", nextAttempt, "backoff", backoff, "error", err)
+				"id", uuidStr(f.ID), "next_attempt", int(f.Attempts)+1, "backoff", backoff, "error", err)
 		}
 		return
 	}

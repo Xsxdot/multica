@@ -342,11 +342,20 @@ func main() {
 	go runDBStatsLogger(sweepCtx, pool)
 
 	// Start outbound retry + cleanup workers (T15).
-	// The retry sender is a noop until the channel adapter is wired (T5-wiring);
-	// the infrastructure is in place so swapping to a real sender is a one-line change.
-	retryCtx, retryCancel := context.WithCancel(context.Background())
-	retryWorker := outbound.NewRetryWorker(pool, queries, &noopRetrySender{})
-	go retryWorker.Run(retryCtx)
+	//
+	// Retry worker: requires both an explicit env opt-in
+	// (CHANNEL_RETRY_WORKER_ENABLED=true) AND a real channel-adapter
+	// RetrySender. Until the adapter is wired (T5-wiring) we have no
+	// real sender, so the worker stays off. A previous incarnation used
+	// a noop sender that returned nil — that path silently DELETEd every
+	// pending failure within seconds because the success branch removes
+	// the row. See ReviewBot v2 C4. The gate prevents that recurring;
+	// remove the warn + add the wiring once a real sender exists.
+	//
+	// Cleanup worker: always on (idempotent DELETEs of expired data only).
+	if outbound.RetryWorkerEnabled() {
+		slog.Warn("CHANNEL_RETRY_WORKER_ENABLED=true but no real RetrySender wired yet (T5-wiring); refusing to start retry worker to avoid silent data loss")
+	}
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	cleanupWorker := outbound.NewCleanupWorker(queries)
 	go cleanupWorker.Run(cleanupCtx)
@@ -375,7 +384,6 @@ func main() {
 	slog.Info("shutting down server")
 	sweepCancel()
 	autopilotCancel()
-	retryCancel()
 	cleanupCancel()
 	// Stop the channel leader before HTTP shutdown: OnRelease may want
 	// to send a final "going down" message via the still-up service
@@ -399,14 +407,4 @@ func main() {
 		metricsShutdownCancel()
 	}
 	slog.Info("server stopped")
-}
-
-// noopRetrySender is a placeholder RetrySender used until the channel adapter
-// is wired (T5-wiring). It logs the retry attempt but does not send. Replace
-// with a real sender (e.g. channelRegistry-based) when the adapter lands.
-type noopRetrySender struct{}
-
-func (s *noopRetrySender) SendCard(_ context.Context, provider string, externalUserID string, _ outbound.RetryPayload) error {
-	slog.Info("retry sender: noop (adapter not wired)", "provider", provider, "external_user_id", externalUserID)
-	return nil
 }

@@ -73,9 +73,8 @@ func TestBackoffForAttempt(t *testing.T) {
 
 func TestRetryPayload_MarshalRoundtrip(t *testing.T) {
 	payload := RetryPayload{
-		ExternalUserID: "ou_abc123",
-		Title:          "Test Title",
-		Body:           "Test Body",
+		Title: "Test Title",
+		Body:  "Test Body",
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -84,9 +83,6 @@ func TestRetryPayload_MarshalRoundtrip(t *testing.T) {
 	var decoded RetryPayload
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
-	}
-	if decoded.ExternalUserID != payload.ExternalUserID {
-		t.Errorf("ExternalUserID = %q, want %q", decoded.ExternalUserID, payload.ExternalUserID)
 	}
 	if decoded.Title != payload.Title {
 		t.Errorf("Title = %q, want %q", decoded.Title, payload.Title)
@@ -159,9 +155,8 @@ func (m *mockFailureStore) DeleteOutboundFailure(_ context.Context, id pgtype.UU
 
 func makeFailure(id [16]byte, attempts int32, maxAttempts int32, provider string, externalUserID string) db.ChannelOutboundFailure {
 	payload, _ := json.Marshal(RetryPayload{
-		ExternalUserID: externalUserID,
-		Title:          "Test Title",
-		Body:           "Test Body",
+		Title: "Test Title",
+		Body:  "Test Body",
 	})
 	return db.ChannelOutboundFailure{
 		ID:                   pgtype.UUID{Bytes: id, Valid: true},
@@ -345,7 +340,11 @@ func TestProcessOne_NoExternalUserID_MarksDead(t *testing.T) {
 	sender := &mockRetrySender{}
 	worker := NewRetryWorkerWithStore(store, sender)
 
-	// Column invalid; payload still has a user id — must NOT fall back.
+	// Column invalid. Payload happens to contain an "external_user_id"
+	// JSON key — RetryPayload no longer declares that field, so it is
+	// dropped by encoding/json. Even if a stale row from an earlier
+	// schema persists in the table, processOne must not address from
+	// the payload — the column is the only legitimate source.
 	f := db.ChannelOutboundFailure{
 		ID:                   pgtype.UUID{Bytes: testID1, Valid: true},
 		Provider:             "feishu",
