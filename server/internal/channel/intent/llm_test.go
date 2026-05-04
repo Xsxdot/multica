@@ -109,6 +109,76 @@ func TestLLMClassifier_Classify_FencedJSON(t *testing.T) {
 	}
 }
 
+func TestLLMClassifier_Classify_ConfidenceClamp(t *testing.T) {
+	t.Parallel()
+	t.Run("upper_bound", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			resp := in.LLMResponse{
+				Intent:     "CreateIssue",
+				Confidence: 2.5,
+				Params:     map[string]string{"title": "x"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(in.ChatCompletionResponse{
+				Choices: []in.Choice{{Message: in.Message{Content: mustMarshal(resp)}}},
+				Usage:   in.Usage{TotalTokens: 50},
+			})
+		}))
+		defer srv.Close()
+
+		clf := in.NewLLMClassifier(in.LLMClassifierConfig{
+			APIURL: srv.URL,
+			APIKey: "test-key",
+			Model:  "gpt-4o-mini",
+		})
+
+		got, err := clf.Classify(context.Background(), "hi")
+		if err != nil {
+			t.Fatalf("Classify: %v", err)
+		}
+		if got.Confidence != 1.0 {
+			t.Errorf("Confidence = %v, want 1.0", got.Confidence)
+		}
+		if got.Kind != in.IntentCreateIssue {
+			t.Errorf("Kind = %q, want CreateIssue", got.Kind)
+		}
+	})
+	t.Run("lower_bound", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			resp := in.LLMResponse{
+				Intent:     "CreateIssue",
+				Confidence: -0.3,
+				Params:     map[string]string{"title": "x"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(in.ChatCompletionResponse{
+				Choices: []in.Choice{{Message: in.Message{Content: mustMarshal(resp)}}},
+				Usage:   in.Usage{TotalTokens: 50},
+			})
+		}))
+		defer srv.Close()
+
+		clf := in.NewLLMClassifier(in.LLMClassifierConfig{
+			APIURL: srv.URL,
+			APIKey: "test-key",
+			Model:  "gpt-4o-mini",
+		})
+
+		got, err := clf.Classify(context.Background(), "hi")
+		if err != nil {
+			t.Fatalf("Classify: %v", err)
+		}
+		if got.Confidence != 0.0 {
+			t.Errorf("Confidence = %v, want 0.0", got.Confidence)
+		}
+		if got.Kind != in.IntentASKClarify {
+			t.Errorf("Kind = %q, want ASK_CLARIFY", got.Kind)
+		}
+	})
+}
+
 // --- Confidence < 0.7 → ASK_CLARIFY ---
 
 func TestLLMClassifier_Classify_LowConfidence_ASK_CLARIFY(t *testing.T) {

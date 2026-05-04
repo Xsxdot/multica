@@ -191,6 +191,13 @@ func (c *LLMClassifier) Classify(ctx context.Context, text string) (Intent, erro
 		return Intent{}, fmt.Errorf("intent: parse llm json: %w", err)
 	}
 
+	if llmResp.Confidence < 0 {
+		llmResp.Confidence = 0
+	}
+	if llmResp.Confidence > 1 {
+		llmResp.Confidence = 1
+	}
+
 	// Validate intent kind
 	kind := IntentKind(llmResp.Intent)
 	if !isValidIntentKind(kind) {
