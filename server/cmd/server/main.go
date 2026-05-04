@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/channel"
+	feishuadapter "github.com/multica-ai/multica/server/internal/channel/adapter/feishu"
 	"github.com/multica-ai/multica/server/internal/channel/leader"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
@@ -256,22 +258,96 @@ func main() {
 	// elector picks one replica per advisory-lock id; non-leaders sit in
 	// a 5s ping loop until the leader's connection drops.
 	//
-	// The OnAcquire / OnRelease callbacks are intentionally stubbed at
-	// the boot site for M1-T7. The real Feishu adapter wiring lands in
-	// a follow-up wiring task (post-T5/T7) once the SDK seam config is
-	// pulled from the environment; until then the elector still runs so
-	// operators can observe leader rotation in pg_locks and confirm the
-	// crash-handover behaviour without requiring Feishu credentials.
+	// STA-47: Wire the real Feishu SDK client. The OnAcquire callback
+	// creates a new adapter with a real SDKClient backed by
+	// larksuite/oapi-sdk-go/v3, registers it in the channel registry,
+	// and connects. OnRelease disconnects and unregisters.
 	leaderCtx, leaderCancel := context.WithCancel(context.Background())
 	channelLeader := leader.NewElector(pool, leader.ChannelFeishuLockID, 5*time.Second)
+
+	// Read Feishu credentials from environment. These are required for
+	// the real SDK client. If not set, the leader election still runs
+	// but the adapter will not be wired (operators can observe leader
+	// rotation in pg_locks without Feishu credentials).
+	feishuAppID := os.Getenv("FEISHU_APP_ID")
+	feishuAppSecret := os.Getenv("FEISHU_APP_SECRET")
+	feishuEncryptKey := os.Getenv("FEISHU_ENCRYPT_KEY")
+	feishuVerifyToken := os.Getenv("FEISHU_VERIFY_TOKEN")
+	feishuEnabled := feishuAppID != "" && feishuAppSecret != ""
+
+	// adapterCancel is cancelled on leader release to stop the WS client.
+	var adapterCancel context.CancelFunc
+
 	channelLeader.OnAcquire(func(ctx context.Context) error {
 		slog.Info("channel leader: acquired", "lock_id", leader.ChannelFeishuLockID)
-		// TODO(T5-wiring): channelRegistry.Get("feishu").Connect(ctx)
+
+		if !feishuEnabled {
+			slog.Warn("channel leader: FEISHU_APP_ID / FEISHU_APP_SECRET not set; skipping feishu adapter wiring")
+			return nil
+		}
+
+		// Create a context that survives beyond the OnAcquire call so
+		// the WS client keeps running until OnRelease cancels it.
+		adapterCtx, cancel := context.WithCancel(context.Background())
+		adapterCancel = cancel
+
+		sdkClient := feishuadapter.NewRealClient(feishuAppID, feishuAppSecret, feishuEncryptKey, feishuVerifyToken)
+		adapter := feishuadapter.NewAdapter(sdkClient, feishuadapter.Config{
+			AppID:       feishuAppID,
+			AppSecret:   feishuAppSecret,
+			EncryptKey:  feishuEncryptKey,
+			VerifyToken: feishuVerifyToken,
+		})
+
+		if err := channelRegistry.Register(adapter); err != nil {
+			if err == channel.ErrDuplicateChannel {
+				// Already registered (e.g. from a previous acquire).
+				// Get the existing one and connect it.
+				existing, getErr := channelRegistry.Get("feishu")
+				if getErr != nil {
+					slog.Error("channel leader: failed to get existing feishu adapter", "error", getErr)
+					return fmt.Errorf("feishu: get existing adapter: %w", getErr)
+				}
+				if connErr := existing.Connect(adapterCtx); connErr != nil {
+					slog.Error("channel leader: failed to connect existing feishu adapter", "error", connErr)
+					return fmt.Errorf("feishu: connect existing: %w", connErr)
+				}
+				slog.Info("channel leader: reconnected existing feishu adapter")
+				return nil
+			}
+			slog.Error("channel leader: failed to register feishu adapter", "error", err)
+			return fmt.Errorf("feishu: register adapter: %w", err)
+		}
+
+		if err := adapter.Connect(adapterCtx); err != nil {
+			slog.Error("channel leader: failed to connect feishu adapter", "error", err)
+			// Unregister on failure so the next acquire can try again.
+			_ = channelRegistry.Unregister("feishu")
+			return fmt.Errorf("feishu: connect: %w", err)
+		}
+
+		slog.Info("channel leader: feishu adapter connected", "app_id", feishuAppID)
 		return nil
 	})
 	channelLeader.OnRelease(func(ctx context.Context) error {
 		slog.Info("channel leader: released", "lock_id", leader.ChannelFeishuLockID)
-		// TODO(T5-wiring): channelRegistry.Get("feishu").Disconnect(ctx)
+
+		// Cancel the adapter context to stop the WS client.
+		if adapterCancel != nil {
+			adapterCancel()
+		}
+
+		// Disconnect the adapter if registered.
+		adapter, err := channelRegistry.Get("feishu")
+		if err != nil {
+			// Not registered — nothing to disconnect.
+			return nil
+		}
+		if discErr := adapter.Disconnect(ctx); discErr != nil {
+			slog.Error("channel leader: feishu adapter disconnect failed", "error", discErr)
+		}
+		// Unregister so the next acquire starts fresh.
+		_ = channelRegistry.Unregister("feishu")
 		return nil
 	})
 	go func() {

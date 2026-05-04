@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/multica-ai/multica/server/internal/channel/port"
@@ -220,9 +221,8 @@ func (a *Adapter) GetUserInfo(ctx context.Context, userID string) (port.UserInfo
 //     responsibility (after pumpWG.Wait), to avoid a "send on closed
 //     channel" race if Stop closes Subscribe before the pump notices the
 //     ctx cancellation.
-//   - Malformed events are dropped silently (not surfaced to `out`) — a
-//     future task can plumb a logger / metric counter through Config; the
-//     MVP keeps the package import-free.
+//   - Malformed events are logged (slog.Error) and dropped — T5 Obs-1.
+//     A future task can add a Prometheus metric counter.
 func (a *Adapter) pump(pumpCtx context.Context) {
 	defer a.pumpWG.Done()
 	src := a.client.Subscribe()
@@ -235,7 +235,16 @@ func (a *Adapter) pump(pumpCtx context.Context) {
 				return
 			}
 			ev, emit, err := normaliseEvent(channelName, a.client.BotUserID(), raw)
-			if err != nil || !emit {
+			if err != nil {
+				// T5 Obs-1: log malformed events instead of silently dropping.
+				slog.Error("feishu: malformed event dropped",
+					"event_id", raw.EventID,
+					"event_type", raw.EventType,
+					"error", err,
+				)
+				continue
+			}
+			if !emit {
 				continue
 			}
 			select {

@@ -27,7 +27,8 @@ type fakeFeishuClient struct {
 	sendResp  feishu.SendResponse
 	sendErr   error
 
-	events chan feishu.RawEvent
+	events   chan feishu.RawEvent
+	stopOnce sync.Once
 }
 
 type sendCall struct {
@@ -56,7 +57,9 @@ func (f *fakeFeishuClient) Subscribe() <-chan feishu.RawEvent { return f.events 
 func (f *fakeFeishuClient) Start(ctx context.Context) error { return nil }
 
 func (f *fakeFeishuClient) Stop(ctx context.Context) error {
-	close(f.events)
+	f.stopOnce.Do(func() {
+		close(f.events)
+	})
 	return nil
 }
 
