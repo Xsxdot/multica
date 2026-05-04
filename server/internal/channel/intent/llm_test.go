@@ -105,10 +105,12 @@ func TestLLMClassifier_Classify_LowConfidence_ASK_CLARIFY(t *testing.T) {
 func TestLLMClassifier_Classify_InputTruncation(t *testing.T) {
 	t.Parallel()
 	var receivedBody string
+	var receivedMaxTokens int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req in.ChatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		receivedBody = req.Messages[1].Content // user message
+		receivedMaxTokens = req.MaxTokens
 		resp := in.LLMResponse{
 			Intent:     "AddComment",
 			Confidence: 0.8,
@@ -149,6 +151,10 @@ func TestLLMClassifier_Classify_InputTruncation(t *testing.T) {
 	logOutput := buf.String()
 	if !strings.Contains(logOutput, "input truncated") {
 		t.Errorf("expected warn log 'input truncated', got: %s", logOutput)
+	}
+	// Assert max_tokens is sent in request body
+	if receivedMaxTokens != 1000 {
+		t.Errorf("MaxTokens = %d, want 1000", receivedMaxTokens)
 	}
 }
 

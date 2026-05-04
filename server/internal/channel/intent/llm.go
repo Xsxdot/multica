@@ -96,8 +96,15 @@ Rules:
 
 // ChatCompletionRequest is the OpenAI-compatible chat completion request.
 type ChatCompletionRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
+	Model          string           `json:"model"`
+	Messages       []Message        `json:"messages"`
+	MaxTokens      int              `json:"max_tokens,omitempty"`
+	ResponseFormat *ResponseFormat  `json:"response_format,omitempty"`
+}
+
+// ResponseFormat forces JSON mode on compatible APIs.
+type ResponseFormat struct {
+	Type string `json:"type"`
 }
 
 // Message is a chat message.
@@ -131,14 +138,15 @@ type LLMResponse struct {
 
 // Classify sends text to the LLM and returns the parsed intent.
 func (c *LLMClassifier) Classify(ctx context.Context, text string) (Intent, error) {
-	text = truncateInput(text)
+	text = c.truncateInput(text)
 
 	reqBody := ChatCompletionRequest{
-		Model: c.model,
+		Model:    c.model,
 		Messages: []Message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: text},
 		},
+		MaxTokens: c.maxTokens,
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -207,13 +215,14 @@ func (c *LLMClassifier) Classify(ctx context.Context, text string) (Intent, erro
 	}, nil
 }
 
-func truncateInput(text string) string {
+func (c *LLMClassifier) truncateInput(text string) string {
+	maxChars := c.maxTokens * 4
 	runes := []rune(text)
-	if len(runes) <= maxInputChars {
+	if len(runes) <= maxChars {
 		return text
 	}
-	slog.Warn("intent: input truncated", "original_chars", len(runes), "truncated_to", maxInputChars)
-	return string(runes[:maxInputChars])
+	slog.Warn("intent: input truncated", "original_chars", len(runes), "truncated_to", maxChars)
+	return string(runes[:maxChars])
 }
 
 func isValidIntentKind(k IntentKind) bool {
