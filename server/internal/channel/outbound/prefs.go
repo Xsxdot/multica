@@ -3,8 +3,10 @@ package outbound
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -39,19 +41,25 @@ var prefKeyMap = map[string]string{
 	"issue_mention":   "issue_mention",
 }
 
+// GetChannelPref returns true if the given event kind is enabled for the user
+// on the specified channel.
+// R3: Distinguishes ErrNoRows (-> default enabled) from real DB errors (-> fail-closed).
+// json.Unmarshal failure returns error instead of swallowing.
 func (s *DBPrefStore) GetChannelPref(ctx context.Context, workspaceID, userID pgtype.UUID, channelName, eventKind string) (bool, error) {
 	row, err := s.queries.GetNotificationPreference(ctx, db.GetNotificationPreferenceParams{
 		WorkspaceID: workspaceID,
 		UserID:      userID,
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil // no preference row -> default enabled
+	}
 	if err != nil {
-		// No preference row → default enabled
-		return true, nil
+		return false, fmt.Errorf("get notification preference: %w", err)
 	}
 
 	var prefs map[string]any
 	if err := json.Unmarshal(row.Preferences, &prefs); err != nil {
-		return true, nil // malformed → default enabled
+		return false, fmt.Errorf("unmarshal preferences: %w", err)
 	}
 
 	// Navigate: preferences -> channel -> <channelName> -> <eventKind>
@@ -67,36 +75,18 @@ func (s *DBPrefStore) GetChannelPref(ctx context.Context, workspaceID, userID pg
 
 	jsonKey, ok := prefKeyMap[eventKind]
 	if !ok {
-		return true, nil // unknown event kind → default enabled
+		return true, nil // unknown event kind -> default enabled
 	}
 
 	val, ok := chPrefs[jsonKey]
 	if !ok {
-		return true, nil // key absent → default enabled
+		return true, nil // key absent -> default enabled
 	}
 
-	// "muted" → disabled; anything else → enabled
+	// "muted" -> disabled; anything else -> enabled
 	strVal, ok := val.(string)
 	if !ok {
 		return true, nil
 	}
 	return strVal != "muted", nil
-}
-
-// parsePrefPath is a helper for extracting a nested JSONB path.
-// Not used in the main flow but useful for testing.
-func parsePrefPath(preferences []byte, path ...string) (any, error) {
-	var m map[string]any
-	if err := json.Unmarshal(preferences, &m); err != nil {
-		return nil, fmt.Errorf("unmarshal preferences: %w", err)
-	}
-	current := any(m)
-	for _, key := range path {
-		obj, ok := current.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("path %v: not an object", path)
-		}
-		current = obj[key]
-	}
-	return current, nil
 }

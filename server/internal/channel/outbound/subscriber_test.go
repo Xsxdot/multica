@@ -127,13 +127,12 @@ func TestSubscriber_UnboundUser_DropsEvent(t *testing.T) {
 	bindingStore := &mockBindingStore{bindings: map[string]map[string]string{}}
 	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
 
-	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "ws-123")
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
 	sub.Start()
-	defer sub.Stop()
 
 	bus.Publish(events.Event{
 		Type:        protocol.EventInboxNew,
-		WorkspaceID: "ws-123",
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
 		ActorID:     "actor-1",
 		Payload: map[string]any{
 			"user_id":    "00000000-0000-0000-0000-000000000001",
@@ -165,14 +164,13 @@ func TestSubscriber_BoundUser_SendsCard(t *testing.T) {
 	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
 
 	// We need a custom subscriber that can resolve external IDs from mock
-	sub := newTestSubscriber(bus, ch, bindingStore, prefStore, "ws-123")
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
 	sub.Start()
-	defer sub.Stop()
 
 	start := time.Now()
 	bus.Publish(events.Event{
 		Type:        protocol.EventInboxNew,
-		WorkspaceID: "ws-123",
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
 		ActorID:     "actor-1",
 		Payload: map[string]any{
 			"user_id":    userID,
@@ -215,13 +213,12 @@ func TestSubscriber_PrefMuted_DropsEvent(t *testing.T) {
 		},
 	}
 
-	sub := newTestSubscriber(bus, ch, bindingStore, prefStore, "ws-123")
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
 	sub.Start()
-	defer sub.Stop()
 
 	bus.Publish(events.Event{
 		Type:        protocol.EventInboxNew,
-		WorkspaceID: "ws-123",
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
 		ActorID:     "actor-1",
 		Payload: map[string]any{
 			"user_id":    userID,
@@ -252,13 +249,12 @@ func TestSubscriber_CommentCreated_SendsCard(t *testing.T) {
 	}
 	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
 
-	sub := newTestSubscriber(bus, ch, bindingStore, prefStore, "ws-123")
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
 	sub.Start()
-	defer sub.Stop()
 
 	bus.Publish(events.Event{
 		Type:        protocol.EventCommentCreated,
-		WorkspaceID: "ws-123",
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
 		ActorID:     "actor-1",
 		Payload: map[string]any{
 			"comment": map[string]any{
@@ -291,13 +287,12 @@ func TestSubscriber_SubscriberAdded_SendsCard(t *testing.T) {
 	}
 	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
 
-	sub := newTestSubscriber(bus, ch, bindingStore, prefStore, "ws-123")
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
 	sub.Start()
-	defer sub.Stop()
 
 	bus.Publish(events.Event{
 		Type:        protocol.EventSubscriberAdded,
-		WorkspaceID: "ws-123",
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
 		ActorID:     "actor-1",
 		Payload: map[string]any{
 			"subscriber_id":   userID,
@@ -327,13 +322,12 @@ func TestSubscriber_WrongWorkspace_DropsEvent(t *testing.T) {
 	}
 	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
 
-	sub := newTestSubscriber(bus, ch, bindingStore, prefStore, "ws-123")
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
 	sub.Start()
-	defer sub.Stop()
 
 	bus.Publish(events.Event{
 		Type:        protocol.EventInboxNew,
-		WorkspaceID: "ws-other",
+		WorkspaceID: "00000000-0000-0000-0000-000000000200",
 		ActorID:     "actor-1",
 		Payload: map[string]any{
 			"user_id":    userID,
@@ -364,13 +358,12 @@ func TestSubscriber_SelfNotification_DropsEvent(t *testing.T) {
 	}
 	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
 
-	sub := newTestSubscriber(bus, ch, bindingStore, prefStore, "ws-123")
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
 	sub.Start()
-	defer sub.Stop()
 
 	bus.Publish(events.Event{
 		Type:        protocol.EventInboxNew,
-		WorkspaceID: "ws-123",
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
 		ActorID:     userID,
 		Payload: map[string]any{
 			"user_id":    userID,
@@ -387,23 +380,4 @@ func TestSubscriber_SelfNotification_DropsEvent(t *testing.T) {
 	if len(msgs) != 0 {
 		t.Errorf("expected 0 messages for self-notification, got %d", len(msgs))
 	}
-}
-
-// newTestSubscriber creates a Subscriber that uses the mock binding
-// store's reverseLookup for resolving external IDs.
-func newTestSubscriber(
-	bus *events.Bus,
-	ch port.Channel,
-	bindings *mockBindingStore,
-	prefs PrefStore,
-	workspaceID string,
-) *Subscriber {
-	s := &Subscriber{
-		bus:         bus,
-		channel:     ch,
-		bindings:    bindings,
-		prefs:       prefs,
-		workspaceID: workspaceID,
-	}
-	return s
 }

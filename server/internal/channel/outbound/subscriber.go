@@ -3,8 +3,10 @@ package outbound
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/multica-ai/multica/server/internal/events"
@@ -28,13 +30,6 @@ type BindingStore interface {
 	ResolveExternalID(ctx context.Context, provider, userID string) (string, error)
 }
 
-// DBBindingStore implements BindingStore using raw SQL against the
-// channel_user_binding table. (sqlc queries for this table are not yet
-// generated; this uses pgx directly.)
-type DBBindingStore struct {
-	pool DBPool
-}
-
 // DBPool is the minimal pgx interface we need.
 type DBPool interface {
 	QueryRow(ctx context.Context, sql string, args ...any) Row
@@ -45,31 +40,48 @@ type Row interface {
 	Scan(dest ...any) error
 }
 
+// DBBindingStore implements BindingStore using raw SQL against the
+// channel_user_binding table. (sqlc queries for this table are not yet
+// generated; this uses pgx directly.)
+type DBBindingStore struct {
+	pool DBPool
+}
+
 // NewDBBindingStore creates a BindingStore backed by the database.
 func NewDBBindingStore(pool DBPool) *DBBindingStore {
 	return &DBBindingStore{pool: pool}
 }
 
+// FindUserID looks up the Multica user_id for a given (provider, external_user_id) pair.
+// Returns ErrNotBound when no row exists; wraps real DB errors for fail-closed behavior.
 func (s *DBBindingStore) FindUserID(ctx context.Context, provider, externalUserID string) (pgtype.UUID, error) {
 	var uid pgtype.UUID
 	err := s.pool.QueryRow(ctx,
 		`SELECT user_id FROM channel_user_binding WHERE provider = $1 AND external_user_id = $2`,
 		provider, externalUserID,
 	).Scan(&uid)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return pgtype.UUID{}, ErrNotBound
+	}
+	if err != nil {
+		return pgtype.UUID{}, fmt.Errorf("find user id: %w", err)
 	}
 	return uid, nil
 }
 
+// ResolveExternalID looks up the external_user_id for a given (provider, user_id) pair.
+// Returns ErrNotBound when no row exists; wraps real DB errors for fail-closed behavior.
 func (s *DBBindingStore) ResolveExternalID(ctx context.Context, provider, userID string) (string, error) {
 	var extID string
 	err := s.pool.QueryRow(ctx,
 		`SELECT external_user_id FROM channel_user_binding WHERE provider = $1 AND user_id = $2`,
 		provider, userID,
 	).Scan(&extID)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotBound
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve external id: %w", err)
 	}
 	return extID, nil
 }
@@ -80,7 +92,7 @@ func (s *DBBindingStore) ResolveExternalID(ctx context.Context, provider, userID
 //
 // Event flow:
 //
-//	events.Bus → Subscriber → binding lookup → pref filter → channel.SendCard
+//	events.Bus -> Subscriber -> binding lookup -> pref filter -> channel.SendCard
 //
 // The subscriber is workspace-scoped: it only processes events whose
 // WorkspaceID matches the configured workspaceID.
@@ -90,7 +102,6 @@ type Subscriber struct {
 	bindings    BindingStore
 	prefs       PrefStore
 	workspaceID string
-	cancel      context.CancelFunc
 }
 
 // NewSubscriber creates an outbound subscriber. Call Start() to begin
@@ -117,22 +128,12 @@ func NewSubscriber(
 //   - inbox:new
 //   - subscriber:added
 func (s *Subscriber) Start() {
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancel = cancel
-
 	s.bus.Subscribe(protocol.EventCommentCreated, s.handleCommentCreated)
 	s.bus.Subscribe(protocol.EventInboxNew, s.handleInboxNew)
 	s.bus.Subscribe(protocol.EventSubscriberAdded, s.handleSubscriberAdded)
-
-	_ = ctx // reserved for future async processing
 }
 
-// Stop cancels any in-flight processing.
-func (s *Subscriber) Stop() {
-	if s.cancel != nil {
-		s.cancel()
-	}
-}
+func (s *Subscriber) Stop() {}
 
 // handleCommentCreated processes comment:created events.
 // Extracts subscriber user_ids from the payload and sends cards to
@@ -219,8 +220,17 @@ func (s *Subscriber) handleSubscriberAdded(e events.Event) {
 func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body string) {
 	ctx := context.Background()
 
-	wsUUID := parseUUID(workspaceID)
-	userUUID := parseUUID(userID)
+	// R4: parseUUID returns error; log+drop on invalid UUID.
+	wsUUID, err := parseUUID(workspaceID)
+	if err != nil {
+		slog.Error("outbound: invalid workspace id", "workspace_id", workspaceID, "error", err)
+		return
+	}
+	userUUID, err := parseUUID(userID)
+	if err != nil {
+		slog.Error("outbound: invalid user id", "user_id", userID, "error", err)
+		return
+	}
 
 	enabled, err := s.prefs.GetChannelPref(ctx, wsUUID, userUUID, s.channel.Name(), eventKind)
 	if err != nil {
@@ -231,10 +241,11 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 		return // muted
 	}
 
-	externalUserID, err := s.resolveExternalID(ctx, s.channel.Name(), userID)
+	// R5: Inline ResolveExternalID (removed wrapper).
+	externalUserID, err := s.bindings.ResolveExternalID(ctx, s.channel.Name(), userID)
 	if err != nil {
 		if errors.Is(err, ErrNotBound) {
-			return // TC-out-2: unbound → drop silently
+			return // TC-out-2: unbound -> drop silently
 		}
 		slog.Error("outbound: resolve binding", "user_id", userID, "error", err)
 		return
@@ -257,12 +268,6 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 		"platform_msg_id", result.PlatformMessageID,
 		"event_kind", eventKind,
 	)
-}
-
-// resolveExternalID looks up the external_user_id for a given Multica
-// user_id on the specified channel provider.
-func (s *Subscriber) resolveExternalID(ctx context.Context, provider, userID string) (string, error) {
-	return s.bindings.ResolveExternalID(ctx, provider, userID)
 }
 
 // mapInboxTypeToEventKind maps inbox notification types to the
@@ -301,9 +306,11 @@ func extractStringSlice(v any) []string {
 	return nil
 }
 
-// parseUUID is a helper that parses a UUID string into pgtype.UUID.
-func parseUUID(s string) pgtype.UUID {
+// R4: parseUUID returns (pgtype.UUID, error) for fail-closed behavior.
+func parseUUID(s string) (pgtype.UUID, error) {
 	var u pgtype.UUID
-	_ = u.Scan(s)
-	return u
+	if err := u.Scan(s); err != nil {
+		return pgtype.UUID{}, fmt.Errorf("parse uuid %q: %w", s, err)
+	}
+	return u, nil
 }
