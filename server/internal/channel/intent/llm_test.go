@@ -62,6 +62,53 @@ func TestLLMClassifier_Classify_HappyPath(t *testing.T) {
 	}
 }
 
+func TestLLMClassifier_Classify_FencedJSON(t *testing.T) {
+	t.Parallel()
+	resp := in.LLMResponse{
+		Intent:     "CreateIssue",
+		Confidence: 0.88,
+		Params:     map[string]string{"title": "demo"},
+	}
+	raw := mustMarshal(resp)
+
+	for name, fenced := range map[string]string{
+		"json_fence":  "```json\n" + raw + "\n```",
+		"plain_fence": "```\n" + raw + "\n```",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(in.ChatCompletionResponse{
+					Choices: []in.Choice{{Message: in.Message{Content: fenced}}},
+					Usage:   in.Usage{TotalTokens: 120},
+				})
+			}))
+			defer srv.Close()
+
+			clf := in.NewLLMClassifier(in.LLMClassifierConfig{
+				APIURL: srv.URL,
+				APIKey: "test-key",
+				Model:  "gpt-4o-mini",
+			})
+
+			got, err := clf.Classify(context.Background(), "开一个 demo issue")
+			if err != nil {
+				t.Fatalf("Classify: %v", err)
+			}
+			if got.Kind != in.IntentCreateIssue {
+				t.Errorf("Kind = %q, want CreateIssue", got.Kind)
+			}
+			if got.Confidence != 0.88 {
+				t.Errorf("Confidence = %v, want 0.88", got.Confidence)
+			}
+			if got.Params["title"] != "demo" {
+				t.Errorf(`title = %q, want "demo"`, got.Params["title"])
+			}
+		})
+	}
+}
+
 // --- Confidence < 0.7 → ASK_CLARIFY ---
 
 func TestLLMClassifier_Classify_LowConfidence_ASK_CLARIFY(t *testing.T) {
@@ -292,9 +339,9 @@ func TestLLMClassifier_Metrics_TokenUsage(t *testing.T) {
 
 	collector := &fakeCollector{}
 	clf := in.NewLLMClassifier(in.LLMClassifierConfig{
-		APIURL:          srv.URL,
-		APIKey:          "test-key",
-		Model:           "gpt-4o-mini",
+		APIURL:           srv.URL,
+		APIKey:           "test-key",
+		Model:            "gpt-4o-mini",
 		MetricsCollector: collector,
 	})
 

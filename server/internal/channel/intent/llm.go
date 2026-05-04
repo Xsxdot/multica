@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -29,11 +30,11 @@ type IntentClassifier interface {
 
 // LLMClassifierConfig holds configuration for LLMClassifier.
 type LLMClassifierConfig struct {
-	APIURL          string
-	APIKey          string
-	Model           string
-	Timeout         time.Duration
-	MaxTokens       int // per-call token budget; 0 = default 1000
+	APIURL           string
+	APIKey           string
+	Model            string
+	Timeout          time.Duration
+	MaxTokens        int // per-call token budget; 0 = default 1000
 	MetricsCollector MetricsCollector
 }
 
@@ -93,10 +94,16 @@ Rules:
 - confidence < 0.7 will trigger ASK_CLARIFY fallback
 - issue_key format: LETTERS-NUMBERS (e.g. STA-2, BUG-42)`
 
+// ResponseFormat requests a structured model output shape (OpenAI-compatible).
+type ResponseFormat struct {
+	Type string `json:"type"`
+}
+
 // ChatCompletionRequest is the OpenAI-compatible chat completion request.
 type ChatCompletionRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
+	Model          string          `json:"model"`
+	Messages       []Message       `json:"messages"`
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
 }
 
 // Message is a chat message.
@@ -138,6 +145,7 @@ func (c *LLMClassifier) Classify(ctx context.Context, text string) (Intent, erro
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: text},
 		},
+		ResponseFormat: &ResponseFormat{Type: "json_object"},
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -178,7 +186,8 @@ func (c *LLMClassifier) Classify(ctx context.Context, text string) (Intent, erro
 	}
 
 	var llmResp LLMResponse
-	if err := json.Unmarshal([]byte(chatResp.Choices[0].Message.Content), &llmResp); err != nil {
+	content := stripMarkdownFences(chatResp.Choices[0].Message.Content)
+	if err := json.Unmarshal([]byte(content), &llmResp); err != nil {
 		return Intent{}, fmt.Errorf("intent: parse llm json: %w", err)
 	}
 
@@ -204,6 +213,21 @@ func (c *LLMClassifier) Classify(ctx context.Context, text string) (Intent, erro
 		Params:     params,
 		Source:     SourceLLM,
 	}, nil
+}
+
+// stripMarkdownFences removes ```json / ``` wrappers some models emit around JSON payloads.
+func stripMarkdownFences(content string) string {
+	s := strings.TrimSpace(content)
+	if strings.HasPrefix(s, "```json") {
+		s = strings.TrimPrefix(s, "```json")
+	} else if strings.HasPrefix(s, "```") {
+		s = strings.TrimPrefix(s, "```")
+	}
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, "```") {
+		s = strings.TrimSuffix(s, "```")
+	}
+	return strings.TrimSpace(s)
 }
 
 func truncateInput(text string) string {
