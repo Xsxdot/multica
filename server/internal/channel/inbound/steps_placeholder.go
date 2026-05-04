@@ -62,14 +62,26 @@ func NewIdentityBindStep() Step { return passthroughStep{name: "identity-bind"} 
 
 // NewIntentRecogStep returns the M1 placeholder intent-recog Step.
 // T9–T10 will replace it with the real PRD F5 intent parser; for now
-// every event is treated as an unknown intent (which the dispatch
-// placeholder happily forwards as Continue).
-func NewIntentRecogStep() Step { return passthroughStep{name: "intent-recog"} }
+// every event is tagged IntentUnknown (which the dispatch placeholder
+// forwards as Continue).
+func NewIntentRecogStep() Step { return &intentRecogPlaceholder{} }
 
-// NewDispatchStep returns the M1 placeholder dispatch Step. T11 will
-// replace it with the real intent → handler router; for now no reply
-// is produced, so downstream Steps still see the original event.
-func NewDispatchStep() Step { return passthroughStep{name: "dispatch"} }
+type intentRecogPlaceholder struct{}
+
+func (intentRecogPlaceholder) Name() string { return "intent-recog" }
+
+func (intentRecogPlaceholder) Run(_ context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
+	evt.Intent = port.InboundIntent{
+		Kind:       port.IntentUnknown,
+		Confidence: 1,
+		Params:     map[string]string{},
+		Source:     port.SourceRule,
+	}
+	return evt, DecisionContinue, nil
+}
+
+// NewDispatchStep has been replaced by the real implementation in
+// dispatcher.go (T11). The production constructor takes a DispatchConfig.
 
 // NewReplyStep returns the M1 placeholder reply Step. The real reply
 // step is responsible for finalising telemetry (counters / log lines)

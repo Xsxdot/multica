@@ -134,7 +134,7 @@ func TestPlaceholderSteps_NameAndDecision(t *testing.T) {
 	}{
 		{"identity-bind", inbound.NewIdentityBindStep()},
 		{"intent-recog", inbound.NewIntentRecogStep()},
-		{"dispatch", inbound.NewDispatchStep()},
+		{"dispatch", inbound.NewDispatchStep(inbound.DispatchConfig{})},
 		{"reply", inbound.NewReplyStep()},
 	}
 	for _, tc := range cases {
@@ -175,7 +175,7 @@ func TestPipeline_AllPlaceholderSteps_RunInOrder(t *testing.T) {
 		inbound.NewDedupStep(store),
 		inbound.NewIdentityBindStep(),
 		inbound.NewIntentRecogStep(),
-		inbound.NewDispatchStep(),
+		inbound.NewDispatchStep(inbound.DispatchConfig{}),
 		inbound.NewReplyStep(),
 	)
 	out, err := p.Run(context.Background(), port.InboundEvent{
