@@ -1,7 +1,6 @@
 package outbound
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -46,16 +45,14 @@ type CardSender interface {
 
 // notification is a single pending outbound notification for a user.
 type notification struct {
-	title    string
-	body     string
-	eventKind string
+	title string
+	body  string
 }
 
 // userBuffer holds buffered notifications for a single external user.
 type userBuffer struct {
-	items  []notification
-	timer  *time.Timer
-	cancel context.CancelFunc
+	items []notification
+	timer *time.Timer
 }
 
 // Aggregator implements user-level notification aggregation. Instead of
@@ -107,13 +104,11 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 
 	buf, exists := a.buffers[externalUserID]
 	if !exists {
-		ctx, cancel := context.WithCancel(context.Background())
-		buf = &userBuffer{cancel: cancel}
+		buf = &userBuffer{}
 		a.buffers[externalUserID] = buf
 		buf.timer = time.AfterFunc(a.interval, func() {
 			a.flushUser(externalUserID)
 		})
-		_ = ctx // reserved for future async cancellation
 	}
 
 	buf.items = append(buf.items, notification{
@@ -224,7 +219,6 @@ func (a *Aggregator) Stop() {
 			if buf.timer != nil {
 				buf.timer.Stop()
 			}
-			buf.cancel()
 			droppedTotal.Add(float64(len(buf.items)))
 		}
 		a.buffers = make(map[string]*userBuffer)
