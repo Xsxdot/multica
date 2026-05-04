@@ -83,6 +83,42 @@ func TestValidatePreferences(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// C3: feishu value must be bool — string is not accepted.
+			name: "feishu value wrong type string",
+			prefs: map[string]any{
+				"channel": map[string]any{
+					"feishu": map[string]any{
+						"issues": "yes",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			// C3: feishu value must be bool — number is not accepted.
+			name: "feishu value wrong type number",
+			prefs: map[string]any{
+				"channel": map[string]any{
+					"feishu": map[string]any{
+						"comments": 1,
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			// C3: feishu value must be bool — nested object is not accepted.
+			name: "feishu value wrong type object",
+			prefs: map[string]any{
+				"channel": map[string]any{
+					"feishu": map[string]any{
+						"mentions": map[string]any{"x": 1},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
 			name:    "channel not an object",
 			prefs:   map[string]any{"channel": "bad"},
 			wantErr: true,
@@ -171,6 +207,35 @@ func TestMergePreferences(t *testing.T) {
 		}
 		if feishu["comments"] != false {
 			t.Fatalf("expected comments=false, got %v", feishu["comments"])
+		}
+	})
+
+	// R2: mergePreferences must not mutate the existing nested maps (defensive copy).
+	t.Run("does not mutate existing nested maps", func(t *testing.T) {
+		existingFeishu := map[string]any{
+			"issues":   true,
+			"comments": true,
+		}
+		existingChannel := map[string]any{
+			"feishu": existingFeishu,
+		}
+		existing := map[string]any{
+			"channel": existingChannel,
+		}
+		incoming := map[string]any{
+			"channel": map[string]any{
+				"feishu": map[string]any{
+					"comments": false,
+				},
+			},
+		}
+		_ = mergePreferences(existing, incoming)
+		// existing.channel.feishu.comments should still be true.
+		if existingFeishu["comments"] != true {
+			t.Fatalf("existing feishu.comments mutated, expected true got %v", existingFeishu["comments"])
+		}
+		if _, ok := existingChannel["feishu"].(map[string]any); !ok {
+			t.Fatalf("existing channel.feishu mutated to non-map: %T", existingChannel["feishu"])
 		}
 	})
 
@@ -285,6 +350,32 @@ func TestNotificationPreferences(t *testing.T) {
 		}
 		if feishu["comments"] != false {
 			t.Fatalf("expected feishu.comments=false, got %v", feishu["comments"])
+		}
+
+		// Rec-1: TC-out-3 round-trip — read it back via GET and confirm
+		// the stored value survives a fresh fetch (proves PUT actually
+		// persisted, not just echoed back the request body).
+		got := getPrefs(t)
+		gotPrefs := got["preferences"].(map[string]any)
+		gotChannel := gotPrefs["channel"].(map[string]any)
+		gotFeishu := gotChannel["feishu"].(map[string]any)
+		if gotFeishu["comments"] != false {
+			t.Fatalf("round-trip GET: expected feishu.comments=false, got %v", gotFeishu["comments"])
+		}
+	})
+
+	// C3: API must reject non-bool values under channel.feishu so non-bool
+	// data never reaches the JSONB column (T13 Subscriber expects bool).
+	t.Run("RejectFeishuWrongValueType", func(t *testing.T) {
+		w := updatePrefs(t, map[string]any{
+			"channel": map[string]any{
+				"feishu": map[string]any{
+					"issues": "banana",
+				},
+			},
+		})
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for non-bool feishu value, got %d: %s", w.Code, w.Body.String())
 		}
 	})
 
