@@ -14,6 +14,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/channel/leader"
+	"github.com/multica-ai/multica/server/internal/channel/outbound"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -340,6 +341,16 @@ func main() {
 	go runAutopilotScheduler(autopilotCtx, queries, autopilotSvc)
 	go runDBStatsLogger(sweepCtx, pool)
 
+	// Start outbound retry + cleanup workers (T15).
+	// The retry sender is a noop until the channel adapter is wired (T5-wiring);
+	// the infrastructure is in place so swapping to a real sender is a one-line change.
+	retryCtx, retryCancel := context.WithCancel(context.Background())
+	retryWorker := outbound.NewRetryWorker(pool, queries, &noopRetrySender{})
+	go retryWorker.Run(retryCtx)
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	cleanupWorker := outbound.NewCleanupWorker(queries)
+	go cleanupWorker.Run(cleanupCtx)
+
 	if metricsServer != nil {
 		go func() {
 			slog.Info("metrics server starting", "addr", metricsConfig.Addr)
@@ -364,6 +375,8 @@ func main() {
 	slog.Info("shutting down server")
 	sweepCancel()
 	autopilotCancel()
+	retryCancel()
+	cleanupCancel()
 	// Stop the channel leader before HTTP shutdown: OnRelease may want
 	// to send a final "going down" message via the still-up service
 	// layer; doing it after API shutdown would race the http.Server's
@@ -386,4 +399,14 @@ func main() {
 		metricsShutdownCancel()
 	}
 	slog.Info("server stopped")
+}
+
+// noopRetrySender is a placeholder RetrySender used until the channel adapter
+// is wired (T5-wiring). It logs the retry attempt but does not send. Replace
+// with a real sender (e.g. channelRegistry-based) when the adapter lands.
+type noopRetrySender struct{}
+
+func (s *noopRetrySender) SendCard(_ context.Context, provider string, externalUserID string, _ outbound.RetryPayload) error {
+	slog.Info("retry sender: noop (adapter not wired)", "provider", provider, "external_user_id", externalUserID)
+	return nil
 }
