@@ -1,6 +1,7 @@
 package outbound
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ type mockSender struct {
 	mu      sync.Mutex
 	calls   []sendCall
 	callSeq int
+	err     error // if set, SendCard returns this error
 }
 
 type sendCall struct {
@@ -22,11 +24,12 @@ type sendCall struct {
 	Card           port.OutboundCardMessage
 }
 
-func (m *mockSender) SendCard(externalUserID string, card port.OutboundCardMessage) {
+func (m *mockSender) SendCard(externalUserID string, card port.OutboundCardMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.callSeq++
 	m.calls = append(m.calls, sendCall{ExternalUserID: externalUserID, Card: card})
+	return m.err
 }
 
 func (m *mockSender) Calls() []sendCall {
@@ -159,6 +162,67 @@ func TestAggregator_StopDropsBuffer(t *testing.T) {
 	}
 }
 
+// TC-out-aggregator-e: SendCard error on timer flush — merged card is dropped, not retried
+func TestAggregator_MergeSendError_Drops(t *testing.T) {
+	sender := &mockSender{err: errors.New("network timeout")}
+	agg := NewAggregator(sender, 200*time.Millisecond)
+	defer agg.Stop()
+
+	userID := "ext-user-err"
+	for i := 0; i < 3; i++ {
+		agg.Add(userID, port.OutboundCardMessage{
+			ChatID: userID,
+			Title:  fmt.Sprintf("Issue %d", i+1),
+		}, false)
+	}
+
+	time.Sleep(400 * time.Millisecond)
+
+	// SendCard was called (returned error), but aggregator logged+dropped
+	calls := sender.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("TC-e: expected 1 send attempt (even on error), got %d", len(calls))
+	}
+}
+
+// TC-out-aggregator-f: SendCard error on bypass — dropped, not retried
+func TestAggregator_BypassSendError_Drops(t *testing.T) {
+	sender := &mockSender{err: errors.New("service unavailable")}
+	agg := NewAggregator(sender, 24*time.Hour)
+	defer agg.Stop()
+
+	agg.Add("user-err", port.OutboundCardMessage{
+		ChatID: "user-err",
+		Title:  "Urgent",
+	}, true)
+
+	// Should not panic; error is logged and counted as dropped
+	calls := sender.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("TC-f: expected 1 send attempt, got %d", len(calls))
+	}
+}
+
+// TC-out-aggregator-g: SendCard error on 51st path — both merged and 51st are attempted
+func TestAggregator_BufferLimitSendError_Drops(t *testing.T) {
+	sender := &mockSender{err: errors.New("rate limited")}
+	agg := NewAggregator(sender, 24*time.Hour)
+	defer agg.Stop()
+
+	userID := "ext-user-limit-err"
+	for i := 0; i < 51; i++ {
+		agg.Add(userID, port.OutboundCardMessage{
+			ChatID: userID,
+			Title:  fmt.Sprintf("Issue %d", i+1),
+		}, false)
+	}
+
+	calls := sender.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("TC-g: expected 2 send attempts (merged + 51st), got %d", len(calls))
+	}
+}
+
 // Test: multiple users aggregated independently
 func TestAggregator_MultiUser(t *testing.T) {
 	sender := &mockSender{}
@@ -217,5 +281,55 @@ func TestAggregator_UrgentDoesNotAffectOtherBuffer(t *testing.T) {
 	calls := sender.Calls()
 	if len(calls) != 2 {
 		t.Fatalf("expected 2 total sends, got %d", len(calls))
+	}
+}
+
+// Test: Add after Stop drops the notification
+func TestAggregator_AddAfterStop_Drops(t *testing.T) {
+	sender := &mockSender{}
+	agg := NewAggregator(sender, 24*time.Hour)
+
+	agg.Stop()
+
+	agg.Add("user-late", port.OutboundCardMessage{
+		ChatID: "user-late",
+		Title:  "Late",
+	}, false)
+
+	time.Sleep(50 * time.Millisecond)
+	if len(sender.Calls()) != 0 {
+		t.Errorf("expected 0 sends after Stop, got %d", len(sender.Calls()))
+	}
+}
+
+// Test: timer flush for one user while another user's buffer is still open
+func TestAggregator_TimerFlushIndependent(t *testing.T) {
+	sender := &mockSender{}
+	agg := NewAggregator(sender, 150*time.Millisecond)
+	defer agg.Stop()
+
+	// user-A gets 1 notification at t=0
+	agg.Add("user-A", port.OutboundCardMessage{ChatID: "user-A", Title: "A1"}, false)
+
+	time.Sleep(100 * time.Millisecond)
+
+	// user-B gets 1 notification at t=100ms (after A's window nearly expired)
+	agg.Add("user-B", port.OutboundCardMessage{ChatID: "user-B", Title: "B1"}, false)
+
+	// At t=150ms: user-A's timer fires
+	time.Sleep(100 * time.Millisecond)
+	calls := sender.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 flush (user-A), got %d", len(calls))
+	}
+	if calls[0].ExternalUserID != "user-A" {
+		t.Errorf("expected flush for user-A, got %q", calls[0].ExternalUserID)
+	}
+
+	// At t=250ms: user-B's timer fires
+	time.Sleep(150 * time.Millisecond)
+	calls = sender.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 flushes total, got %d", len(calls))
 	}
 }
