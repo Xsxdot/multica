@@ -130,9 +130,11 @@ type Usage struct {
 
 // LLMResponse is the structured JSON we expect from the LLM.
 type LLMResponse struct {
-	Intent     string            `json:"intent"`
-	Confidence float64           `json:"confidence"`
-	Params     map[string]string `json:"params"`
+	Intent     string  `json:"intent"`
+	Confidence float64 `json:"confidence"`
+	// Params is intentionally map[string]string for M2; M3 should upgrade to map[string]any
+	// to support nested params (e.g. timestamps, label arrays).
+	Params map[string]string `json:"params"`
 }
 
 // Classify sends text to the LLM and returns the parsed intent.
