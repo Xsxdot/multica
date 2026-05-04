@@ -1,8 +1,10 @@
 package intent_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -120,6 +122,12 @@ func TestLLMClassifier_Classify_InputTruncation(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	var buf bytes.Buffer
+	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	defer slog.SetDefault(oldLogger)
+
 	clf := in.NewLLMClassifier(in.LLMClassifierConfig{
 		APIURL:    srv.URL,
 		APIKey:    "test-key",
@@ -136,6 +144,11 @@ func TestLLMClassifier_Classify_InputTruncation(t *testing.T) {
 	// The received body should be truncated (shorter than original)
 	if len(receivedBody) >= len(longText) {
 		t.Errorf("expected truncation: received %d chars, original %d", len(receivedBody), len(longText))
+	}
+	// Assert warn log was emitted
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "input truncated") {
+		t.Errorf("expected warn log 'input truncated', got: %s", logOutput)
 	}
 }
 

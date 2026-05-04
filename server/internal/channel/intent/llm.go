@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -211,6 +212,7 @@ func truncateInput(text string) string {
 	if len(runes) <= maxInputChars {
 		return text
 	}
+	slog.Warn("intent: input truncated", "original_chars", len(runes), "truncated_to", maxInputChars)
 	return string(runes[:maxInputChars])
 }
 
