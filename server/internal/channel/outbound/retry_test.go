@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,7 +178,12 @@ var testID1 = [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0
 
 // --- processOne tests (TC-out-4, TC-out-5, TC-risk-5) ---
 
-// TC-out-4: retryable error → IncrementAttempts with correct backoff
+// TC-out-4 / TC-risk-5: retryable error → IncrementAttempts with correct backoff.
+// Spec (issue STA-43 description): "退避间隔 30s/2min/10min（指数）" with
+// max_attempts=3. All three backoff tiers must be reachable in production.
+// boundary semantics: while f.Attempts < f.MaxAttempts, increment; on
+// f.Attempts == f.MaxAttempts, mark dead. This way attempts=2 still gets
+// the third (10min) backoff tier before the next tick marks it dead.
 func TestProcessOne_RetryableError_IncrementsWithBackoff(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -198,9 +204,12 @@ func TestProcessOne_RetryableError_IncrementsWithBackoff(t *testing.T) {
 			wantBackoff: 2 * time.Minute,
 		},
 		{
-			name:        "attempt 2 → 10min backoff",
+			// CRITICAL: with default max_attempts=3, attempt 2 must still
+			// schedule the 10min retry (not markDead). Without this the
+			// 10min tier is dead code in production. See ReviewBot v2 C2.
+			name:        "attempt 2 → 10min backoff (third tier reachable at default max)",
 			attempts:    2,
-			maxAttempts: 4,
+			maxAttempts: 3,
 			wantBackoff: 10 * time.Minute,
 		},
 	}
@@ -254,14 +263,16 @@ func TestProcessOne_NonRetryableError_MarksDeadImmediately(t *testing.T) {
 	}
 }
 
-// TC-risk-5: max attempts reached → mark dead
+// TC-risk-5: max attempts reached → mark dead.
+// Boundary: at f.Attempts == f.MaxAttempts (no more retries left), mark dead.
+// This is the tick AFTER the third (10min) retry already ran.
 func TestProcessOne_MaxAttemptsReached_MarksDead(t *testing.T) {
 	store := &mockFailureStore{}
 	sender := &mockRetrySender{err: WrapRetryable(errors.New("5xx timeout"))}
 	worker := NewRetryWorkerWithStore(store, sender)
 
-	// attempts=2, maxAttempts=3 → nextAttempt=3 >= 3 → dead
-	f := makeFailure(testID1, 2, 3, "feishu", "ou_user1")
+	// attempts=3, maxAttempts=3 → all retries used → dead.
+	f := makeFailure(testID1, 3, 3, "feishu", "ou_user1")
 	worker.processOne(context.Background(), f)
 
 	if len(store.markDeadCalls) != 1 {
@@ -298,7 +309,9 @@ func TestProcessOne_Success_DeletesRecord(t *testing.T) {
 	}
 }
 
-// Bad payload → mark dead
+// Bad payload → mark dead.
+// Recommended-1: prefix-check, not exact string. encoding/json error wording
+// has changed across Go versions; pinning the literal makes upgrades flaky.
 func TestProcessOne_BadPayload_MarksDead(t *testing.T) {
 	store := &mockFailureStore{}
 	sender := &mockRetrySender{}
@@ -318,22 +331,26 @@ func TestProcessOne_BadPayload_MarksDead(t *testing.T) {
 	if len(store.markDeadCalls) != 1 {
 		t.Fatalf("expected 1 MarkDead call, got %d", len(store.markDeadCalls))
 	}
-	if store.markDeadCalls[0].LastError.String != "unmarshal payload: invalid character 'o' in literal null (expecting 'u')" {
-		t.Errorf("markDead reason = %q", store.markDeadCalls[0].LastError.String)
+	if !strings.HasPrefix(store.markDeadCalls[0].LastError.String, "unmarshal payload:") {
+		t.Errorf("markDead reason = %q, want prefix %q", store.markDeadCalls[0].LastError.String, "unmarshal payload:")
 	}
 }
 
-// Missing external user ID → mark dead
+// R3: target_external_user_id column is the single source of truth.
+// When column is invalid/empty, mark dead immediately — do not fall back
+// to payload (which is a separate field for audit/replay, not addressing).
+// See ReviewBot v2 R3.
 func TestProcessOne_NoExternalUserID_MarksDead(t *testing.T) {
 	store := &mockFailureStore{}
 	sender := &mockRetrySender{}
 	worker := NewRetryWorkerWithStore(store, sender)
 
+	// Column invalid; payload still has a user id — must NOT fall back.
 	f := db.ChannelOutboundFailure{
 		ID:                   pgtype.UUID{Bytes: testID1, Valid: true},
 		Provider:             "feishu",
 		TargetExternalUserID: pgtype.Text{String: "", Valid: false},
-		Payload:              []byte(`{"external_user_id":"","title":"t","body":"b"}`),
+		Payload:              []byte(`{"external_user_id":"ou_should_be_ignored","title":"t","body":"b"}`),
 		Status:               "pending",
 		Attempts:             0,
 		MaxAttempts:          3,
@@ -343,12 +360,43 @@ func TestProcessOne_NoExternalUserID_MarksDead(t *testing.T) {
 	if len(store.markDeadCalls) != 1 {
 		t.Fatalf("expected 1 MarkDead call, got %d", len(store.markDeadCalls))
 	}
-	if store.markDeadCalls[0].LastError.String != "no external_user_id in failure record or payload" {
-		t.Errorf("markDead reason = %q", store.markDeadCalls[0].LastError.String)
+	if !strings.Contains(store.markDeadCalls[0].LastError.String, "target_external_user_id") {
+		t.Errorf("markDead reason = %q, want substring %q", store.markDeadCalls[0].LastError.String, "target_external_user_id")
+	}
+	// Critically, must not have called sender (no fallback to payload).
+	if len(sender.calls) != 0 {
+		t.Errorf("expected 0 sender calls (no fallback), got %d", len(sender.calls))
 	}
 }
 
 // --- Helper function tests ---
+
+// C4 gate: RetryWorkerEnabled() defaults to false (refuses to start
+// without explicit env opt-in + real RetrySender wiring). main.go must
+// gate retry worker startup on this — the noop sender previously deleted
+// every pending failure within seconds; safe default is "off".
+func TestRetryWorkerEnabled_DefaultDisabled(t *testing.T) {
+	t.Setenv("CHANNEL_RETRY_WORKER_ENABLED", "")
+	if RetryWorkerEnabled() {
+		t.Error("expected RetryWorkerEnabled()=false when env unset")
+	}
+}
+
+func TestRetryWorkerEnabled_OptIn(t *testing.T) {
+	t.Setenv("CHANNEL_RETRY_WORKER_ENABLED", "true")
+	if !RetryWorkerEnabled() {
+		t.Error("expected RetryWorkerEnabled()=true when env=true")
+	}
+}
+
+func TestRetryWorkerEnabled_RejectsAmbiguousValues(t *testing.T) {
+	for _, v := range []string{"1", "yes", "TRUE", "True", "on"} {
+		t.Setenv("CHANNEL_RETRY_WORKER_ENABLED", v)
+		if RetryWorkerEnabled() {
+			t.Errorf("expected RetryWorkerEnabled()=false for env=%q (only literal \"true\" enables)", v)
+		}
+	}
+}
 
 func TestPgText(t *testing.T) {
 	pt := pgText("hello")
