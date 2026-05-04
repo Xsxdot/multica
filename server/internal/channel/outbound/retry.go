@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -69,38 +69,56 @@ type RetrySender interface {
 	SendCard(ctx context.Context, provider string, externalUserID string, card RetryPayload) error
 }
 
+// FailureStore abstracts the DB operations needed by RetryWorker.
+// *db.Queries satisfies this interface.
+type FailureStore interface {
+	ClaimPendingOutboundFailures(ctx context.Context, limit int32) ([]db.ChannelOutboundFailure, error)
+	IncrementOutboundFailureAttempts(ctx context.Context, arg db.IncrementOutboundFailureAttemptsParams) (db.ChannelOutboundFailure, error)
+	MarkOutboundFailureDead(ctx context.Context, arg db.MarkOutboundFailureDeadParams) (db.ChannelOutboundFailure, error)
+	DeleteOutboundFailure(ctx context.Context, id pgtype.UUID) error
+}
+
 // RetryWorker polls channel_outbound_failure for pending rows and retries
 // them. It distinguishes retryable (5xx / network) from non-retryable
 // errors: retryable failures get exponential backoff (30s → 2m → 10min)
 // and non-retryable failures are marked 'dead' immediately.
 //
 // Concurrency: the worker runs a single goroutine; multiple instances
-// across replicas use FOR UPDATE SKIP LOCKED to avoid contention.
+// across replicas use atomic UPDATE ... FOR UPDATE SKIP LOCKED in the
+// claim query to avoid contention.
 type RetryWorker struct {
-	pool   *pgxpool.Pool
-	queries *db.Queries
+	store  FailureStore
 	sender RetrySender
-
-	mu     sync.Mutex
-	closed bool
-	done   chan struct{}
 }
 
 // NewRetryWorker creates a RetryWorker. Call Run to start it.
 func NewRetryWorker(pool *pgxpool.Pool, queries *db.Queries, sender RetrySender) *RetryWorker {
 	return &RetryWorker{
-		pool:    pool,
-		queries: queries,
-		sender:  sender,
-		done:    make(chan struct{}),
+		store:  queries,
+		sender: sender,
 	}
+}
+
+// NewRetryWorkerWithStore creates a RetryWorker with a custom FailureStore
+// (for testing).
+func NewRetryWorkerWithStore(store FailureStore, sender RetrySender) *RetryWorker {
+	return &RetryWorker{
+		store:  store,
+		sender: sender,
+	}
+}
+
+// RetryWorkerEnabled reports whether the retry worker should start.
+// Controlled by CHANNEL_RETRY_WORKER_ENABLED env var (default: false).
+// Must be explicitly enabled after the real RetrySender is wired.
+func RetryWorkerEnabled() bool {
+	return os.Getenv("CHANNEL_RETRY_WORKER_ENABLED") == "true"
 }
 
 // Run starts the retry loop. It blocks until ctx is cancelled.
 func (w *RetryWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(RetryTickInterval)
 	defer ticker.Stop()
-	defer close(w.done)
 
 	for {
 		select {
@@ -112,16 +130,9 @@ func (w *RetryWorker) Run(ctx context.Context) {
 	}
 }
 
-// Stop signals the worker to stop and waits for the current tick to finish.
-func (w *RetryWorker) Stop() {
-	w.mu.Lock()
-	w.closed = true
-	w.mu.Unlock()
-}
-
 // processBatch claims and processes a batch of pending failures.
 func (w *RetryWorker) processBatch(ctx context.Context) {
-	failures, err := w.queries.ClaimPendingOutboundFailures(ctx, RetryBatchSize)
+	failures, err := w.store.ClaimPendingOutboundFailures(ctx, RetryBatchSize)
 	if err != nil {
 		slog.Error("retry worker: claim failed", "error", err)
 		return
@@ -142,6 +153,8 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 		return
 	}
 
+	// Use target_external_user_id column as single source of truth.
+	// If empty, fall back to payload (legacy records).
 	externalUserID := f.TargetExternalUserID.String
 	if externalUserID == "" {
 		externalUserID = payload.ExternalUserID
@@ -156,18 +169,18 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 	err := w.sender.SendCard(ctx, f.Provider, externalUserID, payload)
 
 	if err == nil {
-		// Success — delete the failure record by marking it dead with a
-		// success indicator. (The record stays for audit; a separate
-		// cleanup task removes old dead records.)
-		slog.Info("retry worker: send succeeded",
+		// Success — delete the failure record entirely.
+		slog.Info("retry worker: send succeeded, deleting record",
 			"id", uuidStr(f.ID), "provider", f.Provider, "attempts", f.Attempts)
-		w.markDead(ctx, f, "retry_succeeded")
+		w.deleteRecord(ctx, f.ID)
 		return
 	}
 
 	// Classify the error.
 	if IsRetryable(err) {
 		// Retryable — increment attempts with backoff.
+		// Use f.Attempts (current) as the backoff index: attempt 0 → 30s,
+		// attempt 1 → 2min, attempt 2 → 10min.
 		nextAttempt := int(f.Attempts) + 1
 		if nextAttempt >= int(f.MaxAttempts) {
 			slog.Warn("retry worker: max attempts reached, marking dead",
@@ -176,8 +189,8 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 			return
 		}
 
-		backoff := backoffForAttempt(nextAttempt)
-		_, updateErr := w.queries.IncrementOutboundFailureAttempts(ctx, db.IncrementOutboundFailureAttemptsParams{
+		backoff := backoffForAttempt(int(f.Attempts))
+		_, updateErr := w.store.IncrementOutboundFailureAttempts(ctx, db.IncrementOutboundFailureAttemptsParams{
 			ID:        f.ID,
 			LastError: pgText(err.Error()),
 			Column3:   pgInterval(backoff),
@@ -200,12 +213,19 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 
 // markDead sets the failure status to 'dead'.
 func (w *RetryWorker) markDead(ctx context.Context, f db.ChannelOutboundFailure, reason string) {
-	_, err := w.queries.MarkOutboundFailureDead(ctx, db.MarkOutboundFailureDeadParams{
+	_, err := w.store.MarkOutboundFailureDead(ctx, db.MarkOutboundFailureDeadParams{
 		ID:        f.ID,
 		LastError: pgText(reason),
 	})
 	if err != nil {
 		slog.Error("retry worker: mark dead failed", "id", uuidStr(f.ID), "error", err)
+	}
+}
+
+// deleteRecord removes a failure record (used on successful retry).
+func (w *RetryWorker) deleteRecord(ctx context.Context, id pgtype.UUID) {
+	if err := w.store.DeleteOutboundFailure(ctx, id); err != nil {
+		slog.Error("retry worker: delete failed", "id", uuidStr(id), "error", err)
 	}
 }
 

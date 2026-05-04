@@ -6,15 +6,23 @@ INSERT INTO channel_outbound_failure (
 RETURNING *;
 
 -- name: ClaimPendingOutboundFailures :many
--- Claim up to N pending failures whose next_retry_at <= now().
--- FOR UPDATE SKIP LOCKED prevents contention across multiple worker
--- instances and avoids deadlocks on the same rows.
-SELECT * FROM channel_outbound_failure
-WHERE status = 'pending'
-  AND next_retry_at <= now()
-ORDER BY next_retry_at ASC
-LIMIT $1
-FOR UPDATE SKIP LOCKED;
+-- Atomically claim up to N pending failures: the UPDATE locks rows via
+-- the FOR UPDATE SKIP LOCKED subquery so two replicas never process the
+-- same failure concurrently. Claimed rows get a 5-minute cooldown
+-- (next_retry_at) to prevent re-claim before IncrementAttempts/MarkDead
+-- overwrites it with the real backoff.
+UPDATE channel_outbound_failure SET
+    next_retry_at = now() + interval '5 minutes',
+    updated_at = now()
+WHERE id IN (
+    SELECT id FROM channel_outbound_failure
+    WHERE status = 'pending'
+      AND next_retry_at <= now()
+    ORDER BY next_retry_at ASC
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING *;
 
 -- name: IncrementOutboundFailureAttempts :one
 -- Record a retry attempt: bump attempts, set last_error, last_attempted_at,
@@ -37,6 +45,10 @@ UPDATE channel_outbound_failure SET
     updated_at = now()
 WHERE id = $1
 RETURNING *;
+
+-- name: DeleteOutboundFailure :exec
+-- Delete a failure record (used when retry succeeds).
+DELETE FROM channel_outbound_failure WHERE id = $1;
 
 -- name: DeleteOldDeadOutboundFailures :exec
 -- Cleanup: remove dead entries older than 7 days.

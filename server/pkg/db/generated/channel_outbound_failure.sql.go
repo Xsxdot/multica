@@ -12,17 +12,23 @@ import (
 )
 
 const claimPendingOutboundFailures = `-- name: ClaimPendingOutboundFailures :many
-SELECT id, provider, event_kind, target_user_id, target_external_user_id, payload, status, attempts, max_attempts, next_retry_at, last_error, last_attempted_at, created_at, updated_at FROM channel_outbound_failure
-WHERE status = 'pending'
-  AND next_retry_at <= now()
-ORDER BY next_retry_at ASC
-LIMIT $1
-FOR UPDATE SKIP LOCKED
+UPDATE channel_outbound_failure SET
+    next_retry_at = now() + interval '5 minutes',
+    updated_at = now()
+WHERE id IN (
+    SELECT id FROM channel_outbound_failure
+    WHERE status = 'pending'
+      AND next_retry_at <= now()
+    ORDER BY next_retry_at ASC
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, provider, event_kind, target_user_id, target_external_user_id, payload, status, attempts, max_attempts, next_retry_at, last_error, last_attempted_at, created_at, updated_at
 `
 
-// Claim up to N pending failures whose next_retry_at <= now().
-// FOR UPDATE SKIP LOCKED prevents contention across multiple worker
-// instances and avoids deadlocks on the same rows.
+// Atomically claim up to N pending failures: the UPDATE locks rows via
+// the FOR UPDATE SKIP LOCKED subquery so two replicas never process the
+// same failure concurrently.
 func (q *Queries) ClaimPendingOutboundFailures(ctx context.Context, limit int32) ([]ChannelOutboundFailure, error) {
 	rows, err := q.db.Query(ctx, claimPendingOutboundFailures, limit)
 	if err != nil {
@@ -90,6 +96,16 @@ WHERE status = 'dead'
 // Cleanup: remove dead entries older than 7 days.
 func (q *Queries) DeleteOldDeadOutboundFailures(ctx context.Context) error {
 	_, err := q.db.Exec(ctx, deleteOldDeadOutboundFailures)
+	return err
+}
+
+const deleteOutboundFailure = `-- name: DeleteOutboundFailure :exec
+DELETE FROM channel_outbound_failure WHERE id = $1
+`
+
+// Delete a failure record (used when retry succeeds).
+func (q *Queries) DeleteOutboundFailure(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteOutboundFailure, id)
 	return err
 }
 

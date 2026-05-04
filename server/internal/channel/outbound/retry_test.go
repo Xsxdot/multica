@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // --- Error classification tests (TC-risk-5) ---
@@ -94,7 +95,7 @@ func TestRetryPayload_MarshalRoundtrip(t *testing.T) {
 	}
 }
 
-// --- Mock RetrySender for processOne testing ---
+// --- Mock RetrySender ---
 
 type mockRetrySender struct {
 	calls []mockRetryCall
@@ -114,6 +115,237 @@ func (m *mockRetrySender) SendCard(_ context.Context, provider string, externalU
 		Payload:        card,
 	})
 	return m.err
+}
+
+// --- Mock FailureStore ---
+
+type mockFailureStore struct {
+	claimed        []db.ChannelOutboundFailure
+	claimErr       error
+	incrementCalls []db.IncrementOutboundFailureAttemptsParams
+	markDeadCalls  []db.MarkOutboundFailureDeadParams
+	deleteCalls    []pgtype.UUID
+	incrementErr   error
+	markDeadErr    error
+	deleteErr      error
+}
+
+func (m *mockFailureStore) ClaimPendingOutboundFailures(_ context.Context, _ int32) ([]db.ChannelOutboundFailure, error) {
+	if m.claimErr != nil {
+		return nil, m.claimErr
+	}
+	result := m.claimed
+	m.claimed = nil // one-shot
+	return result, nil
+}
+
+func (m *mockFailureStore) IncrementOutboundFailureAttempts(_ context.Context, arg db.IncrementOutboundFailureAttemptsParams) (db.ChannelOutboundFailure, error) {
+	m.incrementCalls = append(m.incrementCalls, arg)
+	return db.ChannelOutboundFailure{}, m.incrementErr
+}
+
+func (m *mockFailureStore) MarkOutboundFailureDead(_ context.Context, arg db.MarkOutboundFailureDeadParams) (db.ChannelOutboundFailure, error) {
+	m.markDeadCalls = append(m.markDeadCalls, arg)
+	return db.ChannelOutboundFailure{}, m.markDeadErr
+}
+
+func (m *mockFailureStore) DeleteOutboundFailure(_ context.Context, id pgtype.UUID) error {
+	m.deleteCalls = append(m.deleteCalls, id)
+	return m.deleteErr
+}
+
+// --- Helper to build test failure records ---
+
+func makeFailure(id [16]byte, attempts int32, maxAttempts int32, provider string, externalUserID string) db.ChannelOutboundFailure {
+	payload, _ := json.Marshal(RetryPayload{
+		ExternalUserID: externalUserID,
+		Title:          "Test Title",
+		Body:           "Test Body",
+	})
+	return db.ChannelOutboundFailure{
+		ID:                   pgtype.UUID{Bytes: id, Valid: true},
+		Provider:             provider,
+		TargetExternalUserID: pgtype.Text{String: externalUserID, Valid: true},
+		Payload:              payload,
+		Status:               "pending",
+		Attempts:             attempts,
+		MaxAttempts:          maxAttempts,
+	}
+}
+
+var testID1 = [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+
+// --- processOne tests (TC-out-4, TC-out-5, TC-risk-5) ---
+
+// TC-out-4: retryable error → IncrementAttempts with correct backoff
+func TestProcessOne_RetryableError_IncrementsWithBackoff(t *testing.T) {
+	tests := []struct {
+		name        string
+		attempts    int32
+		maxAttempts int32
+		wantBackoff time.Duration
+	}{
+		{
+			name:        "attempt 0 → 30s backoff",
+			attempts:    0,
+			maxAttempts: 3,
+			wantBackoff: 30 * time.Second,
+		},
+		{
+			name:        "attempt 1 → 2min backoff",
+			attempts:    1,
+			maxAttempts: 3,
+			wantBackoff: 2 * time.Minute,
+		},
+		{
+			name:        "attempt 2 → 10min backoff",
+			attempts:    2,
+			maxAttempts: 4,
+			wantBackoff: 10 * time.Minute,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &mockFailureStore{}
+			sender := &mockRetrySender{err: WrapRetryable(errors.New("5xx timeout"))}
+			worker := NewRetryWorkerWithStore(store, sender)
+
+			f := makeFailure(testID1, tt.attempts, tt.maxAttempts, "feishu", "ou_user1")
+			worker.processOne(context.Background(), f)
+
+			if len(store.incrementCalls) != 1 {
+				t.Fatalf("expected 1 IncrementAttempts call, got %d", len(store.incrementCalls))
+			}
+			gotBackoff := time.Duration(store.incrementCalls[0].Column3.Microseconds) * time.Microsecond
+			if gotBackoff != tt.wantBackoff {
+				t.Errorf("backoff = %v, want %v", gotBackoff, tt.wantBackoff)
+			}
+			if len(store.markDeadCalls) != 0 {
+				t.Errorf("expected 0 MarkDead calls, got %d", len(store.markDeadCalls))
+			}
+			if len(store.deleteCalls) != 0 {
+				t.Errorf("expected 0 Delete calls, got %d", len(store.deleteCalls))
+			}
+		})
+	}
+}
+
+// TC-out-5: non-retryable error (e.g. 230002) → mark dead immediately
+func TestProcessOne_NonRetryableError_MarksDeadImmediately(t *testing.T) {
+	store := &mockFailureStore{}
+	sender := &mockRetrySender{err: errors.New("230002 user not found")}
+	worker := NewRetryWorkerWithStore(store, sender)
+
+	f := makeFailure(testID1, 0, 3, "feishu", "ou_user1")
+	worker.processOne(context.Background(), f)
+
+	if len(store.markDeadCalls) != 1 {
+		t.Fatalf("expected 1 MarkDead call, got %d", len(store.markDeadCalls))
+	}
+	if store.markDeadCalls[0].LastError.String != "non-retryable: 230002 user not found" {
+		t.Errorf("markDead reason = %q, want %q", store.markDeadCalls[0].LastError.String, "non-retryable: 230002 user not found")
+	}
+	if len(store.incrementCalls) != 0 {
+		t.Errorf("expected 0 IncrementAttempts calls, got %d", len(store.incrementCalls))
+	}
+	if len(store.deleteCalls) != 0 {
+		t.Errorf("expected 0 Delete calls, got %d", len(store.deleteCalls))
+	}
+}
+
+// TC-risk-5: max attempts reached → mark dead
+func TestProcessOne_MaxAttemptsReached_MarksDead(t *testing.T) {
+	store := &mockFailureStore{}
+	sender := &mockRetrySender{err: WrapRetryable(errors.New("5xx timeout"))}
+	worker := NewRetryWorkerWithStore(store, sender)
+
+	// attempts=2, maxAttempts=3 → nextAttempt=3 >= 3 → dead
+	f := makeFailure(testID1, 2, 3, "feishu", "ou_user1")
+	worker.processOne(context.Background(), f)
+
+	if len(store.markDeadCalls) != 1 {
+		t.Fatalf("expected 1 MarkDead call, got %d", len(store.markDeadCalls))
+	}
+	if store.markDeadCalls[0].LastError.String != "max attempts (3) exhausted: 5xx timeout" {
+		t.Errorf("markDead reason = %q", store.markDeadCalls[0].LastError.String)
+	}
+	if len(store.incrementCalls) != 0 {
+		t.Errorf("expected 0 IncrementAttempts calls, got %d", len(store.incrementCalls))
+	}
+}
+
+// Success path → DELETE (not markDead)
+func TestProcessOne_Success_DeletesRecord(t *testing.T) {
+	store := &mockFailureStore{}
+	sender := &mockRetrySender{err: nil} // success
+	worker := NewRetryWorkerWithStore(store, sender)
+
+	f := makeFailure(testID1, 1, 3, "feishu", "ou_user1")
+	worker.processOne(context.Background(), f)
+
+	if len(store.deleteCalls) != 1 {
+		t.Fatalf("expected 1 Delete call, got %d", len(store.deleteCalls))
+	}
+	if store.deleteCalls[0] != f.ID {
+		t.Errorf("deleted ID = %v, want %v", store.deleteCalls[0], f.ID)
+	}
+	if len(store.markDeadCalls) != 0 {
+		t.Errorf("expected 0 MarkDead calls, got %d", len(store.markDeadCalls))
+	}
+	if len(store.incrementCalls) != 0 {
+		t.Errorf("expected 0 IncrementAttempts calls, got %d", len(store.incrementCalls))
+	}
+}
+
+// Bad payload → mark dead
+func TestProcessOne_BadPayload_MarksDead(t *testing.T) {
+	store := &mockFailureStore{}
+	sender := &mockRetrySender{}
+	worker := NewRetryWorkerWithStore(store, sender)
+
+	f := db.ChannelOutboundFailure{
+		ID:                   pgtype.UUID{Bytes: testID1, Valid: true},
+		Provider:             "feishu",
+		TargetExternalUserID: pgtype.Text{String: "ou_user1", Valid: true},
+		Payload:              []byte("not-json"),
+		Status:               "pending",
+		Attempts:             0,
+		MaxAttempts:          3,
+	}
+	worker.processOne(context.Background(), f)
+
+	if len(store.markDeadCalls) != 1 {
+		t.Fatalf("expected 1 MarkDead call, got %d", len(store.markDeadCalls))
+	}
+	if store.markDeadCalls[0].LastError.String != "unmarshal payload: invalid character 'o' in literal null (expecting 'u')" {
+		t.Errorf("markDead reason = %q", store.markDeadCalls[0].LastError.String)
+	}
+}
+
+// Missing external user ID → mark dead
+func TestProcessOne_NoExternalUserID_MarksDead(t *testing.T) {
+	store := &mockFailureStore{}
+	sender := &mockRetrySender{}
+	worker := NewRetryWorkerWithStore(store, sender)
+
+	f := db.ChannelOutboundFailure{
+		ID:                   pgtype.UUID{Bytes: testID1, Valid: true},
+		Provider:             "feishu",
+		TargetExternalUserID: pgtype.Text{String: "", Valid: false},
+		Payload:              []byte(`{"external_user_id":"","title":"t","body":"b"}`),
+		Status:               "pending",
+		Attempts:             0,
+		MaxAttempts:          3,
+	}
+	worker.processOne(context.Background(), f)
+
+	if len(store.markDeadCalls) != 1 {
+		t.Fatalf("expected 1 MarkDead call, got %d", len(store.markDeadCalls))
+	}
+	if store.markDeadCalls[0].LastError.String != "no external_user_id in failure record or payload" {
+		t.Errorf("markDead reason = %q", store.markDeadCalls[0].LastError.String)
+	}
 }
 
 // --- Helper function tests ---
@@ -153,6 +385,3 @@ func TestUUIDStr_Valid(t *testing.T) {
 		t.Errorf("uuidStr(valid UUID) = %q, want non-empty hex string", result)
 	}
 }
-
-// Ensure the context import is used.
-var _ = context.Background
