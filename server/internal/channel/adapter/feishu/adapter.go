@@ -176,8 +176,12 @@ func (a *Adapter) Send(ctx context.Context, msg port.OutboundMessage) (port.Send
 	return a.sendText(ctx, msg)
 }
 
-// SendCard implements port.Channel. The MVP returns ErrNotImplemented; T16
-// will replace the body with the real card-rendering call.
+// SendCard implements port.Channel. It delegates to sendCard which forwards
+// the pre-rendered card JSON in OutboundCardMessage.Body to Feishu's
+// OpenAPI as msg_type "interactive". Callers are expected to render the
+// card via the feishu/card sub-package and pass the JSON in Body — the
+// adapter does NOT wrap plain text into a card schema (see sendCard for
+// the rationale).
 func (a *Adapter) SendCard(ctx context.Context, msg port.OutboundCardMessage) (port.SendResult, error) {
 	return a.sendCard(ctx, msg)
 }

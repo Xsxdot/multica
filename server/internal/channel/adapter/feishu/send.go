@@ -35,7 +35,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 )
 
@@ -79,14 +78,46 @@ func (a *Adapter) sendText(ctx context.Context, msg port.OutboundMessage) (port.
 	}, nil
 }
 
-// sendCard is the SendCard entry point for the adapter. The MVP scope
-// explicitly defers card rendering to T16, so this is a pinned stub that
-// returns channel.ErrNotImplemented — callers must check via errors.Is, so
-// flipping this from "not implemented" to "implemented" later is a single
-// edit at this site with zero changes elsewhere.
-func (a *Adapter) sendCard(ctx context.Context, _ port.OutboundCardMessage) (port.SendResult, error) {
-	_ = ctx
-	return port.SendResult{Retryable: false}, channel.ErrNotImplemented
+// sendCard is the SendCard entry point for the adapter. It forwards the
+// pre-rendered card JSON in OutboundCardMessage.Body to the Feishu OpenAPI
+// with msg_type "interactive".
+//
+// Contract: Body is REQUIRED to contain card JSON produced by the
+// feishu/card sub-package (e.g. card.IssueCard(...).Render()). The
+// adapter intentionally does NOT wrap plain text into a card schema —
+// that would push the card vocabulary into the port layer (and the
+// outbound aggregator T14) and fork the schema across the codebase. By
+// keeping the contract narrow, the port DTO stays platform-agnostic and
+// the card schema lives in exactly one place.
+//
+// Empty Body is treated as a programmer bug (4xx-class); we surface a
+// non-retryable error so the outbound queue drops the message instead of
+// looping.
+func (a *Adapter) sendCard(ctx context.Context, msg port.OutboundCardMessage) (port.SendResult, error) {
+	if msg.ChatID == "" {
+		return port.SendResult{Retryable: false}, errors.New("feishu: OutboundCardMessage.ChatID is empty")
+	}
+	if msg.Body == "" {
+		// The card-rendering contract requires callers to pass the
+		// JSON output of card.*Card.Render(); empty Body means the
+		// caller skipped that step. Fail fast so the symptom shows
+		// up at the call site, not as an opaque Feishu 400 later.
+		return port.SendResult{Retryable: false}, errors.New("feishu: OutboundCardMessage.Body is empty; expected pre-rendered card JSON")
+	}
+
+	resp, err := a.client.SendMessage(ctx, SendRequest{
+		ReceiveIDType: "chat_id",
+		ReceiveID:     msg.ChatID,
+		MsgType:       "interactive",
+		Content:       msg.Body,
+	})
+	if err != nil {
+		return port.SendResult{Retryable: isRetryable(err)}, fmt.Errorf("feishu: send card: %w", err)
+	}
+	return port.SendResult{
+		PlatformMessageID: resp.MessageID,
+		Retryable:         false,
+	}, nil
 }
 
 // retryableError is the error type concrete Client implementations should
