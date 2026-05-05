@@ -18,6 +18,7 @@ import "github.com/jackc/pgx/v5/pgtype"
 type Issue struct {
 	ID          pgtype.UUID
 	WorkspaceID pgtype.UUID
+	Identifier  string
 	Title       string
 	Status      string
 }

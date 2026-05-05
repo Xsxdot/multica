@@ -20,6 +20,41 @@ const (
 	EventTypeMessageReceived EventType = "message_received"
 )
 
+// IntentKind is the high-level command category. Defined here (in port)
+// rather than imported from the intent package to avoid a circular
+// dependency: port is imported by intent-recog (T9/T10) which produces
+// Intents, and by dispatch (T11) which consumes them.
+type IntentKind string
+
+const (
+	IntentCreateIssue IntentKind = "CreateIssue"
+	IntentAddComment  IntentKind = "AddComment"
+	IntentQueryIssue  IntentKind = "QueryIssue"
+	IntentSetStatus   IntentKind = "SetStatus"
+	IntentDelete      IntentKind = "Delete"
+	IntentUnsupported IntentKind = "Unsupported"
+	IntentUnknown     IntentKind = "Unknown"
+	IntentASKClarify  IntentKind = "ASK_CLARIFY"
+)
+
+// IntentSource identifies how an Intent was recognised.
+type IntentSource string
+
+const (
+	SourceRule IntentSource = "rule"
+	SourceLLM  IntentSource = "llm"
+)
+
+// InboundIntent carries the parsed intent attached to an InboundEvent by
+// the intent-recog step (T9/T10). The dispatch step (T11) reads this
+// field to route the event to the correct facade handler.
+type InboundIntent struct {
+	Kind       IntentKind
+	Confidence float64
+	Params     map[string]string
+	Source     IntentSource
+}
+
 // ChatType distinguishes between a one-on-one (direct) chat and a group chat.
 // The dispatcher uses this to apply different policies (e.g. PRD §F7 path
 // rules: "group commands require workspace membership; private chat is
@@ -65,6 +100,7 @@ type InboundEvent struct {
 	SenderName  string
 	Text        string
 	MessageID   string
+	Intent      InboundIntent
 	RawPayload  json.RawMessage
 }
 
