@@ -18,6 +18,12 @@ const (
 	// time an InboundEvent of this type leaves Events(), downstream code can
 	// assume the message is intended for processing.
 	EventTypeMessageReceived EventType = "message_received"
+
+	// EventTypeMessageRecalled is emitted when the upstream platform signals
+	// that a previously delivered message has been recalled / deleted by the
+	// sender. The dispatcher must NOT delete any Issue or Comment; it only
+	// posts a recall annotation in the chat thread (PRD E6).
+	EventTypeMessageRecalled EventType = "message_recalled"
 )
 
 // IntentKind is the high-level command category. Defined here (in port)

@@ -28,6 +28,8 @@ func normaliseEvent(channelName, botUserID string, raw RawEvent) (port.InboundEv
 	switch raw.EventType {
 	case "im.message.receive_v1":
 		return normaliseMessageReceive(channelName, botUserID, raw)
+	case "im.message.recalled_v1":
+		return normaliseMessageRecalled(channelName, raw)
 	default:
 		return port.InboundEvent{}, false, nil
 	}
@@ -179,6 +181,41 @@ func collapseSpaces(s string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// feishuMessageRecalled mirrors the im.message.recalled_v1 schema the
+// adapter reads. Only message_id and chat_id are needed for correlation
+// and routing.
+type feishuMessageRecalled struct {
+	Header struct {
+		EventID string `json:"event_id"`
+	} `json:"header"`
+	Event struct {
+		MessageID string `json:"message_id"`
+		ChatID    string `json:"chat_id"`
+	} `json:"event"`
+}
+
+func normaliseMessageRecalled(channelName string, raw RawEvent) (port.InboundEvent, bool, error) {
+	var ev feishuMessageRecalled
+	if err := json.Unmarshal(raw.Payload, &ev); err != nil {
+		return port.InboundEvent{}, false, fmt.Errorf("feishu: decode im.message.recalled_v1: %w", err)
+	}
+
+	eventID := ev.Header.EventID
+	if eventID == "" {
+		eventID = raw.EventID
+	}
+
+	return port.InboundEvent{
+		ChannelName: channelName,
+		EventID:     eventID,
+		Type:        port.EventTypeMessageRecalled,
+		ChatID:      ev.Event.ChatID,
+		ChatType:    port.ChatTypeGroup, // recall events always originate from a chat
+		MessageID:   ev.Event.MessageID,
+		RawPayload:  append(json.RawMessage(nil), raw.Payload...),
+	}, true, nil
 }
 
 func mapChatType(s string) port.ChatType {

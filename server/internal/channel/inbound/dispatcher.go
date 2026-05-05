@@ -25,6 +25,7 @@ const (
 	replyIssueNotFound      = "ISSUE_NOT_FOUND"
 	replyInternalError      = "INTERNAL_ERROR"
 	replyPrivateUnsupported = "PRIVATE_UNSUPPORTED"
+	replyMessageRecalled    = "MESSAGE_RECALLED"
 )
 
 type ChatBindingLookup interface {
@@ -59,6 +60,20 @@ func NewDispatchStep(cfg DispatchConfig) Step {
 func (dispatchStep) Name() string { return "dispatch" }
 
 func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
+	// PRD E6: recall events are annotated in the chat thread but never
+	// mutate any Issue or Comment. They bypass intent recognition entirely.
+	if evt.Type == port.EventTypeMessageRecalled {
+		reply := fmt.Sprintf("[%s] 上游消息已撤回 (message_id: %s)", replyMessageRecalled, evt.MessageID)
+		if sendErr := d.sendReply(ctx, evt, reply); sendErr != nil {
+			slog.Error("dispatch: send recall annotation failed",
+				"channel", evt.ChannelName,
+				"chat_id", evt.ChatID,
+				"error", sendErr,
+			)
+		}
+		return evt, DecisionContinue, nil
+	}
+
 	intent := evt.Intent
 
 	slog.Debug("dispatch: routing intent",

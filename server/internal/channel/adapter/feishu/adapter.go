@@ -2,7 +2,6 @@ package feishu
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -91,15 +90,26 @@ func (a *Adapter) Name() string { return channelName }
 // kicks off a goroutine that pumps RawEvents → InboundEvents into the fan-
 // out channel. Connect is safe to call concurrently; the second call returns
 // nil without re-starting.
+//
+// After a Disconnect, calling Connect again re-initialises the pump and
+// creates a fresh fan-out channel so downstream consumers can re-attach.
+// This is the reconnect path required by PRD AC2.1 (TC-adapt-3).
 func (a *Adapter) Connect(ctx context.Context) error {
 	a.mu.Lock()
+	// Reconnect path takes precedence over the "already started" guard:
+	// after Disconnect, started is still true but stopped is also true.
+	// We must reset both flags and build a fresh channel before the pump
+	// starts sending, otherwise Connect returns early without calling
+	// client.Start and the first replayed event hits a "send on closed
+	// channel" panic.
+	if a.stopped {
+		a.stopped = false
+		a.started = false
+		a.out = make(chan port.InboundEvent, 16)
+	}
 	if a.started {
 		a.mu.Unlock()
 		return nil
-	}
-	if a.stopped {
-		a.mu.Unlock()
-		return errors.New("feishu: adapter already disconnected; create a new instance to reconnect")
 	}
 
 	if err := a.client.Start(ctx); err != nil {
