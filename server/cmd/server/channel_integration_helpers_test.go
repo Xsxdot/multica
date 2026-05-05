@@ -361,6 +361,67 @@ func (s *directIssueService) SetIssueStatus(ctx context.Context, id pgtype.UUID,
 	return err
 }
 
+func (s *directIssueService) SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error {
+	var assigneeID pgtype.UUID
+	clean := strings.TrimPrefix(assigneeIdentifier, "@")
+	if err := s.pool.QueryRow(ctx, `
+		SELECT m.user_id FROM member m
+		JOIN issue i ON i.workspace_id = m.workspace_id
+		LEFT JOIN "user" u ON u.id = m.user_id
+		WHERE i.id = $1
+		  AND (u.display_name = $2 OR m.user_id::text = $2)
+		LIMIT 1
+	`, id, clean).Scan(&assigneeID); err != nil {
+		return fmt.Errorf("用户 %s 不在此 workspace", assigneeIdentifier)
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE issue SET assignee_type = 'member', assignee_id = $1 WHERE id = $2
+	`, assigneeID, id)
+	return err
+}
+
+func (s *directIssueService) SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error {
+	valid := map[string]bool{"urgent": true, "high": true, "medium": true, "low": true, "no_priority": true, "none": true}
+	if !valid[priority] {
+		return fmt.Errorf("优先级仅支持 urgent/high/medium/low/no_priority")
+	}
+	if priority == "none" {
+		priority = "no_priority"
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE issue SET priority = $1 WHERE id = $2`, priority, id)
+	return err
+}
+
+func (s *directIssueService) AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+	var labelID pgtype.UUID
+	var wsID pgtype.UUID
+	if err := s.pool.QueryRow(ctx, `SELECT workspace_id FROM issue WHERE id = $1`, id).Scan(&wsID); err != nil {
+		return err
+	}
+	if err := s.pool.QueryRow(ctx, `
+		SELECT id FROM issue_label WHERE workspace_id = $1 AND name = $2
+	`, wsID, labelName).Scan(&labelID); err != nil {
+		return fmt.Errorf("标签 %s 不存在，请先在 Web 端创建", labelName)
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO issue_to_label (issue_id, label_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
+	`, id, labelID)
+	return err
+}
+
+func (s *directIssueService) RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+	var wsID pgtype.UUID
+	if err := s.pool.QueryRow(ctx, `SELECT workspace_id FROM issue WHERE id = $1`, id).Scan(&wsID); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM issue_to_label
+		WHERE issue_id = $1
+		  AND label_id = (SELECT id FROM issue_label WHERE workspace_id = $2 AND name = $3)
+	`, id, wsID, labelName)
+	return err
+}
+
 func (s *directIssueService) ListMyTodos(_ context.Context, _, _ pgtype.UUID) ([]facade.Issue, error) {
 	return nil, nil
 }
