@@ -14,6 +14,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/channel/leader"
+	"github.com/multica-ai/multica/server/internal/channel/outbound"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -340,6 +341,25 @@ func main() {
 	go runAutopilotScheduler(autopilotCtx, queries, autopilotSvc)
 	go runDBStatsLogger(sweepCtx, pool)
 
+	// Start outbound retry + cleanup workers (T15).
+	//
+	// Retry worker: requires both an explicit env opt-in
+	// (CHANNEL_RETRY_WORKER_ENABLED=true) AND a real channel-adapter
+	// RetrySender. Until the adapter is wired (T5-wiring) we have no
+	// real sender, so the worker stays off. A previous incarnation used
+	// a noop sender that returned nil — that path silently DELETEd every
+	// pending failure within seconds because the success branch removes
+	// the row. See ReviewBot v2 C4. The gate prevents that recurring;
+	// remove the warn + add the wiring once a real sender exists.
+	//
+	// Cleanup worker: always on (idempotent DELETEs of expired data only).
+	if outbound.RetryWorkerEnabled() {
+		slog.Warn("CHANNEL_RETRY_WORKER_ENABLED=true but no real RetrySender wired yet (T5-wiring); refusing to start retry worker to avoid silent data loss")
+	}
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	cleanupWorker := outbound.NewCleanupWorker(queries)
+	go cleanupWorker.Run(cleanupCtx)
+
 	if metricsServer != nil {
 		go func() {
 			slog.Info("metrics server starting", "addr", metricsConfig.Addr)
@@ -364,6 +384,7 @@ func main() {
 	slog.Info("shutting down server")
 	sweepCancel()
 	autopilotCancel()
+	cleanupCancel()
 	// Stop the channel leader before HTTP shutdown: OnRelease may want
 	// to send a final "going down" message via the still-up service
 	// layer; doing it after API shutdown would race the http.Server's
