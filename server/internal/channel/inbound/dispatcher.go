@@ -2,7 +2,6 @@ package inbound
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -256,48 +255,100 @@ func (d *dispatchStep) handleQueryIssue(ctx context.Context, evt port.InboundEve
 }
 
 func (d *dispatchStep) handleSetStatus(ctx context.Context, evt port.InboundEvent) (string, error) {
-	issueKey, _ := evt.Intent.Params["issue_key"]
-	status, _ := evt.Intent.Params["status"]
+	issueKey, status := evt.Intent.Params["issue_key"], evt.Intent.Params["status"]
 	if issueKey == "" || status == "" {
 		return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和目标状态。", replyMissingParam), nil
 	}
-
-	if !ValidIdentifierFormat(issueKey) {
-		return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), nil
-	}
-
-	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
+	issue, user, err := d.resolveIssueAndUser(ctx, evt, issueKey)
 	if err != nil {
-		return "", fmt.Errorf("lookup workspace: %w", err)
+		return "", err
 	}
-
-	issue, err := d.cfg.IssueFacade.GetIssueByIdentifier(ctx, wsID, issueKey)
-	if err != nil {
+	if issue.ID == (pgtype.UUID{}) {
 		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil
 	}
-
-	user, err := d.cfg.UserResolver.Resolve(ctx, evt.ChannelName, evt.SenderID)
-	if err != nil {
-		return "", fmt.Errorf("resolve user: %w", err)
-	}
-
 	if err := d.cfg.IssueFacade.SetIssueStatus(ctx, issue.ID, user.MulticaUserID, status); err != nil {
 		return "", fmt.Errorf("set status: %w", err)
 	}
-
 	return fmt.Sprintf("[%s] 已将 %s 状态改为 %s。", replyStatusChanged, issueKey, status), nil
 }
 
 func (d *dispatchStep) handleSetAssignee(ctx context.Context, evt port.InboundEvent) (string, error) {
-	return "", errors.New("handleSetAssignee: not implemented")
+	issueKey, assignee := evt.Intent.Params["issue_key"], evt.Intent.Params["assignee"]
+	if issueKey == "" || assignee == "" {
+		return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和指派人。", replyMissingParam), nil
+	}
+	issue, user, err := d.resolveIssueAndUser(ctx, evt, issueKey)
+	if err != nil {
+		return "", err
+	}
+	if issue.ID == (pgtype.UUID{}) {
+		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil
+	}
+	if err := d.cfg.IssueFacade.SetIssueAssignee(ctx, issue.ID, user.MulticaUserID, assignee); err != nil {
+		return "", fmt.Errorf("set assignee: %w", err)
+	}
+	return fmt.Sprintf("[%s] 已将 %s 的指派人改为 %s。", replyAssigneeChanged, issueKey, assignee), nil
 }
 
 func (d *dispatchStep) handleSetPriority(ctx context.Context, evt port.InboundEvent) (string, error) {
-	return "", errors.New("handleSetPriority: not implemented")
+	issueKey, priority := evt.Intent.Params["issue_key"], evt.Intent.Params["priority"]
+	if issueKey == "" || priority == "" {
+		return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和目标优先级。", replyMissingParam), nil
+	}
+	issue, user, err := d.resolveIssueAndUser(ctx, evt, issueKey)
+	if err != nil {
+		return "", err
+	}
+	if issue.ID == (pgtype.UUID{}) {
+		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil
+	}
+	if err := d.cfg.IssueFacade.SetIssuePriority(ctx, issue.ID, user.MulticaUserID, priority); err != nil {
+		return "", fmt.Errorf("set priority: %w", err)
+	}
+	return fmt.Sprintf("[%s] 已将 %s 的优先级改为 %s。", replyPriorityChanged, issueKey, priority), nil
 }
 
 func (d *dispatchStep) handleSetLabel(ctx context.Context, evt port.InboundEvent) (string, error) {
-	return "", errors.New("handleSetLabel: not implemented")
+	issueKey, label, op := evt.Intent.Params["issue_key"], evt.Intent.Params["label"], evt.Intent.Params["op"]
+	if issueKey == "" || label == "" {
+		return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和标签名。", replyMissingParam), nil
+	}
+	issue, user, err := d.resolveIssueAndUser(ctx, evt, issueKey)
+	if err != nil {
+		return "", err
+	}
+	if issue.ID == (pgtype.UUID{}) {
+		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil
+	}
+	if op == "remove" {
+		if err := d.cfg.IssueFacade.RemoveIssueLabel(ctx, issue.ID, user.MulticaUserID, label); err != nil {
+			return "", fmt.Errorf("remove label: %w", err)
+		}
+		return fmt.Sprintf("[%s] 已从 %s 去掉标签 %s。", replyLabelRemoved, issueKey, label), nil
+	}
+	if err := d.cfg.IssueFacade.AddIssueLabel(ctx, issue.ID, user.MulticaUserID, label); err != nil {
+		return "", fmt.Errorf("add label: %w", err)
+	}
+	return fmt.Sprintf("[%s] 已为 %s 添加标签 %s。", replyLabelAdded, issueKey, label), nil
+}
+
+func (d *dispatchStep) resolveIssueAndUser(ctx context.Context, evt port.InboundEvent, issueKey string) (facade.Issue, ResolvedUser, error) {
+	if !ValidIdentifierFormat(issueKey) {
+		return facade.Issue{}, ResolvedUser{}, fmt.Errorf("[%s] Issue 编号格式不正确。", replyIssueNotFound)
+	}
+	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
+	if err != nil {
+		return facade.Issue{}, ResolvedUser{}, fmt.Errorf("lookup workspace: %w", err)
+	}
+	issue, err := d.cfg.IssueFacade.GetIssueByIdentifier(ctx, wsID, issueKey)
+	if err != nil {
+		return facade.Issue{}, ResolvedUser{}, nil // not found — caller formats reply
+	}
+	user, err := d.cfg.UserResolver.Resolve(ctx, evt.ChannelName, evt.SenderID)
+	if err != nil {
+		return facade.Issue{}, ResolvedUser{}, fmt.Errorf("resolve user: %w", err)
+	}
+	return issue, user, nil
 }
 
 func (d *dispatchStep) sendReply(ctx context.Context, evt port.InboundEvent, text string) error {
