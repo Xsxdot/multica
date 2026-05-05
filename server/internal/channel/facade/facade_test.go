@@ -37,6 +37,26 @@ type mockIssueService struct {
 		ActorID pgtype.UUID
 		Status  string
 	}
+	setAssigneeCalls []struct {
+		ID                 pgtype.UUID
+		ActorID            pgtype.UUID
+		AssigneeIdentifier string
+	}
+	setPriorityCalls []struct {
+		ID       pgtype.UUID
+		ActorID  pgtype.UUID
+		Priority string
+	}
+	addLabelCalls []struct {
+		ID        pgtype.UUID
+		ActorID   pgtype.UUID
+		LabelName string
+	}
+	removeLabelCalls []struct {
+		ID        pgtype.UUID
+		ActorID   pgtype.UUID
+		LabelName string
+	}
 	listMyTodosCalls []struct {
 		WorkspaceID pgtype.UUID
 		UserID      pgtype.UUID
@@ -49,6 +69,10 @@ type mockIssueService struct {
 	getByIdentifierReturn facade.Issue
 	getByIdentifierErr    error
 	setStatusErr          error
+	setAssigneeErr        error
+	setPriorityErr        error
+	addLabelErr           error
+	removeLabelErr        error
 	listMyTodosReturn     []facade.Issue
 	listMyTodosErr        error
 }
@@ -78,6 +102,42 @@ func (m *mockIssueService) SetIssueStatus(_ context.Context, id pgtype.UUID, act
 		Status  string
 	}{id, actorID, status})
 	return m.setStatusErr
+}
+
+func (m *mockIssueService) SetIssueAssignee(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error {
+	m.setAssigneeCalls = append(m.setAssigneeCalls, struct {
+		ID                 pgtype.UUID
+		ActorID            pgtype.UUID
+		AssigneeIdentifier string
+	}{id, actorID, assigneeIdentifier})
+	return m.setAssigneeErr
+}
+
+func (m *mockIssueService) SetIssuePriority(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error {
+	m.setPriorityCalls = append(m.setPriorityCalls, struct {
+		ID       pgtype.UUID
+		ActorID  pgtype.UUID
+		Priority string
+	}{id, actorID, priority})
+	return m.setPriorityErr
+}
+
+func (m *mockIssueService) AddIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+	m.addLabelCalls = append(m.addLabelCalls, struct {
+		ID        pgtype.UUID
+		ActorID   pgtype.UUID
+		LabelName string
+	}{id, actorID, labelName})
+	return m.addLabelErr
+}
+
+func (m *mockIssueService) RemoveIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+	m.removeLabelCalls = append(m.removeLabelCalls, struct {
+		ID        pgtype.UUID
+		ActorID   pgtype.UUID
+		LabelName string
+	}{id, actorID, labelName})
+	return m.removeLabelErr
 }
 
 func (m *mockIssueService) ListMyTodos(_ context.Context, workspaceID, userID pgtype.UUID) ([]facade.Issue, error) {
@@ -217,6 +277,86 @@ func TestIssueFacade_SetIssueStatus_PassesActorIDThrough(t *testing.T) {
 	call := svc.setStatusCalls[0]
 	if call.ID != id || call.ActorID != actorID || call.Status != "in_progress" {
 		t.Errorf("service received %+v, want id=%v actor=%v status=in_progress", call, id, actorID)
+	}
+}
+
+func TestIssueFacade_SetIssueAssignee_PassesArgsThrough(t *testing.T) {
+	t.Parallel()
+
+	id := uuid(0x32)
+	actorID := uuid(0x33)
+	svc := &mockIssueService{}
+	f := facade.NewIssueFacade(svc)
+
+	if err := f.SetIssueAssignee(context.Background(), id, actorID, "@张三"); err != nil {
+		t.Fatalf("SetIssueAssignee: %v", err)
+	}
+	if len(svc.setAssigneeCalls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(svc.setAssigneeCalls))
+	}
+	call := svc.setAssigneeCalls[0]
+	if call.ID != id || call.ActorID != actorID || call.AssigneeIdentifier != "@张三" {
+		t.Errorf("service received %+v, want id=%v actor=%v assignee=@张三", call, id, actorID)
+	}
+}
+
+func TestIssueFacade_SetIssuePriority_PassesArgsThrough(t *testing.T) {
+	t.Parallel()
+
+	id := uuid(0x34)
+	actorID := uuid(0x35)
+	svc := &mockIssueService{}
+	f := facade.NewIssueFacade(svc)
+
+	if err := f.SetIssuePriority(context.Background(), id, actorID, "high"); err != nil {
+		t.Fatalf("SetIssuePriority: %v", err)
+	}
+	if len(svc.setPriorityCalls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(svc.setPriorityCalls))
+	}
+	call := svc.setPriorityCalls[0]
+	if call.ID != id || call.ActorID != actorID || call.Priority != "high" {
+		t.Errorf("service received %+v, want id=%v actor=%v priority=high", call, id, actorID)
+	}
+}
+
+func TestIssueFacade_AddIssueLabel_PassesArgsThrough(t *testing.T) {
+	t.Parallel()
+
+	id := uuid(0x36)
+	actorID := uuid(0x37)
+	svc := &mockIssueService{}
+	f := facade.NewIssueFacade(svc)
+
+	if err := f.AddIssueLabel(context.Background(), id, actorID, "bug"); err != nil {
+		t.Fatalf("AddIssueLabel: %v", err)
+	}
+	if len(svc.addLabelCalls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(svc.addLabelCalls))
+	}
+	call := svc.addLabelCalls[0]
+	if call.ID != id || call.ActorID != actorID || call.LabelName != "bug" {
+		t.Errorf("service received %+v, want id=%v actor=%v label=bug", call, id, actorID)
+	}
+}
+
+func TestIssueFacade_RemoveIssueLabel_PassesArgsThrough(t *testing.T) {
+	t.Parallel()
+
+	id := uuid(0x38)
+	actorID := uuid(0x39)
+	svc := &mockIssueService{}
+	f := facade.NewIssueFacade(svc)
+
+	if err := f.RemoveIssueLabel(context.Background(), id, actorID, "bug"); err != nil {
+		t.Fatalf("RemoveIssueLabel: %v", err)
+	}
+	if len(svc.removeLabelCalls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(svc.removeLabelCalls))
+	}
+	call := svc.removeLabelCalls[0]
+	if call.ID != id || call.ActorID != actorID || call.LabelName != "bug" {
+		t.Errorf("service received %+v, want id=%v actor=%v label=bug", call, id, actorID)
 	}
 }
 

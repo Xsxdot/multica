@@ -15,6 +15,10 @@ type IssueFacade interface {
 	GetIssue(ctx context.Context, id pgtype.UUID) (Issue, error)
 	GetIssueByIdentifier(ctx context.Context, workspaceID pgtype.UUID, identifier string) (Issue, error)
 	SetIssueStatus(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, status string) error
+	SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error
+	SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error
+	AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error
+	RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error
 	ListMyTodos(ctx context.Context, workspaceID, userID pgtype.UUID) ([]Issue, error)
 }
 
@@ -60,6 +64,29 @@ func (f *issueFacade) GetIssueByIdentifier(ctx context.Context, workspaceID pgty
 
 func (f *issueFacade) SetIssueStatus(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, status string) error {
 	return f.svc.SetIssueStatus(ctx, id, actorID, status)
+}
+
+// SetIssueAssignee forwards the assignee change to the underlying service.
+// The assigneeIdentifier is resolved by the service layer (open_id or username).
+func (f *issueFacade) SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error {
+	return f.svc.SetIssueAssignee(ctx, id, actorID, assigneeIdentifier)
+}
+
+// SetIssuePriority forwards the priority change to the underlying service.
+// Valid values: urgent, high, medium, low, no_priority.
+func (f *issueFacade) SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error {
+	return f.svc.SetIssuePriority(ctx, id, actorID, priority)
+}
+
+// AddIssueLabel forwards the label attachment to the underlying service.
+// The labelName is resolved against the workspace's label library.
+func (f *issueFacade) AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+	return f.svc.AddIssueLabel(ctx, id, actorID, labelName)
+}
+
+// RemoveIssueLabel forwards the label detachment to the underlying service.
+func (f *issueFacade) RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+	return f.svc.RemoveIssueLabel(ctx, id, actorID, labelName)
 }
 
 func (f *issueFacade) ListMyTodos(ctx context.Context, workspaceID, userID pgtype.UUID) ([]Issue, error) {

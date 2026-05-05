@@ -80,7 +80,7 @@ func NewLLMClassifier(cfg LLMClassifierConfig) *LLMClassifier {
 const systemPrompt = `You are an intent classifier for a project management chatbot.
 Classify the user message into exactly one intent and extract parameters.
 
-Valid intents: CreateIssue, AddComment, QueryIssue, SetStatus, Unsupported, Unknown
+Valid intents: CreateIssue, AddComment, QueryIssue, SetStatus, SetAssignee, SetPriority, SetLabel, Unsupported, Unknown
 
 Respond with ONLY valid JSON:
 {"intent":"<IntentKind>","confidence":0.0-1.0,"params":{<key-value pairs>}}
@@ -90,6 +90,9 @@ Rules:
 - AddComment: params must include "issue_key" and "comment"
 - QueryIssue: params must include "issue_key" (or empty for "my todos")
 - SetStatus: params must include "issue_key" and "status"
+- SetAssignee: params must include "issue_key" and "assignee"
+- SetPriority: params must include "issue_key" and "priority"
+- SetLabel: params must include "issue_key", "label", and "op" (add/remove)
 - Unsupported: destructive operations (delete, upload media)
 - Unknown: greetings, ambiguous, off-topic
 - confidence < 0.7 will trigger ASK_CLARIFY fallback
@@ -253,7 +256,8 @@ func (c *LLMClassifier) truncateInput(text string) string {
 func isValidIntentKind(k IntentKind) bool {
 	switch k {
 	case IntentCreateIssue, IntentAddComment, IntentQueryIssue,
-		IntentSetStatus, IntentUnsupported, IntentUnknown:
+		IntentSetStatus, IntentSetAssignee, IntentSetPriority, IntentSetLabel,
+		IntentUnsupported, IntentUnknown:
 		return true
 	default:
 		return false

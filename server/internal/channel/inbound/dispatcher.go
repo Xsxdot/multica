@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -17,6 +18,10 @@ const (
 	replyIssueCreated       = "ISSUE_CREATED"
 	replyCommentAdded       = "COMMENT_ADDED"
 	replyStatusChanged      = "STATUS_CHANGED"
+	replyAssigneeChanged    = "ASSIGNEE_CHANGED"
+	replyPriorityChanged    = "PRIORITY_CHANGED"
+	replyLabelAdded         = "LABEL_ADDED"
+	replyLabelRemoved       = "LABEL_REMOVED"
 	replyUnsupportedOp      = "UNSUPPORTED_OP"
 	replyUnknown            = "UNKNOWN"
 	replyAskClarify         = "ASK_CLARIFY"
@@ -96,14 +101,20 @@ func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inb
 		reply, err = d.handleQueryIssue(ctx, evt)
 	case port.IntentSetStatus:
 		reply, err = d.handleSetStatus(ctx, evt)
+	case port.IntentSetAssignee:
+		reply, err = d.handleSetAssignee(ctx, evt)
+	case port.IntentSetPriority:
+		reply, err = d.handleSetPriority(ctx, evt)
+	case port.IntentSetLabel:
+		reply, err = d.handleSetLabel(ctx, evt)
 	case port.IntentUnsupported:
 		reply = fmt.Sprintf("[%s] 此操作不支持在群内执行，请回 Web 端操作。", replyUnsupportedOp)
 	case port.IntentUnknown:
-		reply = fmt.Sprintf("[%s] 没有理解你的意思。支持的操作：创建 Issue、加评论、查状态、改状态。", replyUnknown)
+		reply = fmt.Sprintf("[%s] 没有理解你的意思。支持的操作：创建 Issue、加评论、查状态、改状态、改指派人、改优先级、加/去标签。", replyUnknown)
 	case port.IntentASKClarify:
 		reply = fmt.Sprintf("[%s] 没有理解你的意思，请说得更明确一些。", replyAskClarify)
 	default:
-		reply = fmt.Sprintf("[%s] 没有理解你的意思。支持的操作：创建 Issue、加评论、查状态、改状态。", replyUnknown)
+		reply = fmt.Sprintf("[%s] 没有理解你的意思。支持的操作：创建 Issue、加评论、查状态、改状态、改指派人、改优先级、加/去标签。", replyUnknown)
 	}
 
 	if err != nil {
@@ -275,6 +286,18 @@ func (d *dispatchStep) handleSetStatus(ctx context.Context, evt port.InboundEven
 	}
 
 	return fmt.Sprintf("[%s] 已将 %s 状态改为 %s。", replyStatusChanged, issueKey, status), nil
+}
+
+func (d *dispatchStep) handleSetAssignee(ctx context.Context, evt port.InboundEvent) (string, error) {
+	return "", errors.New("handleSetAssignee: not implemented")
+}
+
+func (d *dispatchStep) handleSetPriority(ctx context.Context, evt port.InboundEvent) (string, error) {
+	return "", errors.New("handleSetPriority: not implemented")
+}
+
+func (d *dispatchStep) handleSetLabel(ctx context.Context, evt port.InboundEvent) (string, error) {
+	return "", errors.New("handleSetLabel: not implemented")
 }
 
 func (d *dispatchStep) sendReply(ctx context.Context, evt port.InboundEvent, text string) error {

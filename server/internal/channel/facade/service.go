@@ -26,6 +26,10 @@ type IssueService interface {
 	GetIssue(ctx context.Context, id pgtype.UUID) (Issue, error)
 	GetIssueByIdentifier(ctx context.Context, workspaceID pgtype.UUID, identifier string) (Issue, error)
 	SetIssueStatus(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, status string) error
+	SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error
+	SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error
+	AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error
+	RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error
 	ListMyTodos(ctx context.Context, workspaceID, userID pgtype.UUID) ([]Issue, error)
 }
 

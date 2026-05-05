@@ -153,6 +153,89 @@ func TestRuleMatcher_SetStatus_Variants(t *testing.T) {
 	}
 }
 
+func TestRuleMatcher_SetAssignee_Variants(t *testing.T) {
+	t.Parallel()
+	m := in.NewRuleMatcher()
+	variants := []struct {
+		text       string
+		wantKey    string
+		wantAssign string
+	}{
+		{"把 [STA-2] 指派给 @张三", "STA-2", "张三"},
+		{"把STA-3指派给李四", "STA-3", "李四"},
+		{"STA-9 指派给 @王五", "STA-9", "王五"},
+	}
+	for _, tc := range variants {
+		got, ok := m.Match(tc.text)
+		if !ok || got.Kind != in.IntentSetAssignee {
+			t.Fatalf("%q: want SetAssignee hit", tc.text)
+		}
+		if got.Params["issue_key"] != tc.wantKey {
+			t.Errorf("%q issue_key=%q want %q", tc.text, got.Params["issue_key"], tc.wantKey)
+		}
+		if got.Params["assignee"] != tc.wantAssign {
+			t.Errorf("%q assignee=%q want %q", tc.text, got.Params["assignee"], tc.wantAssign)
+		}
+	}
+}
+
+func TestRuleMatcher_SetPriority_Variants(t *testing.T) {
+	t.Parallel()
+	m := in.NewRuleMatcher()
+	variants := []struct {
+		text         string
+		wantKey      string
+		wantPriority string
+	}{
+		{"把 [STA-2] 改优先级 high", "STA-2", "high"},
+		{"把STA-3改优先级urgent", "STA-3", "urgent"},
+		{"STA-9 改优先级 medium", "STA-9", "medium"},
+	}
+	for _, tc := range variants {
+		got, ok := m.Match(tc.text)
+		if !ok || got.Kind != in.IntentSetPriority {
+			t.Fatalf("%q: want SetPriority hit", tc.text)
+		}
+		if got.Params["issue_key"] != tc.wantKey {
+			t.Errorf("%q issue_key=%q want %q", tc.text, got.Params["issue_key"], tc.wantKey)
+		}
+		if got.Params["priority"] != tc.wantPriority {
+			t.Errorf("%q priority=%q want %q", tc.text, got.Params["priority"], tc.wantPriority)
+		}
+	}
+}
+
+func TestRuleMatcher_SetLabel_Variants(t *testing.T) {
+	t.Parallel()
+	m := in.NewRuleMatcher()
+	variants := []struct {
+		text     string
+		wantKey  string
+		wantLabel string
+		wantOp   string
+	}{
+		{"把 [STA-2] 加标签 bug", "STA-2", "bug", "add"},
+		{"STA-3 加标签 feature", "STA-3", "feature", "add"},
+		{"把 [STA-4] 去掉标签 bug", "STA-4", "bug", "remove"},
+		{"STA-5 去掉标签 duplicate", "STA-5", "duplicate", "remove"},
+	}
+	for _, tc := range variants {
+		got, ok := m.Match(tc.text)
+		if !ok || got.Kind != in.IntentSetLabel {
+			t.Fatalf("%q: want SetLabel hit", tc.text)
+		}
+		if got.Params["issue_key"] != tc.wantKey {
+			t.Errorf("%q issue_key=%q want %q", tc.text, got.Params["issue_key"], tc.wantKey)
+		}
+		if got.Params["label"] != tc.wantLabel {
+			t.Errorf("%q label=%q want %q", tc.text, got.Params["label"], tc.wantLabel)
+		}
+		if got.Params["op"] != tc.wantOp {
+			t.Errorf("%q op=%q want %q", tc.text, got.Params["op"], tc.wantOp)
+		}
+	}
+}
+
 func TestRuleMatcher_Unknown_Variants(t *testing.T) {
 	t.Parallel()
 	m := in.NewRuleMatcher()

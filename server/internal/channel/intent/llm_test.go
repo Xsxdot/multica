@@ -38,6 +38,9 @@ func TestLLMClassifier_Classify_HappyPath(t *testing.T) {
 		{"AddComment", "AddComment", 0.85, map[string]string{"issue_key": "STA-2", "comment": "已找产品确认"}, in.IntentAddComment},
 		{"QueryIssue", "QueryIssue", 0.88, map[string]string{"issue_key": "STA-5"}, in.IntentQueryIssue},
 		{"SetStatus", "SetStatus", 0.90, map[string]string{"issue_key": "STA-2", "status": "done"}, in.IntentSetStatus},
+		{"SetAssignee", "SetAssignee", 0.88, map[string]string{"issue_key": "STA-2", "assignee": "张三"}, in.IntentSetAssignee},
+		{"SetPriority", "SetPriority", 0.87, map[string]string{"issue_key": "STA-3", "priority": "high"}, in.IntentSetPriority},
+		{"SetLabel", "SetLabel", 0.86, map[string]string{"issue_key": "STA-4", "label": "bug", "op": "add"}, in.IntentSetLabel},
 		{"Unsupported", "Unsupported", 0.95, map[string]string{}, in.IntentUnsupported},
 	}
 
@@ -424,9 +427,9 @@ func TestLLMClassifier_SystemPrompt_TokenBudget(t *testing.T) {
 	clf.Classify(context.Background(), "test")
 
 	// Rough token estimate: 1 token ≈ 4 chars for English, ~2 chars for Chinese
-	// 300 tokens ≈ 600 Chinese chars as upper bound
-	if len(systemPrompt) > 900 { // generous upper bound
-		t.Errorf("system prompt too long: %d chars (expected ≤ ~900 for 300 tokens)", len(systemPrompt))
+	// 350 tokens ≈ 700 Chinese chars as upper bound
+	if len(systemPrompt) > 1100 { // generous upper bound for expanded intent list
+		t.Errorf("system prompt too long: %d chars (expected ≤ ~1100 for 350 tokens)", len(systemPrompt))
 	}
 	if systemPrompt == "" {
 		t.Fatal("system prompt should not be empty")

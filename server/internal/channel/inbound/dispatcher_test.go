@@ -40,6 +40,10 @@ type fakeIssueService struct {
 	created             []facade.CreateIssueReq
 	gotByID             []struct{ WorkspaceID pgtype.UUID; Identifier string }
 	setStatus           []struct{ ID pgtype.UUID; ActorID pgtype.UUID; Status string }
+	setAssignee         []struct{ ID pgtype.UUID; ActorID pgtype.UUID; AssigneeIdentifier string }
+	setPriority         []struct{ ID pgtype.UUID; ActorID pgtype.UUID; Priority string }
+	addLabel            []struct{ ID pgtype.UUID; ActorID pgtype.UUID; LabelName string }
+	removeLabel         []struct{ ID pgtype.UUID; ActorID pgtype.UUID; LabelName string }
 	listTodos           []struct{ WorkspaceID pgtype.UUID; UserID pgtype.UUID }
 	createReturn        facade.Issue
 	getByIdentifierRet  facade.Issue
@@ -47,6 +51,10 @@ type fakeIssueService struct {
 	createErr           error
 	getByIdentifierErr  error
 	setStatusErr        error
+	setAssigneeErr      error
+	setPriorityErr      error
+	addLabelErr         error
+	removeLabelErr      error
 	listTodosErr        error
 }
 
@@ -74,6 +82,42 @@ func (f *fakeIssueService) SetIssueStatus(_ context.Context, id pgtype.UUID, act
 		Status  string
 	}{id, actorID, status})
 	return f.setStatusErr
+}
+
+func (f *fakeIssueService) SetIssueAssignee(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error {
+	f.setAssignee = append(f.setAssignee, struct {
+		ID                 pgtype.UUID
+		ActorID            pgtype.UUID
+		AssigneeIdentifier string
+	}{id, actorID, assigneeIdentifier})
+	return f.setAssigneeErr
+}
+
+func (f *fakeIssueService) SetIssuePriority(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error {
+	f.setPriority = append(f.setPriority, struct {
+		ID       pgtype.UUID
+		ActorID  pgtype.UUID
+		Priority string
+	}{id, actorID, priority})
+	return f.setPriorityErr
+}
+
+func (f *fakeIssueService) AddIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+	f.addLabel = append(f.addLabel, struct {
+		ID        pgtype.UUID
+		ActorID   pgtype.UUID
+		LabelName string
+	}{id, actorID, labelName})
+	return f.addLabelErr
+}
+
+func (f *fakeIssueService) RemoveIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+	f.removeLabel = append(f.removeLabel, struct {
+		ID        pgtype.UUID
+		ActorID   pgtype.UUID
+		LabelName string
+	}{id, actorID, labelName})
+	return f.removeLabelErr
 }
 
 func (f *fakeIssueService) ListMyTodos(_ context.Context, wsID, userID pgtype.UUID) ([]facade.Issue, error) {
@@ -477,6 +521,209 @@ func TestDispatchStep_SetStatus_MissingParams(t *testing.T) {
 	}
 	if len(issueSvc.setStatus) != 0 {
 		t.Error("SetIssueStatus should not be called")
+	}
+	if !strings.Contains(recCh.sends[0].Text, "MISSING_PARAM") {
+		t.Errorf("reply missing MISSING_PARAM: %q", recCh.sends[0].Text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SetAssignee happy path
+// ---------------------------------------------------------------------------
+
+func TestDispatchStep_SetAssignee_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x40), Identifier: "STA-7", Title: "t", Status: "todo"}
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetAssignee, map[string]string{
+		"issue_key": "STA-7",
+		"assignee":  "@张三",
+	})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(issueSvc.setAssignee) != 1 {
+		t.Fatalf("expected 1 SetIssueAssignee, got %d", len(issueSvc.setAssignee))
+	}
+	call := issueSvc.setAssignee[0]
+	if call.AssigneeIdentifier != "@张三" {
+		t.Errorf("assignee = %q, want @张三", call.AssigneeIdentifier)
+	}
+	if call.ActorID != uuid(0x02) {
+		t.Error("actor ID mismatch")
+	}
+
+	if !strings.Contains(recCh.sends[0].Text, "ASSIGNEE_CHANGED") {
+		t.Errorf("reply missing ASSIGNEE_CHANGED: %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_SetAssignee_MissingParams(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetAssignee, map[string]string{"issue_key": "STA-2"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(issueSvc.setAssignee) != 0 {
+		t.Error("SetIssueAssignee should not be called")
+	}
+	if !strings.Contains(recCh.sends[0].Text, "MISSING_PARAM") {
+		t.Errorf("reply missing MISSING_PARAM: %q", recCh.sends[0].Text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SetPriority happy path
+// ---------------------------------------------------------------------------
+
+func TestDispatchStep_SetPriority_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x41), Identifier: "STA-8", Title: "t", Status: "todo"}
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetPriority, map[string]string{
+		"issue_key": "STA-8",
+		"priority":  "high",
+	})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(issueSvc.setPriority) != 1 {
+		t.Fatalf("expected 1 SetIssuePriority, got %d", len(issueSvc.setPriority))
+	}
+	call := issueSvc.setPriority[0]
+	if call.Priority != "high" {
+		t.Errorf("priority = %q, want high", call.Priority)
+	}
+	if call.ActorID != uuid(0x02) {
+		t.Error("actor ID mismatch")
+	}
+
+	if !strings.Contains(recCh.sends[0].Text, "PRIORITY_CHANGED") {
+		t.Errorf("reply missing PRIORITY_CHANGED: %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_SetPriority_MissingParams(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetPriority, map[string]string{"issue_key": "STA-2"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(issueSvc.setPriority) != 0 {
+		t.Error("SetIssuePriority should not be called")
+	}
+	if !strings.Contains(recCh.sends[0].Text, "MISSING_PARAM") {
+		t.Errorf("reply missing MISSING_PARAM: %q", recCh.sends[0].Text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SetLabel happy path (add)
+// ---------------------------------------------------------------------------
+
+func TestDispatchStep_SetLabel_Add_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x42), Identifier: "STA-9", Title: "t", Status: "todo"}
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetLabel, map[string]string{
+		"issue_key": "STA-9",
+		"label":     "bug",
+		"op":        "add",
+	})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(issueSvc.addLabel) != 1 {
+		t.Fatalf("expected 1 AddIssueLabel, got %d", len(issueSvc.addLabel))
+	}
+	call := issueSvc.addLabel[0]
+	if call.LabelName != "bug" {
+		t.Errorf("label = %q, want bug", call.LabelName)
+	}
+	if call.ActorID != uuid(0x02) {
+		t.Error("actor ID mismatch")
+	}
+
+	if !strings.Contains(recCh.sends[0].Text, "LABEL_ADDED") {
+		t.Errorf("reply missing LABEL_ADDED: %q", recCh.sends[0].Text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SetLabel happy path (remove)
+// ---------------------------------------------------------------------------
+
+func TestDispatchStep_SetLabel_Remove_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x43), Identifier: "STA-10", Title: "t", Status: "todo"}
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetLabel, map[string]string{
+		"issue_key": "STA-10",
+		"label":     "bug",
+		"op":        "remove",
+	})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(issueSvc.removeLabel) != 1 {
+		t.Fatalf("expected 1 RemoveIssueLabel, got %d", len(issueSvc.removeLabel))
+	}
+	call := issueSvc.removeLabel[0]
+	if call.LabelName != "bug" {
+		t.Errorf("label = %q, want bug", call.LabelName)
+	}
+	if call.ActorID != uuid(0x02) {
+		t.Error("actor ID mismatch")
+	}
+
+	if !strings.Contains(recCh.sends[0].Text, "LABEL_REMOVED") {
+		t.Errorf("reply missing LABEL_REMOVED: %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_SetLabel_MissingParams(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetLabel, map[string]string{"issue_key": "STA-2"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(issueSvc.addLabel) != 0 {
+		t.Error("AddIssueLabel should not be called")
 	}
 	if !strings.Contains(recCh.sends[0].Text, "MISSING_PARAM") {
 		t.Errorf("reply missing MISSING_PARAM: %q", recCh.sends[0].Text)

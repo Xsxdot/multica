@@ -66,6 +66,65 @@ func defaultRules() []rule {
 				return map[string]string{"issue_key": sub[1], "status": sub[2]}
 			},
 		},
+		// SetAssignee
+		{
+			kind: IntentSetAssignee, confidence: 1,
+			re: regexp.MustCompile(`^把\s*(?:\[)?(` + key + `)(?:\])?\s*指派给\s*@?(.+)$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"issue_key": sub[1], "assignee": sub[2]}
+			},
+		},
+		{
+			kind: IntentSetAssignee, confidence: 1,
+			re: regexp.MustCompile(`^(` + key + `)\s*指派给\s*@?(.+)$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"issue_key": sub[1], "assignee": sub[2]}
+			},
+		},
+		// SetPriority
+		{
+			kind: IntentSetPriority, confidence: 1,
+			re: regexp.MustCompile(`^把\s*(?:\[)?(` + key + `)(?:\])?\s*改优先级\s*([\w_]+)$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"issue_key": sub[1], "priority": sub[2]}
+			},
+		},
+		{
+			kind: IntentSetPriority, confidence: 1,
+			re: regexp.MustCompile(`^(` + key + `)\s*改优先级\s*([\w_]+)$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"issue_key": sub[1], "priority": sub[2]}
+			},
+		},
+		// SetLabel (add/remove)
+		{
+			kind: IntentSetLabel, confidence: 1,
+			re: regexp.MustCompile(`^把\s*(?:\[)?(` + key + `)(?:\])?\s*加标签\s*([\w-]+)$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"issue_key": sub[1], "label": sub[2], "op": "add"}
+			},
+		},
+		{
+			kind: IntentSetLabel, confidence: 1,
+			re: regexp.MustCompile(`^(` + key + `)\s*加标签\s*([\w-]+)$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"issue_key": sub[1], "label": sub[2], "op": "add"}
+			},
+		},
+		{
+			kind: IntentSetLabel, confidence: 1,
+			re: regexp.MustCompile(`^把\s*(?:\[)?(` + key + `)(?:\])?\s*去掉标签\s*([\w-]+)$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"issue_key": sub[1], "label": sub[2], "op": "remove"}
+			},
+		},
+		{
+			kind: IntentSetLabel, confidence: 1,
+			re: regexp.MustCompile(`^(` + key + `)\s*去掉标签\s*([\w-]+)$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"issue_key": sub[1], "label": sub[2], "op": "remove"}
+			},
+		},
 		{
 			kind: IntentQueryIssue, confidence: 1,
 			re: regexp.MustCompile(`^(?:\[)?(` + key + `)(?:\])?\s*到哪了[？?]?$`),
