@@ -126,8 +126,8 @@ func setupIntegrationTestFixture(ctx context.Context, pool *pgxpool.Pool) (strin
 
 	var workspaceID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO workspace (name, slug, description)
-		VALUES ($1, $2, $3)
+		INSERT INTO workspace (name, slug, description, issue_prefix)
+		VALUES ($1, $2, $3, 'INT')
 		RETURNING id
 	`, "Integration Tests", integrationTestWorkspaceSlug, "Temporary workspace for router integration tests").Scan(&workspaceID); err != nil {
 		return "", "", err
