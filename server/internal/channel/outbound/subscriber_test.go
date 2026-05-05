@@ -346,6 +346,307 @@ func TestSubscriber_WrongWorkspace_DropsEvent(t *testing.T) {
 	}
 }
 
+// --- Status Change Notification Tests (M3a) ---
+
+// Test: issue:updated with status=in_review sends card to assignee
+func TestSubscriber_StatusInReview_SendsCard(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	userID := "00000000-0000-0000-0000-000000000099"
+	assigneeID := "00000000-0000-0000-0000-000000000098"
+	bindingStore := &mockBindingStore{
+		bindings: map[string]map[string]string{
+			"feishu": {"ext-user-1": assigneeID},
+		},
+	}
+	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.Start()
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     userID,
+		Payload: map[string]any{
+			"status_changed": true,
+			"issue": map[string]any{
+				"id":         "issue-1",
+				"title":      "Test Issue",
+				"identifier": "MUL-1",
+				"status":     "in_review",
+				"assignee_id": assigneeID,
+			},
+		},
+	})
+
+	time.Sleep(10 * time.Millisecond)
+
+	msgs := ch.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message for in_review status, got %d", len(msgs))
+	}
+	if msgs[0].ChatID != "ext-user-1" {
+		t.Errorf("expected ChatID ext-user-1, got %s", msgs[0].ChatID)
+	}
+	wantBody := "Issue MUL-1 状态已变更为 评审中"
+	if msgs[0].Body != wantBody {
+		t.Errorf("expected body %q, got %q", wantBody, msgs[0].Body)
+	}
+}
+
+// Test: issue:updated with status=done sends card to assignee
+func TestSubscriber_StatusDone_SendsCard(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	userID := "00000000-0000-0000-0000-000000000099"
+	assigneeID := "00000000-0000-0000-0000-000000000098"
+	bindingStore := &mockBindingStore{
+		bindings: map[string]map[string]string{
+			"feishu": {"ext-user-1": assigneeID},
+		},
+	}
+	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.Start()
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     userID,
+		Payload: map[string]any{
+			"status_changed": true,
+			"issue": map[string]any{
+				"id":         "issue-1",
+				"title":      "Test Issue",
+				"identifier": "MUL-1",
+				"status":     "done",
+				"assignee_id": assigneeID,
+			},
+		},
+	})
+
+	time.Sleep(10 * time.Millisecond)
+
+	msgs := ch.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message for done status, got %d", len(msgs))
+	}
+	wantBody := "Issue MUL-1 状态已变更为 已完成"
+	if msgs[0].Body != wantBody {
+		t.Errorf("expected body %q, got %q", wantBody, msgs[0].Body)
+	}
+}
+
+// Test: issue:updated with status=blocked sends card to assignee
+func TestSubscriber_StatusBlocked_SendsCard(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	userID := "00000000-0000-0000-0000-000000000099"
+	assigneeID := "00000000-0000-0000-0000-000000000098"
+	bindingStore := &mockBindingStore{
+		bindings: map[string]map[string]string{
+			"feishu": {"ext-user-1": assigneeID},
+		},
+	}
+	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.Start()
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     userID,
+		Payload: map[string]any{
+			"status_changed": true,
+			"issue": map[string]any{
+				"id":         "issue-1",
+				"title":      "Test Issue",
+				"identifier": "MUL-1",
+				"status":     "blocked",
+				"assignee_id": assigneeID,
+			},
+		},
+	})
+
+	time.Sleep(10 * time.Millisecond)
+
+	msgs := ch.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message for blocked status, got %d", len(msgs))
+	}
+	wantBody := "Issue MUL-1 状态已变更为 已阻塞"
+	if msgs[0].Body != wantBody {
+		t.Errorf("expected body %q, got %q", wantBody, msgs[0].Body)
+	}
+}
+
+// Test: issue:updated with status change but preference muted → drop
+func TestSubscriber_StatusInReview_PrefMuted_DropsEvent(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	userID := "00000000-0000-0000-0000-000000000099"
+	assigneeID := "00000000-0000-0000-0000-000000000098"
+	bindingStore := &mockBindingStore{
+		bindings: map[string]map[string]string{
+			"feishu": {"ext-user-1": assigneeID},
+		},
+	}
+	prefStore := &mockPrefStore{
+		prefs: map[string]map[string]string{
+			assigneeID: {
+				"feishu.status_in_review": "muted",
+			},
+		},
+	}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.Start()
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     userID,
+		Payload: map[string]any{
+			"status_changed": true,
+			"issue": map[string]any{
+				"id":         "issue-1",
+				"title":      "Test Issue",
+				"identifier": "MUL-1",
+				"status":     "in_review",
+				"assignee_id": assigneeID,
+			},
+		},
+	})
+
+	time.Sleep(10 * time.Millisecond)
+
+	msgs := ch.Messages()
+	if len(msgs) != 0 {
+		t.Errorf("expected 0 messages when status_in_review pref muted, got %d", len(msgs))
+	}
+}
+
+// Test: issue:updated with status change but no assignee → drop
+func TestSubscriber_StatusDone_NoAssignee_DropsEvent(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	userID := "00000000-0000-0000-0000-000000000099"
+	bindingStore := &mockBindingStore{
+		bindings: map[string]map[string]string{
+			"feishu": {"ext-user-1": userID},
+		},
+	}
+	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.Start()
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     userID,
+		Payload: map[string]any{
+			"status_changed": true,
+			"issue": map[string]any{
+				"id":         "issue-1",
+				"title":      "Test Issue",
+				"identifier": "MUL-1",
+				"status":     "done",
+				"assignee_id": nil,
+			},
+		},
+	})
+
+	time.Sleep(10 * time.Millisecond)
+
+	msgs := ch.Messages()
+	if len(msgs) != 0 {
+		t.Errorf("expected 0 messages when no assignee, got %d", len(msgs))
+	}
+}
+
+// Test: issue:updated with status change but actor is assignee → drop (self-notification)
+func TestSubscriber_StatusBlocked_SelfNotification_DropsEvent(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	userID := "00000000-0000-0000-0000-000000000099"
+	bindingStore := &mockBindingStore{
+		bindings: map[string]map[string]string{
+			"feishu": {"ext-user-1": userID},
+		},
+	}
+	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.Start()
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     userID,
+		Payload: map[string]any{
+			"status_changed": true,
+			"issue": map[string]any{
+				"id":         "issue-1",
+				"title":      "Test Issue",
+				"identifier": "MUL-1",
+				"status":     "blocked",
+				"assignee_id": userID,
+			},
+		},
+	})
+
+	time.Sleep(10 * time.Millisecond)
+
+	msgs := ch.Messages()
+	if len(msgs) != 0 {
+		t.Errorf("expected 0 messages for self-notification on status change, got %d", len(msgs))
+	}
+}
+
+// Test: issue:updated with status change to non-notify status (e.g. todo) → drop
+func TestSubscriber_StatusTodo_NotNotifyWorthy_DropsEvent(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	userID := "00000000-0000-0000-0000-000000000099"
+	assigneeID := "00000000-0000-0000-0000-000000000098"
+	bindingStore := &mockBindingStore{
+		bindings: map[string]map[string]string{
+			"feishu": {"ext-user-1": assigneeID},
+		},
+	}
+	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.Start()
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     userID,
+		Payload: map[string]any{
+			"status_changed": true,
+			"issue": map[string]any{
+				"id":         "issue-1",
+				"title":      "Test Issue",
+				"identifier": "MUL-1",
+				"status":     "todo",
+				"assignee_id": assigneeID,
+			},
+		},
+	})
+
+	time.Sleep(10 * time.Millisecond)
+
+	msgs := ch.Messages()
+	if len(msgs) != 0 {
+		t.Errorf("expected 0 messages for non-notify status, got %d", len(msgs))
+	}
+}
+
 // Test: actor_id == user_id → drop (don't notify self)
 func TestSubscriber_SelfNotification_DropsEvent(t *testing.T) {
 	bus := events.New()
