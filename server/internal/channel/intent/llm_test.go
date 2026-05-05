@@ -1,11 +1,14 @@
 package intent_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,45 +23,65 @@ func TestIntentClassifier_Interface(t *testing.T) {
 	var _ in.IntentClassifier = (*in.LLMClassifier)(nil)
 }
 
-// --- LLMClassifier.Classify happy path ---
+// --- LLMClassifier.Classify happy path (table-driven, all IntentKinds) ---
 
 func TestLLMClassifier_Classify_HappyPath(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := in.LLMResponse{
-			Intent:     "CreateIssue",
-			Confidence: 0.92,
-			Params:     map[string]string{"title": "登录页白屏"},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(in.ChatCompletionResponse{
-			Choices: []in.Choice{{Message: in.Message{Content: mustMarshal(resp)}}},
-			Usage:   in.Usage{TotalTokens: 320},
+	tests := []struct {
+		name       string
+		intent     string
+		confidence float64
+		params     map[string]string
+		wantKind   in.IntentKind
+	}{
+		{"CreateIssue", "CreateIssue", 0.92, map[string]string{"title": "登录页白屏"}, in.IntentCreateIssue},
+		{"AddComment", "AddComment", 0.85, map[string]string{"issue_key": "STA-2", "comment": "已找产品确认"}, in.IntentAddComment},
+		{"QueryIssue", "QueryIssue", 0.88, map[string]string{"issue_key": "STA-5"}, in.IntentQueryIssue},
+		{"SetStatus", "SetStatus", 0.90, map[string]string{"issue_key": "STA-2", "status": "done"}, in.IntentSetStatus},
+		{"Unsupported", "Unsupported", 0.95, map[string]string{}, in.IntentUnsupported},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := in.LLMResponse{
+					Intent:     tt.intent,
+					Confidence: tt.confidence,
+					Params:     tt.params,
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(in.ChatCompletionResponse{
+					Choices: []in.Choice{{Message: in.Message{Content: mustMarshal(resp)}}},
+					Usage:   in.Usage{TotalTokens: 200},
+				})
+			}))
+			defer srv.Close()
+
+			clf := in.NewLLMClassifier(in.LLMClassifierConfig{
+				APIURL: srv.URL,
+				APIKey: "test-key",
+				Model:  "gpt-4o-mini",
+			})
+
+			got, err := clf.Classify(context.Background(), "test input")
+			if err != nil {
+				t.Fatalf("Classify: %v", err)
+			}
+			if got.Kind != tt.wantKind {
+				t.Errorf("Kind = %q, want %q", got.Kind, tt.wantKind)
+			}
+			if got.Confidence != tt.confidence {
+				t.Errorf("Confidence = %v, want %v", got.Confidence, tt.confidence)
+			}
+			if got.Source != in.SourceLLM {
+				t.Errorf("Source = %q, want %q", got.Source, in.SourceLLM)
+			}
+			for k, v := range tt.params {
+				if got.Params[k] != v {
+					t.Errorf("Params[%q] = %q, want %q", k, got.Params[k], v)
+				}
+			}
 		})
-	}))
-	defer srv.Close()
-
-	clf := in.NewLLMClassifier(in.LLMClassifierConfig{
-		APIURL: srv.URL,
-		APIKey: "test-key",
-		Model:  "gpt-4o-mini",
-	})
-
-	got, err := clf.Classify(context.Background(), "帮我记一个登录页白屏的问题")
-	if err != nil {
-		t.Fatalf("Classify: %v", err)
-	}
-	if got.Kind != in.IntentCreateIssue {
-		t.Errorf("Kind = %q, want CreateIssue", got.Kind)
-	}
-	if got.Confidence != 0.92 {
-		t.Errorf("Confidence = %v, want 0.92", got.Confidence)
-	}
-	if got.Source != in.SourceLLM {
-		t.Errorf("Source = %q, want %q", got.Source, in.SourceLLM)
-	}
-	if got.Params["title"] != "登录页白屏" {
-		t.Errorf("title = %q, want 登录页白屏", got.Params["title"])
 	}
 }
 
@@ -220,10 +243,12 @@ func TestLLMClassifier_Classify_LowConfidence_ASK_CLARIFY(t *testing.T) {
 func TestLLMClassifier_Classify_InputTruncation(t *testing.T) {
 	t.Parallel()
 	var receivedBody string
+	var receivedMaxTokens int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req in.ChatCompletionRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		receivedBody = req.Messages[1].Content // user message
+		receivedMaxTokens = req.MaxTokens
 		resp := in.LLMResponse{
 			Intent:     "AddComment",
 			Confidence: 0.8,
@@ -236,6 +261,12 @@ func TestLLMClassifier_Classify_InputTruncation(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
+
+	var buf bytes.Buffer
+	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	defer slog.SetDefault(oldLogger)
 
 	clf := in.NewLLMClassifier(in.LLMClassifierConfig{
 		APIURL:    srv.URL,
@@ -253,6 +284,15 @@ func TestLLMClassifier_Classify_InputTruncation(t *testing.T) {
 	// The received body should be truncated (shorter than original)
 	if len(receivedBody) >= len(longText) {
 		t.Errorf("expected truncation: received %d chars, original %d", len(receivedBody), len(longText))
+	}
+	// Assert warn log was emitted
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "input truncated") {
+		t.Errorf("expected warn log 'input truncated', got: %s", logOutput)
+	}
+	// Assert max_tokens is sent in request body
+	if receivedMaxTokens != 1000 {
+		t.Errorf("MaxTokens = %d, want 1000", receivedMaxTokens)
 	}
 }
 
@@ -420,28 +460,83 @@ func TestLLMClassifier_Metrics_TokenUsage(t *testing.T) {
 	if collector.tokens != 456 {
 		t.Errorf("reported tokens = %d, want 456", collector.tokens)
 	}
-	if collector.source != in.SourceLLM {
-		t.Errorf("source = %q, want %q", collector.source, in.SourceLLM)
+	if collector.getSource() != in.SourceLLM {
+		t.Errorf("source = %q, want %q", collector.getSource(), in.SourceLLM)
 	}
 }
 
 // --- FakeCollector for testing ---
 
 type fakeCollector struct {
+	mu     sync.Mutex
 	tokens int64
 	source in.IntentSource
 }
 
 func (c *fakeCollector) RecordTokenUsed(tokens int64, source in.IntentSource) {
 	atomic.StoreInt64(&c.tokens, tokens)
+	c.mu.Lock()
 	c.source = source
+	c.mu.Unlock()
 }
 
 func (c *fakeCollector) RecordQuotaExhausted() {}
+
+func (c *fakeCollector) getSource() in.IntentSource {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.source
+}
 
 // --- Helpers ---
 
 func mustMarshal(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// --- Confidence out of bounds → clamped to [0,1] ---
+
+func TestLLMClassifier_Classify_ConfidenceClamped(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		confidence float64
+		wantKind   in.IntentKind
+	}{
+		{"upper bound 2.5 → clamped to 1.0 → normal", 2.5, in.IntentCreateIssue},
+		{"lower bound -0.3 → clamped to 0.0 → ASK_CLARIFY", -0.3, in.IntentASKClarify},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := in.LLMResponse{
+					Intent:     "CreateIssue",
+					Confidence: tt.confidence,
+					Params:     map[string]string{"title": "test"},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(in.ChatCompletionResponse{
+					Choices: []in.Choice{{Message: in.Message{Content: mustMarshal(resp)}}},
+					Usage:   in.Usage{TotalTokens: 200},
+				})
+			}))
+			defer srv.Close()
+
+			clf := in.NewLLMClassifier(in.LLMClassifierConfig{
+				APIURL: srv.URL,
+				APIKey: "test-key",
+				Model:  "gpt-4o-mini",
+			})
+
+			got, err := clf.Classify(context.Background(), "test")
+			if err != nil {
+				t.Fatalf("Classify: %v", err)
+			}
+			if got.Kind != tt.wantKind {
+				t.Errorf("Kind = %q, want %q", got.Kind, tt.wantKind)
+			}
+		})
+	}
 }

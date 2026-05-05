@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -103,6 +104,7 @@ type ResponseFormat struct {
 type ChatCompletionRequest struct {
 	Model          string          `json:"model"`
 	Messages       []Message       `json:"messages"`
+	MaxTokens      int             `json:"max_tokens,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
 }
 
@@ -130,16 +132,14 @@ type Usage struct {
 
 // LLMResponse is the structured JSON we expect from the LLM.
 type LLMResponse struct {
-	Intent     string  `json:"intent"`
-	Confidence float64 `json:"confidence"`
-	// Params is intentionally map[string]string for M2; M3 should upgrade to map[string]any
-	// to support nested params (e.g. timestamps, label arrays).
-	Params map[string]string `json:"params"`
+	Intent     string            `json:"intent"`
+	Confidence float64           `json:"confidence"`
+	Params     map[string]string `json:"params"`
 }
 
 // Classify sends text to the LLM and returns the parsed intent.
 func (c *LLMClassifier) Classify(ctx context.Context, text string) (Intent, error) {
-	text = truncateInput(text)
+	text = c.truncateInput(text)
 
 	reqBody := ChatCompletionRequest{
 		Model: c.model,
@@ -147,6 +147,7 @@ func (c *LLMClassifier) Classify(ctx context.Context, text string) (Intent, erro
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: text},
 		},
+		MaxTokens:      c.maxTokens,
 		ResponseFormat: &ResponseFormat{Type: "json_object"},
 	}
 
@@ -239,12 +240,14 @@ func stripMarkdownFences(content string) string {
 	return strings.TrimSpace(s)
 }
 
-func truncateInput(text string) string {
+func (c *LLMClassifier) truncateInput(text string) string {
+	maxChars := c.maxTokens * 4
 	runes := []rune(text)
-	if len(runes) <= maxInputChars {
+	if len(runes) <= maxChars {
 		return text
 	}
-	return string(runes[:maxInputChars])
+	slog.Warn("intent: input truncated", "original_chars", len(runes), "truncated_to", maxChars)
+	return string(runes[:maxChars])
 }
 
 func isValidIntentKind(k IntentKind) bool {

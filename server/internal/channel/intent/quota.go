@@ -27,13 +27,11 @@ type SlidingWindowQuota struct {
 	limit     int
 	window    time.Duration
 	collector MetricsCollector
-	entries   map[string]*windowRing // workspaceID → ring buffer of timestamps
+	entries   map[string]*windowRing // workspaceID → slice of timestamps
 }
 
 type windowRing struct {
-	timestamps []time.Time
-	head       int
-	count      int
+	ts []time.Time
 }
 
 // NewSlidingWindowQuota creates a new sliding-window quota limiter.
@@ -52,20 +50,26 @@ func (q *SlidingWindowQuota) Allow(workspaceID string) bool {
 	defer q.mu.Unlock()
 
 	e := q.getOrCreate(workspaceID)
-	q.evictExpired(e, time.Now())
+	now := time.Now()
+	cutoff := now.Add(-q.window)
 
-	if e.count >= q.limit {
+	// Evict expired entries (partial eviction)
+	keep := e.ts[:0]
+	for _, t := range e.ts {
+		if t.After(cutoff) {
+			keep = append(keep, t)
+		}
+	}
+	e.ts = keep
+
+	if len(e.ts) >= q.limit {
 		if q.collector != nil {
 			q.collector.RecordQuotaExhausted()
 		}
 		return false
 	}
 
-	e.timestamps[e.head] = time.Now()
-	e.head = (e.head + 1) % q.limit
-	if e.count < q.limit {
-		e.count++
-	}
+	e.ts = append(e.ts, now)
 	return true
 }
 
@@ -80,27 +84,8 @@ func (q *SlidingWindowQuota) AllowCtx(ctx context.Context, workspaceID string) (
 func (q *SlidingWindowQuota) getOrCreate(workspaceID string) *windowRing {
 	e, ok := q.entries[workspaceID]
 	if !ok {
-		e = &windowRing{
-			timestamps: make([]time.Time, q.limit),
-		}
+		e = &windowRing{}
 		q.entries[workspaceID] = e
 	}
 	return e
-}
-
-func (q *SlidingWindowQuota) evictExpired(e *windowRing, now time.Time) {
-	cutoff := now.Add(-q.window)
-	newCount := 0
-	for i := 0; i < e.count; i++ {
-		idx := (e.head - e.count + i + q.limit) % q.limit
-		if e.timestamps[idx].After(cutoff) {
-			if newCount != i {
-				newIdx := (e.head - e.count + newCount + q.limit) % q.limit
-				e.timestamps[newIdx] = e.timestamps[idx]
-			}
-			newCount++
-		}
-	}
-	e.count = newCount
-	e.head = (e.head - e.count + newCount + q.limit) % q.limit
 }

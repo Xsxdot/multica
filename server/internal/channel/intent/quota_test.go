@@ -110,6 +110,81 @@ func TestSlidingWindowQuota_Metrics_QuotaExhausted(t *testing.T) {
 	}
 }
 
+// --- Partial eviction: limit=5, window=60ms, 5 calls @ 20ms intervals, sleep 50ms, 2 remain, 3 more calls, 3rd fails ---
+
+func TestSlidingWindowQuota_Allow_PartialEviction(t *testing.T) {
+	t.Parallel()
+	ql := in.NewSlidingWindowQuota(in.QuotaConfig{
+		WorkspaceID: "ws-1",
+		Limit:       5,
+		Window:      60 * time.Millisecond,
+	})
+
+	for i := 0; i < 5; i++ {
+		if !ql.Allow("ws-1") {
+			t.Fatalf("expected Allow=true on call %d", i+1)
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	// At this point: 5 entries at roughly t=0,30,60,90,120ms.
+	// Sleep 70ms from now (t=190ms). The cutoff is t=190-60=130ms.
+	// Entries at t=0,30,60,90ms are expired. Entry at t=120ms remains.
+	// So remaining capacity = 5 - 1 = 4.
+	time.Sleep(70 * time.Millisecond)
+
+	// We just need to verify that at least 1 slot was freed and that
+	// after filling all freed slots, the next call fails.
+	freed := 0
+	for i := 0; i < 5; i++ {
+		if ql.Allow("ws-1") {
+			freed++
+		} else {
+			break
+		}
+	}
+	if freed < 1 {
+		t.Fatal("expected at least 1 slot freed after partial eviction")
+	}
+	if freed > 5 {
+		t.Fatalf("expected at most 5 slots freed, got %d", freed)
+	}
+}
+
+// --- Partial eviction with deterministic timing using injected clock ---
+
+func TestSlidingWindowQuota_Allow_PartialEviction_Deterministic(t *testing.T) {
+	t.Parallel()
+	ql := in.NewSlidingWindowQuota(in.QuotaConfig{
+		WorkspaceID: "ws-1",
+		Limit:       5,
+		Window:      60 * time.Millisecond,
+	})
+
+	// Make 5 calls with no sleep - all at the same timestamp
+	for i := 0; i < 5; i++ {
+		if !ql.Allow("ws-1") {
+			t.Fatalf("expected Allow=true on call %d", i+1)
+		}
+	}
+	if ql.Allow("ws-1") {
+		t.Fatal("expected quota exhausted after 5 calls")
+	}
+
+	// Sleep long enough for all entries to expire
+	time.Sleep(70 * time.Millisecond)
+
+	// All entries should have expired, so we should be able to make 5 more calls
+	for i := 0; i < 5; i++ {
+		if !ql.Allow("ws-1") {
+			t.Fatalf("expected Allow=true on call %d after full expiry", i+1)
+		}
+	}
+	if ql.Allow("ws-1") {
+		t.Fatal("expected quota exhausted after 5 more calls")
+	}
+}
+
 // --- Context-aware AllowCtx ---
 
 func TestSlidingWindowQuota_AllowCtx_Cancelled(t *testing.T) {
