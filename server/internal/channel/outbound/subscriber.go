@@ -123,14 +123,16 @@ func NewSubscriber(
 }
 
 // Start begins listening for events on the bus. It subscribes to the
-// three event types defined in the spec:
+// event types defined in the spec:
 //   - comment:created
 //   - inbox:new
 //   - subscriber:added
+//   - issue:updated (status change notifications, M3a)
 func (s *Subscriber) Start() {
 	s.bus.Subscribe(protocol.EventCommentCreated, s.handleCommentCreated)
 	s.bus.Subscribe(protocol.EventInboxNew, s.handleInboxNew)
 	s.bus.Subscribe(protocol.EventSubscriberAdded, s.handleSubscriberAdded)
+	s.bus.Subscribe(protocol.EventIssueUpdated, s.handleIssueUpdated)
 }
 
 func (s *Subscriber) Stop() {}
@@ -213,6 +215,76 @@ func (s *Subscriber) handleSubscriberAdded(e events.Event) {
 	issueTitle, _ := payload["issue_title"].(string)
 
 	s.sendToUser(e.WorkspaceID, subscriberID, "issue_mention", issueTitle, "")
+}
+
+// handleIssueUpdated processes issue:updated events. When the status
+// field changed and the new status is one of the notify-worthy values
+// (in_review, done, blocked), a card is sent to the issue's assignee
+// so the relevant party is notified of the transition.
+func (s *Subscriber) handleIssueUpdated(e events.Event) {
+	if e.WorkspaceID != s.workspaceID {
+		return
+	}
+
+	payload, ok := e.Payload.(map[string]any)
+	if !ok {
+		return
+	}
+
+	statusChanged, _ := payload["status_changed"].(bool)
+	if !statusChanged {
+		return
+	}
+
+	issueObj, ok := payload["issue"].(map[string]any)
+	if !ok {
+		return
+	}
+
+	status, _ := issueObj["status"].(string)
+	eventKind := mapStatusToEventKind(status)
+	if eventKind == "" {
+		return // unsupported status — not a notify-worthy transition
+	}
+
+	issueTitle, _ := issueObj["title"].(string)
+	issueIdentifier, _ := issueObj["identifier"].(string)
+
+	// Notify the assignee if present and different from the actor.
+	assigneeID, _ := issueObj["assignee_id"].(string)
+	if assigneeID != "" && assigneeID != e.ActorID {
+		body := fmt.Sprintf("Issue %s 状态已变更为 %s", issueIdentifier, statusLabel(status))
+		s.sendToUser(e.WorkspaceID, assigneeID, eventKind, issueTitle, body)
+	}
+}
+
+// mapStatusToEventKind maps issue statuses to the preference JSONB key
+// names. Only the three M3a statuses produce a non-empty kind.
+func mapStatusToEventKind(status string) string {
+	switch status {
+	case "in_review":
+		return "status_in_review"
+	case "done":
+		return "status_done"
+	case "blocked":
+		return "status_blocked"
+	default:
+		return ""
+	}
+}
+
+// statusLabel returns a human-readable Chinese label for the status.
+func statusLabel(status string) string {
+	switch status {
+	case "in_review":
+		return "评审中"
+	case "done":
+		return "已完成"
+	case "blocked":
+		return "已阻塞"
+	default:
+		return status
+	}
 }
 
 // sendToUser resolves the user's binding, checks preferences, and

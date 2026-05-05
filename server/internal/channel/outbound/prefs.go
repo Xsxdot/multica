@@ -36,9 +36,12 @@ func NewDBPrefStore(q *db.Queries) *DBPrefStore {
 //
 //	preferences -> 'channel' -> 'feishu' -> 'comment_mention' / 'issue_assigned' / 'issue_mention'
 var prefKeyMap = map[string]string{
-	"comment_mention": "comment_mention",
-	"issue_assigned":  "issue_assigned",
-	"issue_mention":   "issue_mention",
+	"comment_mention":  "comment_mention",
+	"issue_assigned":   "issue_assigned",
+	"issue_mention":    "issue_mention",
+	"status_in_review": "status_in_review",
+	"status_done":      "status_done",
+	"status_blocked":   "status_blocked",
 }
 
 // GetChannelPref returns true if the given event kind is enabled for the user
