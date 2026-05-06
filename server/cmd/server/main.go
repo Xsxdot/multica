@@ -327,6 +327,26 @@ func main() {
 			return fmt.Errorf("feishu: connect: %w", err)
 		}
 
+		// TODO[STA-69-R1]: Wire attachment pipeline step.
+		// The inbound pipeline is not yet instantiated in main.go (it only
+		// exists in test helpers). When the pipeline is wired for production,
+		// add an attachment step between intent-recog and dispatch:
+		//
+		//   inbound.NewAttachmentStep(inbound.AttachmentConfig{
+		//       Storage:           storageSvc,
+		//       AttachmentQuerier: attachmentFacade, // facade.NewAttachmentFacade(attachmentSvc)
+		//       FileDownloader:    feishuadapter.NewRealFileDownloader(sdkClient),
+		//       Registry:          channelRegistry,
+		//       ChatBinding:       chatBindingStore,
+		//       UserResolver:      userResolver,
+		//       IssueFacade:       issueFacade,
+		//   })
+		//
+		// This requires:
+		//   1. An AttachmentService implementation (internal/service/attachment.go)
+		//   2. Storage service wiring in main.go
+		//   3. Pipeline instantiation (currently only in test helpers)
+
 		slog.Info("channel leader: feishu adapter connected", "app_id", feishuAppID)
 		return nil
 	})

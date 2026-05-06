@@ -111,10 +111,26 @@ func (f *commentFacade) AddComment(ctx context.Context, req AddCommentReq) (Comm
 	return f.svc.AddComment(ctx, req)
 }
 
+// attachmentFacade is the unexported concrete implementation of AttachmentFacade.
+type attachmentFacade struct {
+	svc AttachmentService
+}
+
+// NewAttachmentFacade returns an AttachmentFacade that delegates to svc.
+func NewAttachmentFacade(svc AttachmentService) AttachmentFacade {
+	return &attachmentFacade{svc: svc}
+}
+
+// UploadIssueAttachment forwards req verbatim to the underlying service.
+func (f *attachmentFacade) UploadIssueAttachment(ctx context.Context, req UploadIssueAttachmentReq) (Attachment, error) {
+	return f.svc.UploadIssueAttachment(ctx, req)
+}
+
 // Compile-time interface conformance assertions. These give a clear compile
 // error at the implementation site (rather than at every caller) if a method
 // signature drifts from the interface.
 var (
-	_ IssueFacade   = (*issueFacade)(nil)
-	_ CommentFacade = (*commentFacade)(nil)
+	_ IssueFacade      = (*issueFacade)(nil)
+	_ CommentFacade    = (*commentFacade)(nil)
+	_ AttachmentFacade = (*attachmentFacade)(nil)
 )

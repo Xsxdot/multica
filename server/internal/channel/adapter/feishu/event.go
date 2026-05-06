@@ -75,26 +75,27 @@ type feishuTextContent struct {
 	Text string `json:"text"`
 }
 
+// feishuImageContent is the inner content struct Feishu uses for image
+// messages: {"image_key": "...", "text": "..."}.
+type feishuImageContent struct {
+	ImageKey string `json:"image_key"`
+	Text     string `json:"text"`
+}
+
+// feishuFileContent is the inner content struct Feishu uses for file
+// messages: {"file_key": "...", "file_name": "..."}.
+type feishuFileContent struct {
+	FileKey  string `json:"file_key"`
+	FileName string `json:"file_name"`
+}
+
 func normaliseMessageReceive(channelName, botUserID string, raw RawEvent) (port.InboundEvent, bool, error) {
 	var ev feishuMessageReceive
 	if err := json.Unmarshal(raw.Payload, &ev); err != nil {
 		return port.InboundEvent{}, false, fmt.Errorf("feishu: decode im.message.receive_v1: %w", err)
 	}
 
-	// MVP: only text messages are normalised. Other message types are
-	// silently dropped — they belong to future M2/M3 features (e.g. image
-	// upload as Issue attachment is a P1 line item).
-	if ev.Event.Message.MessageType != "text" {
-		return port.InboundEvent{}, false, nil
-	}
-
-	var content feishuTextContent
-	if err := json.Unmarshal([]byte(ev.Event.Message.Content), &content); err != nil {
-		return port.InboundEvent{}, false, fmt.Errorf("feishu: decode text content: %w", err)
-	}
-
-	text := stripBotMentions(content.Text, ev.Event.Message.Mentions, botUserID)
-
+	msgType := ev.Event.Message.MessageType
 	chatType := mapChatType(ev.Event.Message.ChatType)
 
 	// Prefer the header.event_id (canonical platform id) but fall back to
@@ -106,7 +107,7 @@ func normaliseMessageReceive(channelName, botUserID string, raw RawEvent) (port.
 		eventID = raw.EventID
 	}
 
-	return port.InboundEvent{
+	base := port.InboundEvent{
 		ChannelName: channelName,
 		EventID:     eventID,
 		Type:        port.EventTypeMessageReceived,
@@ -114,10 +115,42 @@ func normaliseMessageReceive(channelName, botUserID string, raw RawEvent) (port.
 		ChatType:    chatType,
 		SenderID:    ev.Event.Sender.SenderID.OpenID,
 		SenderName:  "", // user name resolution happens via GetUserInfo on demand; PRD does not require eager resolution.
-		Text:        text,
 		MessageID:   ev.Event.Message.MessageID,
 		RawPayload:  append(json.RawMessage(nil), raw.Payload...),
-	}, true, nil
+	}
+
+	switch msgType {
+	case "text":
+		var content feishuTextContent
+		if err := json.Unmarshal([]byte(ev.Event.Message.Content), &content); err != nil {
+			return port.InboundEvent{}, false, fmt.Errorf("feishu: decode text content: %w", err)
+		}
+		base.Text = stripBotMentions(content.Text, ev.Event.Message.Mentions, botUserID)
+		return base, true, nil
+	case "image":
+		var content feishuImageContent
+		if err := json.Unmarshal([]byte(ev.Event.Message.Content), &content); err != nil {
+			return port.InboundEvent{}, false, fmt.Errorf("feishu: decode image content: %w", err)
+		}
+		base.Text = stripBotMentions(content.Text, ev.Event.Message.Mentions, botUserID)
+		base.Attachments = []port.AttachmentInfo{
+			{FileKey: content.ImageKey, FileType: "image", MessageID: base.MessageID},
+		}
+		return base, true, nil
+	case "file":
+		var content feishuFileContent
+		if err := json.Unmarshal([]byte(ev.Event.Message.Content), &content); err != nil {
+			return port.InboundEvent{}, false, fmt.Errorf("feishu: decode file content: %w", err)
+		}
+		base.Attachments = []port.AttachmentInfo{
+			{FileKey: content.FileKey, FileName: content.FileName, FileType: "file", MessageID: base.MessageID},
+		}
+		return base, true, nil
+	default:
+		// Unknown message types are silently dropped — they belong to
+		// future features (e.g. sticker, post, etc.).
+		return port.InboundEvent{}, false, nil
+	}
 }
 
 // stripBotMentions removes the literal "@_user_<key>" placeholder Feishu
