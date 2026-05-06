@@ -25,6 +25,14 @@ type ChannelBindingResponse struct {
 	CreatedAt        string  `json:"created_at"`
 }
 
+// canManageBinding returns true if the member is allowed to manage (delete or
+// change primary status of) a binding. The rule is: binding creator OR
+// workspace admin/owner.
+func canManageBinding(binding db.ChannelChatBinding, member db.Member) bool {
+	return uuidToString(binding.BoundByUserID) == uuidToString(member.UserID) ||
+		member.Role == "owner" || member.Role == "admin"
+}
+
 func bindingToResponse(b db.ChannelChatBinding) ChannelBindingResponse {
 	return ChannelBindingResponse{
 		ID:               uuidToString(b.ID),
@@ -179,8 +187,7 @@ func (h *Handler) DeleteChannelBinding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Only binding creator or workspace admin/owner can delete
-	if uuidToString(binding.BoundByUserID) != uuidToString(member.UserID) &&
-		member.Role != "owner" && member.Role != "admin" {
+	if !canManageBinding(binding, member) {
 		writeError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
@@ -232,8 +239,7 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Only binding creator or workspace admin/owner can set primary
-	if uuidToString(binding.BoundByUserID) != uuidToString(member.UserID) &&
-		member.Role != "owner" && member.Role != "admin" {
+	if !canManageBinding(binding, member) {
 		writeError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
