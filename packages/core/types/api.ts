@@ -121,3 +121,28 @@ export interface PaginationParams {
   limit?: number;
   offset?: number;
 }
+
+// Channel Bindings
+export interface ChannelBinding {
+  id: string;
+  provider: string;
+  external_chat_id: string;
+  chat_type: string;
+  external_chat_name: string | null;
+  is_primary: boolean;
+  bound_by_user_id: string;
+  created_at: string;
+}
+
+export interface ListChannelBindingsResponse {
+  bindings: ChannelBinding[];
+}
+
+export interface CreateChannelBindingRequest {
+  token: string;
+  provider: string;
+}
+
+export interface SetPrimaryChannelBindingRequest {
+  is_primary: boolean;
+}

@@ -29,6 +29,16 @@ RETURNING id, provider, event_kind, target_user_id, target_external_user_id, pay
 // Atomically claim up to N pending failures: the UPDATE locks rows via
 // the FOR UPDATE SKIP LOCKED subquery so two replicas never process the
 // same failure concurrently.
+//
+// Claimed rows get a 5-minute cooldown on next_retry_at to prevent
+// re-claim before IncrementAttempts/MarkDead overwrites it with the
+// real backoff. 5 minutes is chosen as ~2× the worst-case adapter call
+// timeout (Feishu OpenAPI default ≈ 60s, generous headroom for slow
+// networks). If a worker hangs longer than 5 min on a single SendCard,
+// another replica may legitimately re-claim the row — that's a tradeoff
+// between availability (stuck worker shouldn't permanently lock a row)
+// and exactly-once (we accept rare double-send during a multi-minute
+// stall). Bump this if you raise SendCard timeouts.
 func (q *Queries) ClaimPendingOutboundFailures(ctx context.Context, limit int32) ([]ChannelOutboundFailure, error) {
 	rows, err := q.db.Query(ctx, claimPendingOutboundFailures, limit)
 	if err != nil {

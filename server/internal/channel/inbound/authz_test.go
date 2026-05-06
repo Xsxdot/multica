@@ -37,6 +37,11 @@ type fakeAuthzStore struct {
 	wsIDFound bool
 	wsIDErr   error
 
+	// LookupPrimaryWorkspaceID behaviour.
+	primaryWsID      pgtype.UUID
+	primaryWsIDFound bool
+	primaryWsIDErr   error
+
 	// IsWorkspaceMember behaviour.
 	isMember  bool
 	memberErr error
@@ -53,6 +58,21 @@ func (f *fakeAuthzStore) LookupWorkspaceID(_ context.Context, _, _ string) (pgty
 		return pgtype.UUID{}, pgx.ErrNoRows
 	}
 	return f.wsID, nil
+}
+
+func (f *fakeAuthzStore) LookupPrimaryWorkspaceID(_ context.Context, _, _ string) (pgtype.UUID, error) {
+	// For backward compat with existing tests: if primary fields are not
+	// explicitly set, delegate to LookupWorkspaceID.
+	if f.primaryWsIDErr == nil && !f.primaryWsIDFound && f.primaryWsID == (pgtype.UUID{}) {
+		return f.LookupWorkspaceID(nil, "", "")
+	}
+	if f.primaryWsIDErr != nil {
+		return pgtype.UUID{}, f.primaryWsIDErr
+	}
+	if !f.primaryWsIDFound {
+		return pgtype.UUID{}, pgx.ErrNoRows
+	}
+	return f.primaryWsID, nil
 }
 
 func (f *fakeAuthzStore) IsWorkspaceMember(_ context.Context, _, _ pgtype.UUID) (bool, error) {
@@ -374,6 +394,77 @@ func TestAuthzStep_Name(t *testing.T) {
 	step := inbound.NewAuthzStep(inbound.AuthzConfig{})
 	if got := step.Name(); got != "authz" {
 		t.Errorf("Name = %q, want %q", got, "authz")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TC-authz-5: multi-binding — primary chat resolves workspace, non-primary
+// returns AuthzNotPrimary (or WS_NOT_BOUND depending on implementation)
+// ---------------------------------------------------------------------------
+
+func TestAuthzStep_PrimaryChat_BoundToWorkspace(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeAuthzStore{
+		primaryWsID:      pgtype.UUID{Bytes: [16]byte{1}, Valid: true},
+		primaryWsIDFound: true,
+	}
+	step := inbound.NewAuthzStep(inbound.AuthzConfig{Store: store})
+
+	evt := port.InboundEvent{
+		ChannelName: "feishu",
+		EventID:     "evt-primary",
+		ChatID:      "chat-primary",
+		SenderID:    "user-1",
+	}
+
+	_, _, err := step.Run(context.Background(), evt)
+	// Identity unresolved triggers first (T8 not wired), but the lookup
+	// should have succeeded — this test verifies the store method is called.
+	if err == nil {
+		t.Fatal("Run: expected error (identity unresolved), got nil")
+	}
+
+	var authzErr *inbound.AuthzError
+	if !errors.As(err, &authzErr) {
+		t.Fatalf("err type = %T, want *inbound.AuthzError", err)
+	}
+	if authzErr.Code != inbound.AuthzIdentityUnresolved {
+		t.Errorf("code = %q, want %q", authzErr.Code, inbound.AuthzIdentityUnresolved)
+	}
+}
+
+func TestAuthzStep_NonPrimaryChat_ReturnsNotPrimary(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeAuthzStore{
+		primaryWsIDFound: false, // non-primary chat has no primary binding
+		primaryWsIDErr:   pgx.ErrNoRows,
+	}
+	step := inbound.NewAuthzStep(inbound.AuthzConfig{Store: store})
+
+	evt := port.InboundEvent{
+		ChannelName: "feishu",
+		EventID:     "evt-non-primary",
+		ChatID:      "chat-non-primary",
+		SenderID:    "user-1",
+	}
+
+	_, _, err := step.Run(context.Background(), evt)
+	if err == nil {
+		t.Fatal("Run: expected error, got nil")
+	}
+
+	var authzErr *inbound.AuthzError
+	if !errors.As(err, &authzErr) {
+		t.Fatalf("err type = %T, want *inbound.AuthzError", err)
+	}
+	// When non-primary, the chat IS bound but not primary — should return
+	// WS_NOT_BOUND (or a new NOT_PRIMARY code). The key assertion is that
+	// it does NOT return IDENTITY_UNRESOLVED (which would mean the lookup
+	// succeeded and we moved to identity check).
+	if authzErr.Code != inbound.AuthzWsNotBound {
+		t.Errorf("code = %q, want %q", authzErr.Code, inbound.AuthzWsNotBound)
 	}
 }
 

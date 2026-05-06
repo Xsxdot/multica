@@ -93,7 +93,17 @@ type AuthzStore interface {
 	// (channelName, chat_id) pair. channelName is the registry key
 	// (e.g. "feishu") matching port.Channel.Name(). If no binding
 	// exists it returns pgx.ErrNoRows.
+	//
+	// Deprecated: Use LookupPrimaryWorkspaceID for inbound command
+	// processing. LookupWorkspaceID is kept for backward compat with
+	// dispatch and other callers that need ANY binding (not just primary).
 	LookupWorkspaceID(ctx context.Context, channelName, chatID string) (pgtype.UUID, error)
+
+	// LookupPrimaryWorkspaceID returns the workspace_id of the PRIMARY
+	// binding for the given (channelName, chat_id) pair. Only primary
+	// bindings process inbound commands; non-primary bindings receive
+	// notifications only.
+	LookupPrimaryWorkspaceID(ctx context.Context, channelName, chatID string) (pgtype.UUID, error)
 
 	// IsWorkspaceMember returns true if (userID, workspaceID) exists in
 	// the member table. The caller must ensure userID.Valid == true;
@@ -145,7 +155,9 @@ func (*authzStep) Name() string { return "authz" }
 
 func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
 	// --- 1. Chat binding (TC-authz-1) ---
-	wsID, err := s.cfg.Store.LookupWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
+	// Use LookupPrimaryWorkspaceID so only primary bindings process inbound commands.
+	// Non-primary bindings return WS_NOT_BOUND (they receive notifications only).
+	wsID, err := s.cfg.Store.LookupPrimaryWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			authzErr := &AuthzError{
@@ -155,7 +167,7 @@ func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 			s.maybeSendReply(ctx, evt, authzErr.Reply)
 			return evt, DecisionContinue, authzErr
 		}
-		return evt, DecisionContinue, fmt.Errorf("authz: lookup workspace: %w", err)
+		return evt, DecisionContinue, fmt.Errorf("authz: lookup primary workspace: %w", err)
 	}
 
 	// --- 2. Identity resolution (fail-closed) ---

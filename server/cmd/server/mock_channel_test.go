@@ -56,6 +56,15 @@ func (l *dbChatBindingLookup) LookupWorkspaceID(ctx context.Context, channelName
 	return wsID, err
 }
 
+func (l *dbChatBindingLookup) LookupPrimaryWorkspaceID(ctx context.Context, channelName, chatID string) (pgtype.UUID, error) {
+	var wsID pgtype.UUID
+	err := l.pool.QueryRow(ctx, `
+		SELECT workspace_id FROM channel_chat_binding
+		WHERE provider = $1 AND external_chat_id = $2 AND is_primary = true
+	`, channelName, chatID).Scan(&wsID)
+	return wsID, err
+}
+
 // ---------------------------------------------------------------------------
 // dbUserInfoResolver — production-shaped UserInfoResolver backed by
 // channel_user_binding + user. Identical to the wiring code that

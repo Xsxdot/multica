@@ -80,6 +80,10 @@ import type {
   ListAutopilotRunsResponse,
   NotificationPreferenceResponse,
   NotificationPreferences,
+  ChannelBinding,
+  ListChannelBindingsResponse,
+  CreateChannelBindingRequest,
+  SetPrimaryChannelBindingRequest,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import { type Logger, noopLogger } from "../logger";
@@ -1226,5 +1230,28 @@ export class ApiClient {
 
   async deleteAutopilotTrigger(autopilotId: string, triggerId: string): Promise<void> {
     await this.fetch(`/api/autopilots/${autopilotId}/triggers/${triggerId}`, { method: "DELETE" });
+  }
+
+  // Channel Bindings
+  async listChannelBindings(workspaceId: string): Promise<ListChannelBindingsResponse> {
+    return this.fetch(`/api/workspaces/${workspaceId}/channel-bindings`);
+  }
+
+  async createChannelBinding(workspaceId: string, data: CreateChannelBindingRequest): Promise<ChannelBinding> {
+    return this.fetch(`/api/workspaces/${workspaceId}/channel-bindings`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteChannelBinding(workspaceId: string, bindingId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/channel-bindings/${bindingId}`, { method: "DELETE" });
+  }
+
+  async setPrimaryChannelBinding(workspaceId: string, bindingId: string, data: SetPrimaryChannelBindingRequest): Promise<ChannelBinding> {
+    return this.fetch(`/api/workspaces/${workspaceId}/channel-bindings/${bindingId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
   }
 }
