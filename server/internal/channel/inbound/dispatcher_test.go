@@ -731,6 +731,74 @@ func TestDispatchStep_SetLabel_MissingParams(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Business error propagation: facade returns error → INTERNAL_ERROR reply
+// ---------------------------------------------------------------------------
+
+func TestDispatchStep_SetAssignee_FacadeError_ReturnsInternalError(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x40), Identifier: "STA-7", Title: "t", Status: "todo"}
+	issueSvc.setAssigneeErr = errors.New("用户 @张三 不在此 workspace")
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetAssignee, map[string]string{
+		"issue_key": "STA-7",
+		"assignee":  "@张三",
+	})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run should swallow error: %v", err)
+	}
+	if !strings.Contains(recCh.sends[0].Text, "INTERNAL_ERROR") {
+		t.Errorf("reply missing INTERNAL_ERROR: %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_SetPriority_FacadeError_ReturnsInternalError(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x41), Identifier: "STA-8", Title: "t", Status: "todo"}
+	issueSvc.setPriorityErr = errors.New("优先级仅支持 urgent/high/medium/low/no_priority")
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetPriority, map[string]string{
+		"issue_key": "STA-8",
+		"priority":  "invalid",
+	})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run should swallow error: %v", err)
+	}
+	if !strings.Contains(recCh.sends[0].Text, "INTERNAL_ERROR") {
+		t.Errorf("reply missing INTERNAL_ERROR: %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_SetLabel_FacadeError_ReturnsInternalError(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x42), Identifier: "STA-9", Title: "t", Status: "todo"}
+	issueSvc.addLabelErr = errors.New("标签 bug 不存在，请先在 Web 端创建")
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetLabel, map[string]string{
+		"issue_key": "STA-9",
+		"label":     "bug",
+		"op":        "add",
+	})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run should swallow error: %v", err)
+	}
+	if !strings.Contains(recCh.sends[0].Text, "INTERNAL_ERROR") {
+		t.Errorf("reply missing INTERNAL_ERROR: %q", recCh.sends[0].Text)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // QueryIssue — specific issue
 // ---------------------------------------------------------------------------
 

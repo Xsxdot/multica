@@ -493,6 +493,35 @@ func cleanupChannelUserBinding(ctx context.Context, provider, externalUserID str
 		provider, externalUserID)
 }
 
+// mustCreateUser inserts a new user row and returns the generated UUID.
+func mustCreateUser(t *testing.T, displayName string) string {
+	t.Helper()
+	var id string
+	if err := testPool.QueryRow(context.Background(), `
+		INSERT INTO "user" (display_name, email)
+		VALUES ($1, $2)
+		RETURNING id
+	`, displayName, displayName+"@test.local").Scan(&id); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM "user" WHERE id = $1`, id)
+	})
+	return id
+}
+
+// mustAddMember inserts a member row linking userID to workspaceID.
+func mustAddMember(t *testing.T, workspaceID, userID string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO member (workspace_id, user_id, role)
+		VALUES ($1, $2, 'member')
+		ON CONFLICT (workspace_id, user_id) DO NOTHING
+	`, workspaceID, userID); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+}
+
 // freshEventID returns a per-run-unique event id with the supplied
 // prefix. The integration tests share the channel_inbound_event_dedup
 // table (a real DB table, not a per-test fixture), so reusing the same

@@ -26,6 +26,9 @@ dist-electron
 
 # test coverage
 coverage
+*.out
+*.html
+cover.*
 
 # Go
 server/bin/
