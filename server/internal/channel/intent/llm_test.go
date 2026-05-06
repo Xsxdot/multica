@@ -543,3 +543,61 @@ func TestLLMClassifier_Classify_ConfidenceClamped(t *testing.T) {
 		})
 	}
 }
+
+// --- LLM returns new intents with missing params → params are empty / missing keys ---
+
+func TestLLMClassifier_Classify_NewIntents_MissingParams(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		intent     string
+		params     map[string]string
+		wantKind   in.IntentKind
+		wantKey    string
+		wantField  string
+	}{
+		{"SetAssignee missing assignee", "SetAssignee", map[string]string{"issue_key": "STA-2"}, in.IntentSetAssignee, "STA-2", "assignee"},
+		{"SetPriority missing priority", "SetPriority", map[string]string{"issue_key": "STA-3"}, in.IntentSetPriority, "STA-3", "priority"},
+		{"SetLabel missing label", "SetLabel", map[string]string{"issue_key": "STA-4", "op": "add"}, in.IntentSetLabel, "STA-4", "label"},
+		{"SetLabel missing op", "SetLabel", map[string]string{"issue_key": "STA-5", "label": "bug"}, in.IntentSetLabel, "STA-5", "op"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := in.LLMResponse{
+					Intent:     tc.intent,
+					Confidence: 0.85,
+					Params:     tc.params,
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(in.ChatCompletionResponse{
+					Choices: []in.Choice{{Message: in.Message{Content: mustMarshal(resp)}}},
+					Usage:   in.Usage{TotalTokens: 100},
+				})
+			}))
+			defer srv.Close()
+
+			clf := in.NewLLMClassifier(in.LLMClassifierConfig{
+				APIURL: srv.URL,
+				APIKey: "test-key",
+				Model:  "gpt-4o-mini",
+			})
+
+			got, err := clf.Classify(context.Background(), "test")
+			if err != nil {
+				t.Fatalf("Classify: %v", err)
+			}
+			if got.Kind != tc.wantKind {
+				t.Errorf("Kind = %q, want %q", got.Kind, tc.wantKind)
+			}
+			if got.Params["issue_key"] != tc.wantKey {
+				t.Errorf("issue_key = %q, want %q", got.Params["issue_key"], tc.wantKey)
+			}
+			if got.Params[tc.wantField] != "" {
+				t.Errorf("expected empty %s, got %q", tc.wantField, got.Params[tc.wantField])
+			}
+		})
+	}
+}

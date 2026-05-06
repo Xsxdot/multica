@@ -192,6 +192,116 @@ func TestChannelIntegration_TC_int_4_M2_GroupQueryAndSetStatus(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TC-int-9 (M3a) · Group SetAssignee end-to-end.
+//
+// Scenario (PRD F5, STA-68):
+//   1. Pre-create an issue and a workspace member.
+//   2. Send a SetAssignee intent via the production dispatch step.
+//   3. Assert the reply contains "ASSIGNEE_CHANGED" and the assignee name.
+//   4. Confirm the issue row has the correct assignee_id.
+// ---------------------------------------------------------------------------
+
+func TestChannelIntegration_TC_int_9_M3a_GroupSetAssignee(t *testing.T) {
+	requirePool(t)
+
+	ctx := context.Background()
+	const externalUserID = "ou_m3a_int9_sender"
+	const externalChatID = "oc_m3a_int9_chat"
+	const provider = "feishu"
+	titleSuffix := fmt.Sprintf("-%d", time.Now().UnixNano())
+	createTitle := "m3a set assignee target" + titleSuffix
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(),
+			`DELETE FROM issue WHERE title = $1`, createTitle)
+	})
+
+	registry := channel.NewRegistry()
+	fake := newFakeChannel(provider)
+	if err := registry.Register(fake); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	bindChatToWorkspace(t, provider, externalChatID, port.ChatTypeGroup, testWorkspaceID, testUserID)
+	bindUserToMulticaUser(t, provider, externalUserID, testUserID)
+
+	// Create a second member to assign to.
+	const assigneeExternalID = "ou_m3a_int9_target"
+	assigneeUserID := mustCreateUser(t, "assignee-target"+titleSuffix)
+	mustAddMember(t, testWorkspaceID, assigneeUserID)
+	bindUserToMulticaUser(t, provider, assigneeExternalID, assigneeUserID)
+
+	// Resolve assignee display name for the intent.
+	var assigneeName string
+	if err := testPool.QueryRow(ctx, `SELECT display_name FROM "user" WHERE id = $1`, assigneeUserID).Scan(&assigneeName); err != nil {
+		t.Fatalf("read assignee name: %v", err)
+	}
+
+	issueSvc := newDirectIssueServiceFull(testPool)
+	wsUUID := uuidFromString(t, testWorkspaceID)
+	created, err := issueSvc.CreateIssue(ctx, mustCreateReq(t, wsUUID, externalUserID, createTitle))
+	if err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+
+	var number int32
+	var prefix string
+	if err := testPool.QueryRow(ctx, `
+		SELECT i.number, w.issue_prefix
+		FROM issue i JOIN workspace w ON w.id = i.workspace_id
+		WHERE i.id = $1
+	`, created.ID).Scan(&number, &prefix); err != nil {
+		t.Fatalf("read identifier: %v", err)
+	}
+	identifier := fmt.Sprintf("%s-%d", prefix, number)
+
+	dispatch := newProductionDispatchStep(testPool, registry, issueSvc)
+
+	setIntent := port.InboundIntent{
+		Kind:       port.IntentSetAssignee,
+		Confidence: 1,
+		Source:     port.SourceRule,
+		Params:     map[string]string{"issue_key": identifier, "assignee": assigneeName},
+	}
+	setEvt := port.InboundEvent{
+		ChannelName: provider,
+		EventID:     freshEventID(t, provider, "evt_m3aint9_set"),
+		Type:        port.EventTypeMessageReceived,
+		ChatID:      externalChatID,
+		ChatType:    port.ChatTypeGroup,
+		SenderID:    externalUserID,
+		Text:        "把 " + identifier + " 指派给 @" + assigneeName,
+		MessageID:   "om_m3aint9_set",
+	}
+	pipeline := newM2Pipeline(testPool, registry, setIntent, dispatch)
+	if _, err := pipeline.Run(ctx, setEvt); err != nil {
+		t.Fatalf("set assignee pipeline: %v", err)
+	}
+
+	sends := fake.snapshotSends()
+	if len(sends) != 1 {
+		t.Fatalf("expected 1 outbound send, got %d", len(sends))
+	}
+	reply := sends[0]
+	if !strings.Contains(reply.Text, "ASSIGNEE_CHANGED") {
+		t.Fatalf("reply must contain ASSIGNEE_CHANGED: %q", reply.Text)
+	}
+	if !strings.Contains(reply.Text, assigneeName) {
+		t.Fatalf("reply must contain assignee name %q: %q", assigneeName, reply.Text)
+	}
+
+	var assigneeID pgtype.UUID
+	if err := testPool.QueryRow(ctx, `SELECT assignee_id FROM issue WHERE id = $1`, created.ID).Scan(&assigneeID); err != nil {
+		t.Fatalf("read post-assignee: %v", err)
+	}
+	var targetUUID pgtype.UUID
+	if err := targetUUID.Scan(assigneeUserID); err != nil {
+		t.Fatalf("parse target uuid: %v", err)
+	}
+	if !assigneeID.Valid || assigneeID != targetUUID {
+		t.Fatalf("assignee not persisted: got %v want %v", assigneeID, targetUUID)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TC-int-5 (M2) · Outbound 60s aggregator merges two updates into one
 // card.
 //

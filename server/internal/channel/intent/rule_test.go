@@ -288,3 +288,27 @@ func TestRuleMatcher_EmptyString_NoHit(t *testing.T) {
 		t.Fatal("empty text should not hit")
 	}
 }
+
+// Negatives for new intents: missing params / no issue identifier.
+func TestRuleMatcher_NewIntents_NegativeCases(t *testing.T) {
+	t.Parallel()
+	m := in.NewRuleMatcher()
+	negatives := []string{
+		// SetAssignee: missing assignee
+		"把 STA-1 指派给",
+		"指派给 @张三",
+		// SetPriority: missing priority value
+		"STA-1 改优先级",
+		"改优先级 high",
+		// SetLabel: missing label
+		"STA-1 加标签",
+		"加标签 bug",
+		"STA-1 去掉标签",
+		"去掉标签 bug",
+	}
+	for _, s := range negatives {
+		if _, ok := m.Match(s); ok {
+			t.Errorf("expected no rule hit for %q", s)
+		}
+	}
+}
