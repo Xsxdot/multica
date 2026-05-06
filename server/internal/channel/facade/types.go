@@ -10,7 +10,11 @@
 // business logic lives here — see DESIGN §4.2 ("薄壳，调既有 service，不写业务").
 package facade
 
-import "github.com/jackc/pgx/v5/pgtype"
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
+)
 
 // Issue is the facade-layer projection of an issue. It deliberately exposes
 // only the fields the channel layer needs today (DESIGN §4.2 thin shell);
@@ -50,4 +54,28 @@ type AddCommentReq struct {
 	IssueID pgtype.UUID
 	ActorID pgtype.UUID
 	Content string
+}
+
+// Attachment is the facade-layer projection of an attachment record.
+type Attachment struct {
+	ID pgtype.UUID
+}
+
+// UploadIssueAttachmentReq carries the inputs needed to create an attachment
+// record from the channel layer.
+type UploadIssueAttachmentReq struct {
+	WorkspaceID  pgtype.UUID
+	IssueID      pgtype.UUID
+	UploaderID   pgtype.UUID
+	UploaderType string
+	Filename     string
+	URL          string
+	ContentType  string
+	SizeBytes    int64
+}
+
+// AttachmentFacade is the channel-layer entry point for attachment operations.
+// Same single-direction dependency contract as IssueFacade (DESIGN §3.2).
+type AttachmentFacade interface {
+	UploadIssueAttachment(ctx context.Context, req UploadIssueAttachmentReq) (Attachment, error)
 }

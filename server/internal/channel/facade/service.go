@@ -38,3 +38,9 @@ type IssueService interface {
 type CommentService interface {
 	AddComment(ctx context.Context, req AddCommentReq) (Comment, error)
 }
+
+// AttachmentService is the dependency contract the channel facade requires for
+// attachment-related behaviour.
+type AttachmentService interface {
+	UploadIssueAttachment(ctx context.Context, req UploadIssueAttachmentReq) (Attachment, error)
+}

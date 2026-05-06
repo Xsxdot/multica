@@ -110,7 +110,19 @@ type InboundEvent struct {
 	Text        string
 	MessageID   string
 	Intent      InboundIntent
+	Attachments []AttachmentInfo
 	RawPayload  json.RawMessage
+}
+
+// AttachmentInfo carries metadata about a non-text attachment (image, file,
+// etc.) that arrived with an inbound message. The adapter layer populates it
+// during normalisation; downstream pipeline steps use it to download, upload,
+// and persist the attachment.
+type AttachmentInfo struct {
+	FileKey   string // platform-side file identifier (e.g. Feishu file_key)
+	FileName  string // original filename
+	FileType  string // "image" | "file"
+	MessageID string // platform message_id (required by Feishu download API)
 }
 
 // ChatInfo holds metadata about a chat room / channel / thread.
