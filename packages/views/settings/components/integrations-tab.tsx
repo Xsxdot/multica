@@ -20,6 +20,7 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useCurrentWorkspace } from "@multica/core/paths";
+import { useCurrentMember } from "@multica/core/permissions";
 import { workspaceKeys, channelBindingListOptions } from "@multica/core/workspace/queries";
 import { api } from "@multica/core/api";
 import type { ChannelBinding } from "@multica/core/types";
@@ -102,8 +103,9 @@ export function IntegrationsTab() {
     onConfirm: () => Promise<void>;
   } | null>(null);
 
-  const currentMember = null; // Simplified: permission check handled server-side
-  const canManageWorkspace = true; // Simplified: server returns 403 if not allowed
+  const { userId, role } = useCurrentMember(wsId);
+  const canManageBinding = (binding: ChannelBinding) =>
+    role === "owner" || role === "admin" || binding.bound_by_user_id === userId;
 
   const setPrimaryMutation = useMutation({
     mutationFn: ({ bindingId }: { bindingId: string }) =>
@@ -176,7 +178,7 @@ export function IntegrationsTab() {
               <div key={b.id} className={i > 0 ? "border-t border-border/50" : ""}>
                 <BindingCard
                   binding={b}
-                  canManage={canManageWorkspace}
+                  canManage={canManageBinding(b)}
                   busy={actionBindingId === b.id}
                   onSetPrimary={() => handleSetPrimary(b)}
                   onUnbind={() => handleUnbind(b)}

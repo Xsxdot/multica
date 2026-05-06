@@ -61,12 +61,12 @@ type SetPrimaryChannelBindingRequest struct {
 
 func (h *Handler) ListChannelBindings(w http.ResponseWriter, r *http.Request) {
 	workspaceID := workspaceIDFromURL(r, "id")
-	wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace id")
+	member, ok := h.workspaceMember(w, r, workspaceID)
 	if !ok {
 		return
 	}
 
-	bindings, err := h.Queries.ListChannelChatBindings(r.Context(), wsUUID)
+	bindings, err := h.Queries.ListChannelChatBindings(r.Context(), member.WorkspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list bindings")
 		return
@@ -250,7 +250,8 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 			WorkspaceID: binding.WorkspaceID,
 			Provider:    binding.Provider,
 		}); err != nil {
-			// Non-fatal: continue and try to set the new primary
+			writeError(w, http.StatusInternalServerError, "failed to clear primary bindings")
+			return
 		}
 	}
 

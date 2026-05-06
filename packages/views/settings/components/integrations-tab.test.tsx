@@ -50,6 +50,10 @@ vi.mock("@multica/core/hooks", () => ({
   useWorkspaceId: vi.fn(() => "ws-1"),
 }));
 
+vi.mock("@multica/core/permissions", () => ({
+  useCurrentMember: vi.fn(() => ({ userId: "user-1", role: "admin", member: null, isLoading: false })),
+}));
+
 vi.mock("@multica/core/paths", () => ({
   useCurrentWorkspace: vi.fn(() => ({ id: "ws-1", name: "Test Workspace" })),
 }));
