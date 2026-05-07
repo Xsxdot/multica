@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/facade"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
+	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 )
 
@@ -151,6 +151,27 @@ func TestSlashStep_UnknownSlashBypass(t *testing.T) {
 	}
 	if out.Text != evt.Text {
 		t.Fatalf("text should stay unchanged for unknown slash, got %q", out.Text)
+	}
+}
+
+func TestSlashStep_InvalidLabelTokenPassesThrough(t *testing.T) {
+	t.Parallel()
+	step := inbound.NewSlashStep(inbound.SlashConfig{})
+	for _, text := range []string{
+		`/label STA-68 +bad label`,
+		`/label STA-68 +bad/name`,
+	} {
+		evt := port.InboundEvent{Text: text}
+		out, d, err := step.Run(context.Background(), evt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d != inbound.DecisionContinue {
+			t.Fatalf("%q: Decision = %v", text, d)
+		}
+		if out.Text != evt.Text {
+			t.Fatalf("%q: expected unchanged text, got %q", text, out.Text)
+		}
 	}
 }
 

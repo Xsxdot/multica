@@ -43,9 +43,10 @@ var validNotifChannelKeys = map[string]bool{
 // consumer (e.g. the T13 Subscriber) MUST share — see
 // IsFeishuEventEnabled below for the canonical predicate.
 var validNotifFeishuKeys = map[string]bool{
-	"issues":   true,
-	"comments": true,
-	"mentions": true,
+	"issues":        true,
+	"comments":      true,
+	"mentions":      true,
+	"slash_aliases": true,
 }
 
 // IsFeishuEventEnabled returns true when the Feishu integration should

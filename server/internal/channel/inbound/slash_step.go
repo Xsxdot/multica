@@ -19,6 +19,9 @@ const (
 
 var indirectBuiltin = regexp.MustCompile(`(?i)^(done|status|comment|assign|priority|label|query|todo|create)\s+(.*)$`)
 
+// slashLabelValueRe matches label tokens allowed by intent rules (patterns.go).
+var slashLabelValueRe = regexp.MustCompile(`^[\w-]+$`)
+
 // SlashConfig configures slash command expansion and optional direct replies.
 type SlashConfig struct {
 	Registry    *channel.Registry
@@ -125,10 +128,7 @@ func expandAliasTemplate(tmpl, rest string) (string, bool) {
 		return "", false
 	}
 	sub := substituteSlashPlaceholders(tmpl, rest)
-	final, ok := maybeResolveIndirectBuiltin(sub)
-	if !ok {
-		return "", false
-	}
+	final, _ := maybeResolveIndirectBuiltin(sub)
 	return final, true
 }
 
@@ -221,14 +221,14 @@ func expandBuiltin(cmd, rest string) (string, bool) {
 		labPart = strings.TrimSpace(labPart)
 		if strings.HasPrefix(labPart, "+") {
 			lbl := strings.TrimSpace(labPart[1:])
-			if lbl == "" {
+			if lbl == "" || !slashLabelValueRe.MatchString(lbl) {
 				return "", false
 			}
 			return fmt.Sprintf("%s 加标签 %s", key, lbl), true
 		}
 		if strings.HasPrefix(labPart, "-") {
 			lbl := strings.TrimSpace(labPart[1:])
-			if lbl == "" {
+			if lbl == "" || !slashLabelValueRe.MatchString(lbl) {
 				return "", false
 			}
 			return fmt.Sprintf("%s 去掉标签 %s", key, lbl), true
