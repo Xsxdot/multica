@@ -4,7 +4,7 @@
 // an adapter (e.g. Feishu, T5) emits it on its Events() channel. It is
 // organised as an ordered list of Steps:
 //
-//	normalize → dedup → identity-bind → intent-recog → dispatch → reply
+//	normalize → dedup → identity-bind → slash_expand → intent-recog → dispatch → reply
 //
 // Each Step decides whether to Continue (advance to the next Step) or
 // Skip (terminate the pipeline cleanly). Errors abort the pipeline and

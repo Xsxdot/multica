@@ -133,16 +133,46 @@ func TestValidatePreferences(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "mixed flat and channel",
+			name: "valid feishu slash_aliases",
 			prefs: map[string]any{
-				"assignments": "muted",
 				"channel": map[string]any{
 					"feishu": map[string]any{
-						"issues": false,
+						"issues":   true,
+						"comments": false,
+						"mentions": true,
+						"slash_aliases": map[string]any{
+							"finish": "done {issue_key}",
+						},
 					},
 				},
 			},
 			wantErr: false,
+		},
+		{
+			name: "slash_aliases wrong type",
+			prefs: map[string]any{
+				"channel": map[string]any{
+					"feishu": map[string]any{
+						"issues":        true,
+						"slash_aliases": "bad",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "slash_aliases value not string",
+			prefs: map[string]any{
+				"channel": map[string]any{
+					"feishu": map[string]any{
+						"issues": true,
+						"slash_aliases": map[string]any{
+							"x": 1,
+						},
+					},
+				},
+			},
+			wantErr: true,
 		},
 		{
 			name:    "empty map",
@@ -207,6 +237,37 @@ func TestMergePreferences(t *testing.T) {
 		}
 		if feishu["comments"] != false {
 			t.Fatalf("expected comments=false, got %v", feishu["comments"])
+		}
+	})
+
+	t.Run("merge slash_aliases deep", func(t *testing.T) {
+		existing := map[string]any{
+			"channel": map[string]any{
+				"feishu": map[string]any{
+					"issues": true,
+					"slash_aliases": map[string]any{
+						"a": "done {issue_key}",
+					},
+				},
+			},
+		}
+		incoming := map[string]any{
+			"channel": map[string]any{
+				"feishu": map[string]any{
+					"slash_aliases": map[string]any{
+						"b": "status {issue_key} {status}",
+					},
+				},
+			},
+		}
+		merged := mergePreferences(existing, incoming)
+		feishu := merged["channel"].(map[string]any)["feishu"].(map[string]any)
+		aliases := feishu["slash_aliases"].(map[string]any)
+		if aliases["a"] != "done {issue_key}" || aliases["b"] != "status {issue_key} {status}" {
+			t.Fatalf("slash_aliases merge = %v", aliases)
+		}
+		if feishu["issues"] != true {
+			t.Fatalf("expected issues preserved")
 		}
 	})
 

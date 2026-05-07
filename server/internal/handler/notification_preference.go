@@ -98,6 +98,18 @@ func validatePreferences(prefs map[string]any) error {
 						return fmt.Errorf("channel.feishu must be an object, got %T", cv)
 					}
 					for fk, fv := range feishuMap {
+						if fk == "slash_aliases" {
+							aliases, ok := fv.(map[string]any)
+							if !ok {
+								return fmt.Errorf("channel.feishu.slash_aliases must be an object, got %T", fv)
+							}
+							for ak, av := range aliases {
+								if _, ok := av.(string); !ok {
+									return fmt.Errorf("channel.feishu.slash_aliases.%s must be a string, got %T", ak, av)
+								}
+							}
+							continue
+						}
 						if !validNotifFeishuKeys[fk] {
 							return fmt.Errorf("invalid channel.feishu key: %s", fk)
 						}
@@ -168,6 +180,23 @@ func mergePreferences(existing, incoming map[string]any) map[string]any {
 						newFeishu[fk] = fv
 					}
 					for fk, fv := range incomingFeishu {
+						if fk == "slash_aliases" {
+							incomingAliases, ok := fv.(map[string]any)
+							if !ok {
+								newFeishu[fk] = fv
+								continue
+							}
+							existingAliases, _ := newFeishu[fk].(map[string]any)
+							mergedAliases := make(map[string]any, len(existingAliases)+len(incomingAliases))
+							for k, v := range existingAliases {
+								mergedAliases[k] = v
+							}
+							for k, v := range incomingAliases {
+								mergedAliases[k] = v
+							}
+							newFeishu[fk] = mergedAliases
+							continue
+						}
 						newFeishu[fk] = fv
 					}
 					newChannel[ck] = newFeishu
