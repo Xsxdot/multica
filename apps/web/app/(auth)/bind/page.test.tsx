@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { authStateRef, mockCreateChannelUserBinding, routerReplace, searchParamsState } =
+const { authStateRef, mockCreateChannelBinding, mockCreateChannelUserBinding, routerReplace, searchParamsState } =
   vi.hoisted(() => ({
     authStateRef: {
       state: {
@@ -9,6 +9,7 @@ const { authStateRef, mockCreateChannelUserBinding, routerReplace, searchParamsS
         isLoading: false,
       },
     },
+    mockCreateChannelBinding: vi.fn(),
     mockCreateChannelUserBinding: vi.fn(),
     routerReplace: vi.fn(),
     searchParamsState: { params: new URLSearchParams({ token: "bind-token", provider: "feishu" }) },
@@ -21,6 +22,11 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("@multica/core/auth", () => ({
   useAuthStore: (selector: (s: typeof authStateRef.state) => unknown) => selector(authStateRef.state),
+}));
+
+vi.mock("@tanstack/react-query", () => ({
+  queryOptions: (options: unknown) => options,
+  useQuery: () => ({ data: [], isLoading: false }),
 }));
 
 vi.mock("@multica/core/api", () => {
@@ -40,6 +46,7 @@ vi.mock("@multica/core/api", () => {
   return {
     ApiError,
     api: {
+      createChannelBinding: mockCreateChannelBinding,
       createChannelUserBinding: mockCreateChannelUserBinding,
     },
   };

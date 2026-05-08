@@ -2,9 +2,9 @@
 -- (introduced in 064) is extended with new keys to support per-channel
 -- per-event-kind opt-out:
 --
---   preferences -> 'channel' -> 'feishu' -> 'comment_mention'  (bool, default true)
---   preferences -> 'channel' -> 'feishu' -> 'issue_assigned'   (bool, default true)
---   preferences -> 'channel' -> 'feishu' -> 'issue_mention'    (bool, default true)
+--   preferences -> 'channel' -> 'feishu' -> 'issues'    (bool, default true)
+--   preferences -> 'channel' -> 'feishu' -> 'comments'  (bool, default true)
+--   preferences -> 'channel' -> 'feishu' -> 'mentions'  (bool, default true)
 --
 -- No DDL needed — JSONB is schemaless. This file exists purely as a
 -- versioned record of the convention so future archaeologists can find it

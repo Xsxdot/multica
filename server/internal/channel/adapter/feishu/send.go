@@ -44,11 +44,12 @@ import (
 // non-trivial and likely to grow as we discover more Feishu error codes)
 // has a single home.
 func (a *Adapter) sendText(ctx context.Context, msg port.OutboundMessage) (port.SendResult, error) {
-	if msg.ChatID == "" {
+	receiveIDType, receiveID := resolveReceiveID(msg.Target, msg.ChatID)
+	if receiveID == "" {
 		// 4xx-class: no point retrying, the caller built a malformed
 		// outbound message. Surface as Retryable=false so the outbound
 		// queue (T8/T15) drops it instead of looping.
-		return port.SendResult{Retryable: false}, errors.New("feishu: OutboundMessage.ChatID is empty")
+		return port.SendResult{Retryable: false}, errors.New("feishu: OutboundMessage target is empty")
 	}
 
 	// Feishu wraps even plain text in a JSON envelope. We marshal here
@@ -64,8 +65,8 @@ func (a *Adapter) sendText(ctx context.Context, msg port.OutboundMessage) (port.
 	}
 
 	resp, err := a.client.SendMessage(ctx, SendRequest{
-		ReceiveIDType: "chat_id",
-		ReceiveID:     msg.ChatID,
+		ReceiveIDType: receiveIDType,
+		ReceiveID:     receiveID,
 		MsgType:       "text",
 		Content:       string(contentJSON),
 	})
@@ -94,8 +95,9 @@ func (a *Adapter) sendText(ctx context.Context, msg port.OutboundMessage) (port.
 // non-retryable error so the outbound queue drops the message instead of
 // looping.
 func (a *Adapter) sendCard(ctx context.Context, msg port.OutboundCardMessage) (port.SendResult, error) {
-	if msg.ChatID == "" {
-		return port.SendResult{Retryable: false}, errors.New("feishu: OutboundCardMessage.ChatID is empty")
+	receiveIDType, receiveID := resolveReceiveID(msg.Target, msg.ChatID)
+	if receiveID == "" {
+		return port.SendResult{Retryable: false}, errors.New("feishu: OutboundCardMessage target is empty")
 	}
 	if msg.Body == "" {
 		// The card-rendering contract requires callers to pass the
@@ -106,8 +108,8 @@ func (a *Adapter) sendCard(ctx context.Context, msg port.OutboundCardMessage) (p
 	}
 
 	resp, err := a.client.SendMessage(ctx, SendRequest{
-		ReceiveIDType: "chat_id",
-		ReceiveID:     msg.ChatID,
+		ReceiveIDType: receiveIDType,
+		ReceiveID:     receiveID,
 		MsgType:       "interactive",
 		Content:       msg.Body,
 	})
@@ -118,6 +120,23 @@ func (a *Adapter) sendCard(ctx context.Context, msg port.OutboundCardMessage) (p
 		PlatformMessageID: resp.MessageID,
 		Retryable:         false,
 	}, nil
+}
+
+func resolveReceiveID(target port.OutboundTarget, legacyChatID string) (string, string) {
+	if target.ID == "" {
+		if legacyChatID == "" {
+			return "", ""
+		}
+		return "chat_id", legacyChatID
+	}
+	switch target.Type {
+	case port.OutboundTargetUser:
+		return "open_id", target.ID
+	case port.OutboundTargetChat, "":
+		return "chat_id", target.ID
+	default:
+		return "chat_id", target.ID
+	}
 }
 
 // retryableError is the error type concrete Client implementations should

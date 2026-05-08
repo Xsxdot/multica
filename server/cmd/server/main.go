@@ -423,6 +423,27 @@ func main() {
 	registerActivityListeners(bus, queries)
 	registerNotificationListeners(bus, queries)
 
+	var channelOutboundSubscriber *outbound.Subscriber
+	if feishuEnabled {
+		outboundChannel := newRegistryChannel(channelRegistry, "feishu")
+		channelOutboundSubscriber = outbound.NewSubscriber(
+			bus,
+			outboundChannel,
+			outbound.NewDBBindingStore(pool),
+			outbound.NewDBPrefStore(queries),
+			"",
+		)
+		channelOutboundSubscriber.SetFailureRecorder(queries)
+		channelOutboundSubscriber.SetAggregator(outbound.NewAggregator(
+			outbound.NewFailureRecordingCardSender(outboundChannel, queries),
+			outbound.DefaultFlushInterval,
+		))
+		channelOutboundSubscriber.Start()
+		slog.Info("channel outbound subscriber started", "provider", "feishu")
+	} else {
+		slog.Info("channel outbound subscriber disabled: Feishu credentials are not configured")
+	}
+
 	metricsConfig := obsmetrics.ConfigFromEnv()
 	var metricsServer *http.Server
 	var httpMetrics *obsmetrics.HTTPMetrics
@@ -468,19 +489,13 @@ func main() {
 	go runDBStatsLogger(sweepCtx, pool)
 
 	// Start outbound retry + cleanup workers (T15).
-	//
-	// Retry worker: requires both an explicit env opt-in
-	// (CHANNEL_RETRY_WORKER_ENABLED=true) AND a real channel-adapter
-	// RetrySender. Until the adapter is wired (T5-wiring) we have no
-	// real sender, so the worker stays off. A previous incarnation used
-	// a noop sender that returned nil — that path silently DELETEd every
-	// pending failure within seconds because the success branch removes
-	// the row. See ReviewBot v2 C4. The gate prevents that recurring;
-	// remove the warn + add the wiring once a real sender exists.
-	//
-	// Cleanup worker: always on (idempotent DELETEs of expired data only).
+	// Retry worker is explicitly gated by CHANNEL_RETRY_WORKER_ENABLED=true.
+	var retryCancel context.CancelFunc
 	if outbound.RetryWorkerEnabled() {
-		slog.Warn("CHANNEL_RETRY_WORKER_ENABLED=true but no real RetrySender wired yet (T5-wiring); refusing to start retry worker to avoid silent data loss")
+		retryCtx, cancel := context.WithCancel(context.Background())
+		retryCancel = cancel
+		go outbound.NewRetryWorker(pool, queries, newRegistryRetrySender(channelRegistry)).Run(retryCtx)
+		slog.Info("channel outbound retry worker started")
 	}
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	cleanupWorker := outbound.NewCleanupWorker(queries)
@@ -510,6 +525,12 @@ func main() {
 	slog.Info("shutting down server")
 	sweepCancel()
 	autopilotCancel()
+	if retryCancel != nil {
+		retryCancel()
+	}
+	if channelOutboundSubscriber != nil {
+		channelOutboundSubscriber.Stop()
+	}
 	cleanupCancel()
 	// Stop the channel leader before HTTP shutdown: OnRelease may want
 	// to send a final "going down" message via the still-up service

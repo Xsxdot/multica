@@ -1,6 +1,6 @@
 # Multica 本地启动与飞书（Feishu）频道验收指南
 
-本文档面向需要在本地拉起 Multica **后端 + Web**，并通过 **飞书机器人** 验证 inbound 指令、状态通知、附件与 slash 命令等能力的开发与测试同学。
+本文档面向需要在本地拉起 Multica **后端 + Web**，并通过 **飞书机器人** 验证 inbound 指令、群绑定、个人私聊通知与 slash 命令等能力的开发与测试同学。v1 主路径暂不接入 LLM fallback 和附件上传。
 
 仓库根目录下文默认指 **`multica` monorepo 根目录**（包含 `server/`、`apps/web/`、`Makefile`）。
 
@@ -11,7 +11,8 @@
 1. **启动与健康检查**：`Makefile`、`scripts/dev.sh`、`docker-compose.yml` 路径与本仓库一致；下文命令均以当前 tree 为准。
 2. **飞书凭证**：后端从环境变量读取 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 等（见 `server/cmd/server/main.go`）。未配置时仍会启动 HTTP 服务，但 channel leader 会跳过 Feishu 适配器接线。
 3. **事件接收方式**：Feishu 适配器使用官方 SDK 的 **长连接（WebSocket）** 接收 `im.message.receive_v1`（见 `server/internal/channel/adapter/feishu/real_client.go`）。**不要求**飞书向你的本地 HTTP 回调 URL 推送事件，因此多数场景下 **不需要** ngrok 穿透也能收消息。
-4. **端到端手工验收**：完整「群里发消息 → inbound pipeline → bot 回复」依赖进程内将 `channelRegistry`、inbound pipeline、outbound subscriber 等接入主路径（`main.go` 中仍有占位/TODO 注释）。在此之前，行为应以 **`go test` 中的 channel 集成测试** 与下文「准备就绪」日志为准。主线接线完成后，本章 checklist 即为手工回归步骤。
+4. **端到端手工验收**：当前主路径为 `normalize → dedup → identity-bind → chat-bind-command → slash_expand → rule intent → authz → dispatch → reply`。v1 只使用现有 rule matcher；LLM classifier 代码保留但不接入生产链路。
+5. **主动推送范围**：评论提及、指派、inbox、状态相关通知会发给目标用户的飞书 **个人私聊**（`open_id`），不发 workspace primary 群。
 
 ---
 
@@ -213,17 +214,29 @@ cloudflared tunnel --url http://localhost:8080
 
 授权模型中有两层概念：
 
-1. **群 ↔ Multica Workspace**：`channel_chat_binding` — 决定哪个飞书群对应哪个工作区（含 primary / multi-bind）。
-2. **飞书用户 ↔ Multica 用户**：`channel_user_binding` — identity-bind 一次性 token，通常在用户首次与机器人交互时下发链接完成。
+1. **飞书用户 ↔ Multica 用户**：`channel_user_binding` — `user_identity` token，只通过个人私聊投递；如果私聊失败，群里只提示用户先私聊机器人，不会群发 token。
+2. **群 ↔ Multica Workspace**：`channel_chat_binding` — `chat_workspace` token 记录发起人的飞书用户与当前群信息；Web 端消费时会校验登录用户已经绑定到这个发起人，避免其他群成员抢绑。
 
-### 5.1 Web UI：Integrations
+### 5.1 群内 `/bind` 入口
+
+在飞书群里发送固定命令：
+
+```text
+/bind
+```
+
+- 如果发送者还没有完成 **用户身份绑定**，机器人会优先私聊发送 `/bind?kind=user...` 链接；群里不会出现 user token。
+- 如果发送者已经完成用户身份绑定，机器人会生成 **群绑定** 链接 `/bind?kind=chat...`。优先私聊发送；如果私聊失败，允许在群里回退发送 chat token 链接。
+- 打开 `/bind?kind=chat...` 后，Web 页面会列出当前用户可访问的 workspaces，选择后调用 workspace channel-binding API 完成绑定。
+
+### 5.2 Web UI：Integrations
 
 路径：**Settings → Integrations**（组件：`packages/views/settings/components/integrations-tab.tsx`）。
 
 - 绑定成功后，此页列出 **Channel Bindings**（可将某一绑定设为 **Primary**、解绑等）。
-- **绑定口令（token）的生成 UI 可能尚未在本 tab 暴露**；产品上常见路径为：**在已绑定工作区的群内 `@机器人`**，按机器人下发的 **一次性链接** 完成「用户绑定」（与集成测试 `TestChannelIntegration_TC_int_1_*` 描述一致）。
+- 只有 **Primary** 绑定会处理群内指令；非 primary 绑定不进入 inbound command dispatch。
 
-### 5.2 HTTP API（开发者或自动化）
+### 5.3 HTTP API（开发者或自动化）
 
 消费口令：`POST /api/workspaces/{workspaceId}/channel-bindings`
 
@@ -234,9 +247,14 @@ cloudflared tunnel --url http://localhost:8080
 }
 ```
 
-需携带已登录用户的会话/PAT，且 workspace 成员权限满足服务端校验。
+该接口只接受 `chat_workspace` token。需携带已登录用户的会话/PAT，且必须满足：
 
-### 5.3 验收「群已绑定」
+- 当前用户是目标 workspace member。
+- 当前用户已经绑定到 token 中记录的发起人 `external_user_id`。
+- token 中的 `external_chat_id/chat_type/name` 会作为真实群信息写入 `channel_chat_binding`。
+- 同一个群已绑定到同一 workspace 时返回现有 binding；已绑定到其他 workspace 时返回 `409`。
+
+### 5.4 验收「群已绑定」
 
 - Integrations 列表中出现对应 Feishu 群绑定；且 **Primary** 绑定指向期望工作区。
 - 若群发消息收到 **`[WS_NOT_BOUND] 当前群尚未绑定工作区，请先完成绑定。`**（见 `server/internal/channel/inbound/authz.go`），说明 **chat 级绑定** 仍未建立或命中 **非 primary** 绑定。
@@ -256,8 +274,8 @@ cloudflared tunnel --url http://localhost:8080
 | 改 assignee | `/assign STA-X @某位同事` | Bot 确认 assignee 变更（需同事在成员体系中可解析） |
 | 改 priority | `/priority STA-X high` | Bot 确认优先级变更 |
 | 加/去标签 | `/label STA-X +bug` / `-bug` | Bot 确认标签变更 |
-| 状态变更通知 | 在 Web 将 Issue 改为 **in_review / done / blocked** | 已绑定且开启通知的飞书群收到卡片或文本通知（受 **Settings → Notifications → Feishu** 布尔开关影响，`issues` / `comments` / `mentions` 等） |
-| 附件上传 | 发送图片或文件，附带 `STA-X` | Bot 确认附件已关联；Web Issue 详情可见附件 |
+| 状态变更通知 | 在 Web 将 Issue 改为 **in_review / done / blocked** | 目标用户的飞书个人私聊收到卡片通知（受 **Settings → Notifications → Feishu** 布尔开关影响，`issues` / `comments` / `mentions` 等） |
+| 附件上传 | 发送图片或文件，附带 `STA-X` | v1 暂未接入生产主路径；不要作为本轮上线验收项 |
 | Slash 帮助 | `/help` | Bot 返回可用命令列表（含自定义 **slash_aliases**，若在工作区偏好中配置） |
 
 ---
@@ -286,6 +304,7 @@ cloudflared tunnel --url http://localhost:8080
 |------|------|
 | `WS_NOT_BOUND` | 建立 **群 ↔ workspace** 绑定；确认 **primary** 绑定 |
 | 身份无法解析 / authz 失败 | 完成 **用户绑定**（identity token 链接）；确认发送者在 Multica workspace 中为成员 |
+| 私聊里发送普通指令 | v1 私聊只支持绑定与接收通知；普通指令会返回 `PRIVATE_UNSUPPORTED` |
 | 静默无回显 | 查看后端日志 inbound pipeline；确认进程内已接线 registry + pipeline（参见本文开头「必读」） |
 
 ### 7.4 日志在哪里看
@@ -316,7 +335,7 @@ make check
 将运行类型检查、单测与 E2E（耗时较长）；飞书相关细粒度行为还可执行：
 
 ```bash
-cd server && go test ./internal/channel/... ./cmd/server/...
+cd server && go test ./internal/channel/... ./internal/handler/... ./cmd/server/...
 ```
 
 ---

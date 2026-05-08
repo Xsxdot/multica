@@ -178,6 +178,7 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 		}
 
 		sendCardSafe(a.sender, externalUserID, port.OutboundCardMessage{
+			Target: port.TargetUser(externalUserID),
 			ChatID: externalUserID,
 			Title:  last.title,
 			Body:   last.body,
@@ -232,6 +233,7 @@ func (a *Aggregator) prepareMerge(externalUserID string) *pendingCard {
 	return &pendingCard{
 		externalUserID: externalUserID,
 		card: port.OutboundCardMessage{
+			Target: port.TargetUser(externalUserID),
 			ChatID: externalUserID,
 			Title:  fmt.Sprintf("你有 %d 条新通知", count),
 			Body:   mergedBody,

@@ -30,18 +30,16 @@ func NewDBPrefStore(q *db.Queries) *DBPrefStore {
 	return &DBPrefStore{queries: q}
 }
 
-// prefKeyMap maps event kinds to the JSONB key path within the
-// preferences -> channel -> <channel_name> object.
-// The issue spec defines:
-//
-//	preferences -> 'channel' -> 'feishu' -> 'comment_mention' / 'issue_assigned' / 'issue_mention'
+// prefKeyMap maps outbound event kinds to the JSONB family key within
+// preferences -> channel -> <channel_name>. Missing keys default enabled;
+// only explicit boolean false mutes the family.
 var prefKeyMap = map[string]string{
-	"comment_mention":  "comment_mention",
-	"issue_assigned":   "issue_assigned",
-	"issue_mention":    "issue_mention",
-	"status_in_review": "status_in_review",
-	"status_done":      "status_done",
-	"status_blocked":   "status_blocked",
+	"comment_mention":  "comments",
+	"issue_assigned":   "issues",
+	"issue_mention":    "mentions",
+	"status_in_review": "issues",
+	"status_done":      "issues",
+	"status_blocked":   "issues",
 }
 
 // GetChannelPref returns true if the given event kind is enabled for the user
@@ -86,10 +84,9 @@ func (s *DBPrefStore) GetChannelPref(ctx context.Context, workspaceID, userID pg
 		return true, nil // key absent -> default enabled
 	}
 
-	// "muted" -> disabled; anything else -> enabled
-	strVal, ok := val.(string)
+	enabled, ok := val.(bool)
 	if !ok {
 		return true, nil
 	}
-	return strVal != "muted", nil
+	return enabled, nil
 }

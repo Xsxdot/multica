@@ -17,7 +17,7 @@ UPDATE channel_bind_token SET
 WHERE token_hash = $1
   AND consumed_at IS NULL
   AND expires_at > now()
-RETURNING token_hash, provider, external_user_id, expires_at, consumed_at, created_at
+RETURNING token_hash, purpose, provider, external_user_id, external_chat_id, external_chat_type, external_chat_name, expires_at, consumed_at, created_at
 `
 
 func (q *Queries) ConsumeChannelBindToken(ctx context.Context, tokenHash []byte) (ChannelBindToken, error) {
@@ -25,8 +25,12 @@ func (q *Queries) ConsumeChannelBindToken(ctx context.Context, tokenHash []byte)
 	var i ChannelBindToken
 	err := row.Scan(
 		&i.TokenHash,
+		&i.Purpose,
 		&i.Provider,
 		&i.ExternalUserID,
+		&i.ExternalChatID,
+		&i.ExternalChatType,
+		&i.ExternalChatName,
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
@@ -35,30 +39,46 @@ func (q *Queries) ConsumeChannelBindToken(ctx context.Context, tokenHash []byte)
 }
 
 const createChannelBindToken = `-- name: CreateChannelBindToken :one
-INSERT INTO channel_bind_token (token_hash, provider, external_user_id, expires_at)
-VALUES ($1, $2, $3, $4)
-RETURNING token_hash, provider, external_user_id, expires_at, consumed_at, created_at
+INSERT INTO channel_bind_token (
+    token_hash, purpose, provider, external_user_id,
+    external_chat_id, external_chat_type, external_chat_name,
+    expires_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING token_hash, purpose, provider, external_user_id, external_chat_id, external_chat_type, external_chat_name, expires_at, consumed_at, created_at
 `
 
 type CreateChannelBindTokenParams struct {
-	TokenHash      []byte             `json:"token_hash"`
-	Provider       string             `json:"provider"`
-	ExternalUserID string             `json:"external_user_id"`
-	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	TokenHash        []byte             `json:"token_hash"`
+	Purpose          string             `json:"purpose"`
+	Provider         string             `json:"provider"`
+	ExternalUserID   string             `json:"external_user_id"`
+	ExternalChatID   pgtype.Text        `json:"external_chat_id"`
+	ExternalChatType pgtype.Text        `json:"external_chat_type"`
+	ExternalChatName pgtype.Text        `json:"external_chat_name"`
+	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
 }
 
 func (q *Queries) CreateChannelBindToken(ctx context.Context, arg CreateChannelBindTokenParams) (ChannelBindToken, error) {
 	row := q.db.QueryRow(ctx, createChannelBindToken,
 		arg.TokenHash,
+		arg.Purpose,
 		arg.Provider,
 		arg.ExternalUserID,
+		arg.ExternalChatID,
+		arg.ExternalChatType,
+		arg.ExternalChatName,
 		arg.ExpiresAt,
 	)
 	var i ChannelBindToken
 	err := row.Scan(
 		&i.TokenHash,
+		&i.Purpose,
 		&i.Provider,
 		&i.ExternalUserID,
+		&i.ExternalChatID,
+		&i.ExternalChatType,
+		&i.ExternalChatName,
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
@@ -77,7 +97,7 @@ func (q *Queries) DeleteExpiredChannelBindTokens(ctx context.Context) error {
 }
 
 const getChannelBindToken = `-- name: GetChannelBindToken :one
-SELECT token_hash, provider, external_user_id, expires_at, consumed_at, created_at FROM channel_bind_token
+SELECT token_hash, purpose, provider, external_user_id, external_chat_id, external_chat_type, external_chat_name, expires_at, consumed_at, created_at FROM channel_bind_token
 WHERE token_hash = $1
 `
 
@@ -86,8 +106,12 @@ func (q *Queries) GetChannelBindToken(ctx context.Context, tokenHash []byte) (Ch
 	var i ChannelBindToken
 	err := row.Scan(
 		&i.TokenHash,
+		&i.Purpose,
 		&i.Provider,
 		&i.ExternalUserID,
+		&i.ExternalChatID,
+		&i.ExternalChatType,
+		&i.ExternalChatName,
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,

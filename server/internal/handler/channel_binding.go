@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/channel/binding"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -82,7 +83,7 @@ func (h *Handler) CreateChannelUserBinding(w http.ResponseWriter, r *http.Reques
 	}
 
 	consumer := binding.NewTokenConsumer(h.Queries)
-	token, err := consumer.Consume(r.Context(), req.Token)
+	peeked, err := consumer.Peek(r.Context(), req.Token)
 	if err != nil {
 		switch {
 		case errors.Is(err, binding.ErrTokenExpired):
@@ -96,8 +97,18 @@ func (h *Handler) CreateChannelUserBinding(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
-	if token.Provider != req.Provider {
+	if peeked.Provider != req.Provider {
 		writeError(w, http.StatusBadRequest, "provider mismatch")
+		return
+	}
+	if peeked.Purpose != binding.PurposeUserIdentity {
+		writeError(w, http.StatusBadRequest, "token purpose mismatch")
+		return
+	}
+
+	token, err := consumer.Consume(r.Context(), req.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or expired token")
 		return
 	}
 
@@ -186,14 +197,53 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	consumer := binding.NewTokenConsumer(h.Queries)
-	token, err := consumer.Consume(r.Context(), req.Token)
+	peeked, err := consumer.Peek(r.Context(), req.Token)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired token")
 		return
 	}
 
-	if token.Provider != req.Provider {
+	if peeked.Provider != req.Provider {
 		writeError(w, http.StatusBadRequest, "provider mismatch")
+		return
+	}
+	if peeked.Purpose != binding.PurposeChatWorkspace {
+		writeError(w, http.StatusBadRequest, "token purpose mismatch")
+		return
+	}
+	if !peeked.ExternalChatID.Valid || !peeked.ExternalChatType.Valid {
+		writeError(w, http.StatusBadRequest, "invalid chat binding token")
+		return
+	}
+	if !h.userOwnsExternalChannelIdentity(r, member.UserID, peeked.Provider, peeked.ExternalUserID) {
+		writeError(w, http.StatusForbidden, "binding link belongs to another channel user")
+		return
+	}
+
+	existing, err := h.Queries.GetChannelChatBindingByProviderAndChatID(r.Context(), db.GetChannelChatBindingByProviderAndChatIDParams{
+		Provider:       peeked.Provider,
+		ExternalChatID: peeked.ExternalChatID.String,
+	})
+	if err == nil {
+		if existing.WorkspaceID == member.WorkspaceID {
+			if _, consumeErr := consumer.Consume(r.Context(), req.Token); consumeErr != nil {
+				writeError(w, http.StatusBadRequest, "invalid or expired token")
+				return
+			}
+			writeJSON(w, http.StatusOK, bindingToResponse(existing))
+			return
+		}
+		writeError(w, http.StatusConflict, "this chat is already bound to another workspace")
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to check existing chat binding")
+		return
+	}
+
+	token, err := consumer.Consume(r.Context(), req.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or expired token")
 		return
 	}
 
@@ -206,19 +256,14 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	}
 	isPrimary := len(existingBindings) == 0
 
-	// The external_chat_id and chat_type come from the token consumer
-	// For now, we use the external_user_id as a placeholder for external_chat_id
-	// since the actual chat info would be resolved by the channel adapter.
-	// In production, the channel adapter (e.g. Feishu) would provide the
-	// actual chat info when consuming the token.
 	binding, err := h.Queries.CreateChannelChatBinding(r.Context(), db.CreateChannelChatBindingParams{
 		Provider:         req.Provider,
-		ExternalChatID:   token.ExternalUserID, // placeholder: actual chat ID from channel
-		ChatType:         "group",
+		ExternalChatID:   token.ExternalChatID.String,
+		ChatType:         normalizeChannelChatType(token.ExternalChatType.String),
 		WorkspaceID:      member.WorkspaceID,
 		IsPrimary:        isPrimary,
 		BoundByUserID:    member.UserID,
-		ExternalChatName: pgtype.Text{String: "", Valid: false},
+		ExternalChatName: token.ExternalChatName,
 	})
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -230,6 +275,22 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, bindingToResponse(binding))
+}
+
+func (h *Handler) userOwnsExternalChannelIdentity(r *http.Request, userID pgtype.UUID, provider, externalUserID string) bool {
+	var count int
+	err := h.DB.QueryRow(r.Context(), `
+		SELECT count(*) FROM channel_user_binding
+		WHERE provider = $1 AND external_user_id = $2 AND user_id = $3
+	`, provider, externalUserID, userID).Scan(&count)
+	return err == nil && count > 0
+}
+
+func normalizeChannelChatType(chatType string) string {
+	if chatType == "direct" {
+		return "dm"
+	}
+	return "group"
 }
 
 // ---------------------------------------------------------------------------

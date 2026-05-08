@@ -46,6 +46,11 @@ type fakeAuthzStore struct {
 	isMember  bool
 	memberErr error
 
+	// ResolveUserID behaviour.
+	userID      pgtype.UUID
+	userIDFound bool
+	userIDErr   error
+
 	// CheckIssuePermission behaviour.
 	permErr error
 }
@@ -77,6 +82,16 @@ func (f *fakeAuthzStore) LookupPrimaryWorkspaceID(_ context.Context, _, _ string
 
 func (f *fakeAuthzStore) IsWorkspaceMember(_ context.Context, _, _ pgtype.UUID) (bool, error) {
 	return f.isMember, f.memberErr
+}
+
+func (f *fakeAuthzStore) ResolveUserID(_ context.Context, _, _ string) (pgtype.UUID, error) {
+	if f.userIDErr != nil {
+		return pgtype.UUID{}, f.userIDErr
+	}
+	if !f.userIDFound {
+		return pgtype.UUID{}, pgx.ErrNoRows
+	}
+	return f.userID, nil
 }
 
 func (f *fakeAuthzStore) CheckIssuePermission(_ context.Context, _, _ pgtype.UUID, _ string) error {

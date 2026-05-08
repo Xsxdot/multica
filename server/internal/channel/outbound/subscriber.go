@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/multica-ai/multica/server/internal/events"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
@@ -30,14 +32,15 @@ type BindingStore interface {
 	ResolveExternalID(ctx context.Context, provider, userID string) (string, error)
 }
 
-// DBPool is the minimal pgx interface we need.
-type DBPool interface {
-	QueryRow(ctx context.Context, sql string, args ...any) Row
+// FailureRecorder records retryable outbound send failures. *db.Queries
+// satisfies this interface.
+type FailureRecorder interface {
+	InsertOutboundFailure(ctx context.Context, arg db.InsertOutboundFailureParams) (db.ChannelOutboundFailure, error)
 }
 
-// Row is a minimal interface for pgx.Row.
-type Row interface {
-	Scan(dest ...any) error
+// DBPool is the minimal pgx interface we need.
+type DBPool interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 // DBBindingStore implements BindingStore using raw SQL against the
@@ -94,14 +97,16 @@ func (s *DBBindingStore) ResolveExternalID(ctx context.Context, provider, userID
 //
 //	events.Bus -> Subscriber -> binding lookup -> pref filter -> channel.SendCard
 //
-// The subscriber is workspace-scoped: it only processes events whose
-// WorkspaceID matches the configured workspaceID.
+// The subscriber can be workspace-scoped. When workspaceID is empty it
+// processes all workspaces, which is the production event-bus wiring.
 type Subscriber struct {
 	bus         *events.Bus
 	channel     port.Channel
 	bindings    BindingStore
 	prefs       PrefStore
 	workspaceID string
+	aggregator  *Aggregator
+	failures    FailureRecorder
 }
 
 // NewSubscriber creates an outbound subscriber. Call Start() to begin
@@ -135,13 +140,25 @@ func (s *Subscriber) Start() {
 	s.bus.Subscribe(protocol.EventIssueUpdated, s.handleIssueUpdated)
 }
 
-func (s *Subscriber) Stop() {}
+func (s *Subscriber) SetAggregator(aggregator *Aggregator) {
+	s.aggregator = aggregator
+}
+
+func (s *Subscriber) SetFailureRecorder(failures FailureRecorder) {
+	s.failures = failures
+}
+
+func (s *Subscriber) Stop() {
+	if s.aggregator != nil {
+		s.aggregator.Stop()
+	}
+}
 
 // handleCommentCreated processes comment:created events.
 // Extracts subscriber user_ids from the payload and sends cards to
 // bound, unmuted users.
 func (s *Subscriber) handleCommentCreated(e events.Event) {
-	if e.WorkspaceID != s.workspaceID {
+	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
 		return
 	}
 
@@ -174,7 +191,7 @@ func (s *Subscriber) handleCommentCreated(e events.Event) {
 // handleInboxNew processes inbox:new events.
 // Sends a card to the target user.
 func (s *Subscriber) handleInboxNew(e events.Event) {
-	if e.WorkspaceID != s.workspaceID {
+	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
 		return
 	}
 
@@ -198,7 +215,7 @@ func (s *Subscriber) handleInboxNew(e events.Event) {
 
 // handleSubscriberAdded processes subscriber:added events.
 func (s *Subscriber) handleSubscriberAdded(e events.Event) {
-	if e.WorkspaceID != s.workspaceID {
+	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
 		return
 	}
 
@@ -222,7 +239,7 @@ func (s *Subscriber) handleSubscriberAdded(e events.Event) {
 // (in_review, done, blocked), a card is sent to the issue's assignee
 // so the relevant party is notified of the transition.
 func (s *Subscriber) handleIssueUpdated(e events.Event) {
-	if e.WorkspaceID != s.workspaceID {
+	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
 		return
 	}
 
@@ -324,13 +341,22 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 	}
 
 	card := port.OutboundCardMessage{
+		Target: port.TargetUser(externalUserID),
 		ChatID: externalUserID,
 		Title:  title,
 		Body:   body,
 	}
 
+	if s.aggregator != nil {
+		s.aggregator.Add(externalUserID, card, false)
+		return
+	}
+
 	result, err := s.channel.SendCard(ctx, card)
 	if err != nil {
+		if result.Retryable {
+			s.recordFailure(ctx, eventKind, userUUID, externalUserID, card, err)
+		}
 		slog.Error("outbound: send card", "user_id", userID, "error", err)
 		return
 	}
@@ -376,6 +402,35 @@ func extractStringSlice(v any) []string {
 		return result
 	}
 	return nil
+}
+
+func (s *Subscriber) recordFailure(ctx context.Context, eventKind string, targetUserID pgtype.UUID, externalUserID string, card port.OutboundCardMessage, sendErr error) {
+	if s.failures == nil {
+		return
+	}
+	payload, err := json.Marshal(RetryPayload{
+		Title: card.Title,
+		Body:  card.Body,
+	})
+	if err != nil {
+		slog.Error("outbound: marshal retry payload", "user_id", uuidStr(targetUserID), "error", err)
+		return
+	}
+	if _, err := s.failures.InsertOutboundFailure(ctx, db.InsertOutboundFailureParams{
+		Provider:             s.channel.Name(),
+		EventKind:            eventKind,
+		TargetUserID:         targetUserID,
+		TargetExternalUserID: pgtype.Text{String: externalUserID, Valid: externalUserID != ""},
+		Payload:              payload,
+		MaxAttempts:          3,
+	}); err != nil {
+		slog.Error("outbound: insert failure",
+			"user_id", uuidStr(targetUserID),
+			"event_kind", eventKind,
+			"send_error", sendErr,
+			"error", err,
+		)
+	}
 }
 
 // R4: parseUUID returns (pgtype.UUID, error) for fail-closed behavior.

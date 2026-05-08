@@ -138,10 +138,32 @@ type UserInfo struct {
 	Name string
 }
 
+type OutboundTargetType string
+
+const (
+	OutboundTargetChat OutboundTargetType = "chat"
+	OutboundTargetUser OutboundTargetType = "user"
+)
+
+type OutboundTarget struct {
+	Type OutboundTargetType
+	ID   string
+}
+
+func TargetChat(id string) OutboundTarget {
+	return OutboundTarget{Type: OutboundTargetChat, ID: id}
+}
+
+func TargetUser(id string) OutboundTarget {
+	return OutboundTarget{Type: OutboundTargetUser, ID: id}
+}
+
 // OutboundMessage is a plain text message to be sent to the external channel.
 // Text is the canonical field name (mirroring InboundEvent.Text) so call sites
 // reading and writing share vocabulary.
 type OutboundMessage struct {
+	Target OutboundTarget
+	// ChatID is the legacy chat target. New call sites should set Target.
 	ChatID string
 	Text   string
 }
@@ -151,6 +173,8 @@ type OutboundMessage struct {
 // ErrNotImplemented from SendCard; the field shape is fixed now to avoid
 // churning every channel adapter when card support lands.
 type OutboundCardMessage struct {
+	Target OutboundTarget
+	// ChatID is the legacy chat target. New call sites should set Target.
 	ChatID string
 	Title  string
 	Body   string

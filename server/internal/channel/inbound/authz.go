@@ -46,6 +46,8 @@ const (
 	// Unsupported) and again here as a defence-in-depth measure
 	// (TC-authz-4, AC7.3). The reply directs the user to the Web UI.
 	AuthzUnsupportedDelete AuthzErrCode = "UNSUPPORTED_DELETE"
+
+	AuthzPrivateUnsupported AuthzErrCode = "PRIVATE_UNSUPPORTED"
 )
 
 // replyTemplates centralises the user-facing rejection messages. Tests
@@ -57,6 +59,7 @@ var replyTemplates = map[AuthzErrCode]string{
 	AuthzIdentityUnresolved: "[IDENTITY_UNRESOLVED] 无法识别发送者身份，请稍后重试。",
 	AuthzNoPermission:       "[NO_PERMISSION] 你没有权限修改此 Issue 的状态。",
 	AuthzUnsupportedDelete:  "[UNSUPPORTED_DELETE] 删除操作不支持在群内执行，请回 Web 端操作。",
+	AuthzPrivateUnsupported: "[PRIVATE_UNSUPPORTED] 私聊暂只用于绑定和接收通知，请在已绑定的群里使用指令。",
 }
 
 // AuthzError is returned by the authz step when the event is rejected.
@@ -110,6 +113,8 @@ type AuthzStore interface {
 	// passing an invalid UUID is a programming error.
 	IsWorkspaceMember(ctx context.Context, userID, workspaceID pgtype.UUID) (bool, error)
 
+	ResolveUserID(ctx context.Context, channelName, externalUserID string) (pgtype.UUID, error)
+
 	// CheckIssuePermission returns nil if the user is allowed to perform
 	// the requested action on the issue identified by (workspaceID,
 	// issueKey). It returns an error if the issue is not found or the
@@ -127,6 +132,10 @@ type AuthzConfig struct {
 	// tests), the step only returns the error and the caller is
 	// responsible for delivering the reply.
 	SendReplies bool
+	// RejectAsSkip makes authz rejections terminate the pipeline cleanly
+	// after sending the reply. Tests keep the default false value so they
+	// can assert the concrete AuthzError.
+	RejectAsSkip bool
 }
 
 // authzStep is the Step that enforces authorization policies on every
@@ -154,39 +163,25 @@ func NewAuthzStep(cfg AuthzConfig) Step {
 func (*authzStep) Name() string { return "authz" }
 
 func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
+	if evt.ChatType == port.ChatTypeDirect {
+		return s.reject(ctx, evt, AuthzPrivateUnsupported)
+	}
+
 	// --- 1. Chat binding (TC-authz-1) ---
 	// Use LookupPrimaryWorkspaceID so only primary bindings process inbound commands.
 	// Non-primary bindings return WS_NOT_BOUND (they receive notifications only).
 	wsID, err := s.cfg.Store.LookupPrimaryWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			authzErr := &AuthzError{
-				Code:  AuthzWsNotBound,
-				Reply: replyTemplates[AuthzWsNotBound],
-			}
-			s.maybeSendReply(ctx, evt, authzErr.Reply)
-			return evt, DecisionContinue, authzErr
+			return s.reject(ctx, evt, AuthzWsNotBound)
 		}
 		return evt, DecisionContinue, fmt.Errorf("authz: lookup primary workspace: %w", err)
 	}
 
 	// --- 2. Identity resolution (fail-closed) ---
-	// TODO(T8): resolve evt.SenderID → MulticaUserID via channel_user_binding.
-	// Until identity-bind is implemented, we cannot resolve the sender's
-	// Multica user ID. Fail-closed: reject with IDENTITY_UNRESOLVED.
-	//
-	// When T8 lands, replace this block with:
-	//   userID, err := s.cfg.Store.ResolveUserID(ctx, evt.ChannelName, evt.SenderID)
-	//   if err != nil { ... }
-	//   if !userID.Valid { return AuthzIdentityUnresolved }
-	var userID pgtype.UUID // zero value, Valid=false
-	if !userID.Valid {
-		authzErr := &AuthzError{
-			Code:  AuthzIdentityUnresolved,
-			Reply: replyTemplates[AuthzIdentityUnresolved],
-		}
-		s.maybeSendReply(ctx, evt, authzErr.Reply)
-		return evt, DecisionContinue, authzErr
+	userID, err := s.cfg.Store.ResolveUserID(ctx, evt.ChannelName, evt.SenderID)
+	if err != nil || !userID.Valid {
+		return s.reject(ctx, evt, AuthzIdentityUnresolved)
 	}
 
 	// --- 3. Workspace membership (TC-authz-2) ---
@@ -195,12 +190,7 @@ func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 		return evt, DecisionContinue, fmt.Errorf("authz: check membership: %w", err)
 	}
 	if !isMember {
-		authzErr := &AuthzError{
-			Code:  AuthzNotMember,
-			Reply: replyTemplates[AuthzNotMember],
-		}
-		s.maybeSendReply(ctx, evt, authzErr.Reply)
-		return evt, DecisionContinue, authzErr
+		return s.reject(ctx, evt, AuthzNotMember)
 	}
 
 	// --- 4. Delete rejection (TC-authz-4) ---
@@ -209,12 +199,7 @@ func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 	// case a future intent source (e.g. LLM fallback T10) emits
 	// IntentDelete directly.
 	if evt.Intent.Kind == port.IntentDelete {
-		authzErr := &AuthzError{
-			Code:  AuthzUnsupportedDelete,
-			Reply: replyTemplates[AuthzUnsupportedDelete],
-		}
-		s.maybeSendReply(ctx, evt, authzErr.Reply)
-		return evt, DecisionContinue, authzErr
+		return s.reject(ctx, evt, AuthzUnsupportedDelete)
 	}
 
 	// --- 5. Issue permission (TC-authz-3) ---
@@ -223,24 +208,26 @@ func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 		if issueKey == "" {
 			// Fail-closed: SetStatus without issue_key is either an
 			// upstream bug or a malicious payload. Reject explicitly.
-			authzErr := &AuthzError{
-				Code:  AuthzNoPermission,
-				Reply: replyTemplates[AuthzNoPermission],
-			}
-			s.maybeSendReply(ctx, evt, authzErr.Reply)
-			return evt, DecisionContinue, authzErr
+			return s.reject(ctx, evt, AuthzNoPermission)
 		}
 		if err := s.cfg.Store.CheckIssuePermission(ctx, wsID, userID, issueKey); err != nil {
-			authzErr := &AuthzError{
-				Code:  AuthzNoPermission,
-				Reply: replyTemplates[AuthzNoPermission],
-			}
-			s.maybeSendReply(ctx, evt, authzErr.Reply)
-			return evt, DecisionContinue, authzErr
+			return s.reject(ctx, evt, AuthzNoPermission)
 		}
 	}
 
 	return evt, DecisionContinue, nil
+}
+
+func (s *authzStep) reject(ctx context.Context, evt port.InboundEvent, code AuthzErrCode) (port.InboundEvent, Decision, error) {
+	authzErr := &AuthzError{
+		Code:  code,
+		Reply: replyTemplates[code],
+	}
+	s.maybeSendReply(ctx, evt, authzErr.Reply)
+	if s.cfg.RejectAsSkip {
+		return evt, DecisionSkip, nil
+	}
+	return evt, DecisionContinue, authzErr
 }
 
 // maybeSendReply delivers the reply text to the originating chat when
@@ -261,7 +248,12 @@ func (s *authzStep) maybeSendReply(ctx context.Context, evt port.InboundEvent, t
 		)
 		return
 	}
+	target := port.TargetChat(evt.ChatID)
+	if evt.ChatType == port.ChatTypeDirect {
+		target = port.TargetUser(evt.SenderID)
+	}
 	if _, err := ch.Send(ctx, port.OutboundMessage{
+		Target: target,
 		ChatID: evt.ChatID,
 		Text:   text,
 	}); err != nil {

@@ -4,9 +4,11 @@ import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Check, Loader2, LogIn, MessageCircle, RotateCcw } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "@multica/core/api";
 import { useAuthStore } from "@multica/core/auth";
 import { paths } from "@multica/core/paths";
+import { workspaceListOptions } from "@multica/core/workspace/queries";
 import { Button } from "@multica/ui/components/ui/button";
 
 type BindState = "idle" | "binding" | "success" | "error";
@@ -16,24 +18,29 @@ function BindPageContent() {
   const params = useSearchParams();
   const token = params.get("token") ?? "";
   const provider = params.get("provider") ?? "feishu";
+  const kind = params.get("kind") ?? "user";
   const user = useAuthStore((s) => s.user);
   const isLoading = useAuthStore((s) => s.isLoading);
+  const { data: workspaces = [], isLoading: workspacesLoading } = useQuery({
+    ...workspaceListOptions(),
+    enabled: !!user && kind === "chat",
+  });
   const [state, setState] = useState<BindState>("idle");
   const [message, setMessage] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
   const bindingKeyRef = useRef<string | null>(null);
 
   const loginHref = useMemo(() => {
-    const next = `/bind?token=${encodeURIComponent(token)}&provider=${encodeURIComponent(provider)}`;
+    const next = `/bind?kind=${encodeURIComponent(kind)}&token=${encodeURIComponent(token)}&provider=${encodeURIComponent(provider)}`;
     return `${paths.login()}?next=${encodeURIComponent(next)}`;
-  }, [provider, token]);
+  }, [kind, provider, token]);
 
   useEffect(() => {
     if (!isLoading && !user) router.replace(loginHref);
   }, [isLoading, loginHref, router, user]);
 
   useEffect(() => {
-    if (isLoading || !user || !token) return;
+    if (isLoading || !user || !token || kind !== "user") return;
 
     const bindingKey = `${user.id}:${provider}:${token}:${retryNonce}`;
     if (bindingKeyRef.current === bindingKey) return;
@@ -61,7 +68,7 @@ function BindPageContent() {
     return () => {
       cancelled = true;
     };
-  }, [isLoading, provider, retryNonce, token, user?.id]);
+  }, [isLoading, kind, provider, retryNonce, token, user?.id]);
 
   if (isLoading || !user) {
     return (
@@ -122,6 +129,52 @@ function BindPageContent() {
     );
   }
 
+  if (kind === "chat") {
+    return (
+      <BindShell
+        icon={workspacesLoading ? <Loader2 className="size-5 animate-spin" /> : <MessageCircle className="size-5" />}
+        title="绑定飞书群到工作区"
+        description="选择这个飞书群要连接的 Multica 工作区。绑定后，群里可以使用 Bot 指令。"
+        action={
+          <div className="space-y-2">
+            {workspaces.map((workspace) => (
+              <Button
+                key={workspace.id}
+                className="w-full justify-start"
+                variant="secondary"
+                disabled={state === "binding"}
+                onClick={() => {
+                  const bindingKey = `${user.id}:${provider}:${token}:${workspace.id}:${retryNonce}`;
+                  if (bindingKeyRef.current === bindingKey) return;
+                  bindingKeyRef.current = bindingKey;
+                  setState("binding");
+                  api
+                    .createChannelBinding(workspace.id, { token, provider })
+                    .then(() => {
+                      setState("success");
+                      setMessage(`飞书群已绑定到 ${workspace.name}。回到群里发送指令即可使用。`);
+                      router.push(paths.workspace(workspace.slug).settings());
+                    })
+                    .catch((err: unknown) => {
+                      setState("error");
+                      setMessage(err instanceof Error ? err.message : "群绑定失败，请回到飞书重新发起绑定。");
+                    });
+                }}
+              >
+                {workspace.name}
+              </Button>
+            ))}
+            {!workspacesLoading && workspaces.length === 0 ? (
+              <Button onClick={() => router.push(paths.newWorkspace())}>
+                创建工作区
+              </Button>
+            ) : null}
+          </div>
+        }
+      />
+    );
+  }
+
   return (
     <BindShell
       icon={<Loader2 className="size-5 animate-spin" />}
@@ -135,7 +188,7 @@ function BindShell({
   icon,
   title,
   description,
-	action,
+  action,
 }: {
   icon: ReactNode;
   title: string;

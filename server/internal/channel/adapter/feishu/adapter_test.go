@@ -275,6 +275,39 @@ func TestAdapter_Send_TextReply(t *testing.T) {
 	}
 }
 
+func TestAdapter_Send_TargetUserUsesOpenID(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeFeishuClient("ou_bot_xxx")
+	adapter := feishu.NewAdapter(fake, feishu.Config{AppID: "cli_test"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := adapter.Connect(ctx); err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = adapter.Disconnect(context.Background()) })
+
+	if _, err := adapter.Send(ctx, port.OutboundMessage{
+		Target: port.TargetUser("ou_user_001"),
+		Text:   "private",
+	}); err != nil {
+		t.Fatalf("Send returned error: %v", err)
+	}
+
+	calls := fake.snapshotSendCalls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d SendMessage calls, want 1", len(calls))
+	}
+	if calls[0].receiveID != "ou_user_001" {
+		t.Errorf("receive_id = %q, want %q", calls[0].receiveID, "ou_user_001")
+	}
+	if calls[0].receiveType != "open_id" {
+		t.Errorf("receive_id_type = %q, want %q", calls[0].receiveType, "open_id")
+	}
+}
+
 // TC-adapt-2 (card path) — SendCard forwards a pre-rendered card JSON body
 // verbatim as msg_type "interactive". The Body field of OutboundCardMessage
 // is contractually the rendered JSON produced by the card sub-package; the
@@ -332,6 +365,39 @@ func TestAdapter_SendCard_PreRenderedJSON(t *testing.T) {
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(c.body), &parsed); err != nil {
 		t.Errorf("content is not valid JSON: %v\nbody: %s", err, c.body)
+	}
+}
+
+func TestAdapter_SendCard_TargetChatUsesChatID(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeFeishuClient("ou_bot_xxx")
+	adapter := feishu.NewAdapter(fake, feishu.Config{AppID: "cli_test"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := adapter.Connect(ctx); err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = adapter.Disconnect(context.Background()) })
+
+	if _, err := adapter.SendCard(ctx, port.OutboundCardMessage{
+		Target: port.TargetChat("oc_003"),
+		Body:   `{"header":{"title":{"tag":"plain_text","content":"x"}}}`,
+	}); err != nil {
+		t.Fatalf("SendCard returned error: %v", err)
+	}
+
+	calls := fake.snapshotSendCalls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d SendMessage calls, want 1", len(calls))
+	}
+	if calls[0].receiveID != "oc_003" {
+		t.Errorf("receive_id = %q, want %q", calls[0].receiveID, "oc_003")
+	}
+	if calls[0].receiveType != "chat_id" {
+		t.Errorf("receive_id_type = %q, want %q", calls[0].receiveType, "chat_id")
 	}
 }
 

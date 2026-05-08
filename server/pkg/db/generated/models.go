@@ -156,12 +156,16 @@ type AutopilotTrigger struct {
 }
 
 type ChannelBindToken struct {
-	TokenHash      []byte             `json:"token_hash"`
-	Provider       string             `json:"provider"`
-	ExternalUserID string             `json:"external_user_id"`
-	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
-	ConsumedAt     pgtype.Timestamptz `json:"consumed_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	TokenHash        []byte             `json:"token_hash"`
+	Purpose          string             `json:"purpose"`
+	Provider         string             `json:"provider"`
+	ExternalUserID   string             `json:"external_user_id"`
+	ExternalChatID   pgtype.Text        `json:"external_chat_id"`
+	ExternalChatType pgtype.Text        `json:"external_chat_type"`
+	ExternalChatName pgtype.Text        `json:"external_chat_name"`
+	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt       pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 }
 
 type ChannelChatBinding struct {

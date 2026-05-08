@@ -30,6 +30,11 @@ import (
 // PRD AC3.4 (10 minutes).
 const DefaultTokenTTL = 10 * time.Minute
 
+const (
+	PurposeUserIdentity  = "user_identity"
+	PurposeChatWorkspace = "chat_workspace"
+)
+
 // Sentinel errors. Callers use errors.Is to discriminate; we never match
 // against error strings.
 var (
@@ -71,6 +76,14 @@ type IssueResult struct {
 	ExpiresAt time.Time
 }
 
+type IssueChatWorkspaceReq struct {
+	Provider                string
+	InitiatorExternalUserID string
+	ExternalChatID          string
+	ExternalChatType        string
+	ExternalChatName        string
+}
+
 // TokenIssuer issues one-shot binding tokens. It is safe for concurrent
 // use; all state lives in the underlying TokenStore.
 type TokenIssuer struct {
@@ -88,6 +101,29 @@ func NewTokenIssuer(store TokenStore) *TokenIssuer {
 // place the plaintext exists; the database only ever sees the SHA-256
 // hash (DESIGN §6 risk 3).
 func (i *TokenIssuer) Issue(ctx context.Context, provider, externalUserID string) (IssueResult, error) {
+	return i.IssueUserIdentity(ctx, provider, externalUserID)
+}
+
+func (i *TokenIssuer) IssueUserIdentity(ctx context.Context, provider, externalUserID string) (IssueResult, error) {
+	return i.issue(ctx, db.CreateChannelBindTokenParams{
+		Purpose:        PurposeUserIdentity,
+		Provider:       provider,
+		ExternalUserID: externalUserID,
+	})
+}
+
+func (i *TokenIssuer) IssueChatWorkspace(ctx context.Context, req IssueChatWorkspaceReq) (IssueResult, error) {
+	return i.issue(ctx, db.CreateChannelBindTokenParams{
+		Purpose:          PurposeChatWorkspace,
+		Provider:         req.Provider,
+		ExternalUserID:   req.InitiatorExternalUserID,
+		ExternalChatID:   pgtype.Text{String: req.ExternalChatID, Valid: req.ExternalChatID != ""},
+		ExternalChatType: pgtype.Text{String: req.ExternalChatType, Valid: req.ExternalChatType != ""},
+		ExternalChatName: pgtype.Text{String: req.ExternalChatName, Valid: req.ExternalChatName != ""},
+	})
+}
+
+func (i *TokenIssuer) issue(ctx context.Context, params db.CreateChannelBindTokenParams) (IssueResult, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return IssueResult{}, err
@@ -97,11 +133,17 @@ func (i *TokenIssuer) Issue(ctx context.Context, provider, externalUserID string
 	hash := sha256.Sum256([]byte(plaintext))
 	expiresAt := time.Now().Add(DefaultTokenTTL)
 
+	params.TokenHash = hash[:]
+	params.ExpiresAt = pgtype.Timestamptz{Time: expiresAt, Valid: true}
 	_, err := i.store.CreateChannelBindToken(ctx, db.CreateChannelBindTokenParams{
-		TokenHash:      hash[:],
-		Provider:       provider,
-		ExternalUserID: externalUserID,
-		ExpiresAt:      pgtype.Timestamptz{Time: expiresAt, Valid: true},
+		TokenHash:        params.TokenHash,
+		Purpose:          params.Purpose,
+		Provider:         params.Provider,
+		ExternalUserID:   params.ExternalUserID,
+		ExternalChatID:   params.ExternalChatID,
+		ExternalChatType: params.ExternalChatType,
+		ExternalChatName: params.ExternalChatName,
+		ExpiresAt:        params.ExpiresAt,
 	})
 	if err != nil {
 		return IssueResult{}, err
@@ -121,28 +163,47 @@ func NewTokenConsumer(store TokenStore) *TokenConsumer {
 	return &TokenConsumer{store: store}
 }
 
+func (c *TokenConsumer) Peek(ctx context.Context, plaintext string) (db.ChannelBindToken, error) {
+	hash, err := hashPlaintext(plaintext)
+	if err != nil {
+		return db.ChannelBindToken{}, err
+	}
+	row, err := c.store.GetChannelBindToken(ctx, hash[:])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.ChannelBindToken{}, ErrTokenInvalid
+		}
+		return db.ChannelBindToken{}, err
+	}
+	if row.ExpiresAt.Valid && row.ExpiresAt.Time.Before(time.Now()) {
+		return db.ChannelBindToken{}, ErrTokenExpired
+	}
+	if row.ConsumedAt.Valid {
+		return db.ChannelBindToken{}, ErrTokenAlreadyConsumed
+	}
+	return row, nil
+}
+
 // Consume validates and burns the supplied plaintext. On success it
 // returns the row that was just marked consumed (so the caller can read
 // provider + external_user_id and proceed to write the user binding).
 //
 // Failure modes:
 //   - ErrTokenInvalid          — no such token, or already consumed/expired
-//                                in a way that can't be distinguished without
-//                                a second query (consumer should treat all of
-//                                these as "click the new link").
+//     in a way that can't be distinguished without
+//     a second query (consumer should treat all of
+//     these as "click the new link").
 //   - ErrTokenExpired          — token row exists but is past expires_at.
 //   - ErrTokenAlreadyConsumed  — token row exists, not expired, but
-//                                consumed_at is non-null.
+//     consumed_at is non-null.
 func (c *TokenConsumer) Consume(ctx context.Context, plaintext string) (db.ChannelBindToken, error) {
 	// Defence-in-depth: reject obviously malformed input before touching
 	// the database. This prevents a caller from forwarding arbitrary user
 	// input (e.g. empty string, non-base64url) straight to a DB round-trip.
-	raw, err := base64.RawURLEncoding.DecodeString(plaintext)
-	if err != nil || len(raw) < 32 {
-		return db.ChannelBindToken{}, ErrTokenInvalid
+	hash, err := hashPlaintext(plaintext)
+	if err != nil {
+		return db.ChannelBindToken{}, err
 	}
-
-	hash := sha256.Sum256([]byte(plaintext))
 
 	// First attempt: optimistic UPDATE ... WHERE consumed_at IS NULL AND
 	// expires_at > now(). If this succeeds, we win the race.
@@ -174,4 +235,12 @@ func (c *TokenConsumer) Consume(ctx context.Context, plaintext string) (db.Chann
 	}
 
 	return db.ChannelBindToken{}, err
+}
+
+func hashPlaintext(plaintext string) ([32]byte, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(plaintext)
+	if err != nil || len(raw) < 32 {
+		return [32]byte{}, ErrTokenInvalid
+	}
+	return sha256.Sum256([]byte(plaintext)), nil
 }
