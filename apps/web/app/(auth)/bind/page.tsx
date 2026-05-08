@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Check, Loader2, LogIn, MessageCircle, RotateCcw } from "lucide-react";
@@ -20,6 +20,8 @@ function BindPageContent() {
   const isLoading = useAuthStore((s) => s.isLoading);
   const [state, setState] = useState<BindState>("idle");
   const [message, setMessage] = useState("");
+  const [retryNonce, setRetryNonce] = useState(0);
+  const bindingKeyRef = useRef<string | null>(null);
 
   const loginHref = useMemo(() => {
     const next = `/bind?token=${encodeURIComponent(token)}&provider=${encodeURIComponent(provider)}`;
@@ -31,7 +33,11 @@ function BindPageContent() {
   }, [isLoading, loginHref, router, user]);
 
   useEffect(() => {
-    if (isLoading || !user || !token || state !== "idle") return;
+    if (isLoading || !user || !token) return;
+
+    const bindingKey = `${user.id}:${provider}:${token}:${retryNonce}`;
+    if (bindingKeyRef.current === bindingKey) return;
+    bindingKeyRef.current = bindingKey;
 
     let cancelled = false;
     setState("binding");
@@ -55,7 +61,7 @@ function BindPageContent() {
     return () => {
       cancelled = true;
     };
-  }, [isLoading, provider, state, token, user]);
+  }, [isLoading, provider, retryNonce, token, user?.id]);
 
   if (isLoading || !user) {
     return (
@@ -100,7 +106,14 @@ function BindPageContent() {
         title="绑定失败"
         description={message}
         action={
-          <Button variant="secondary" onClick={() => setState("idle")}>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              bindingKeyRef.current = null;
+              setState("idle");
+              setRetryNonce((value) => value + 1);
+            }}
+          >
             <RotateCcw className="size-4" />
             重试
           </Button>
