@@ -81,8 +81,10 @@ import type {
   NotificationPreferenceResponse,
   NotificationPreferences,
   ChannelBinding,
+  ChannelUserBindingResponse,
   ListChannelBindingsResponse,
   CreateChannelBindingRequest,
+  CreateChannelUserBindingRequest,
   SetPrimaryChannelBindingRequest,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
@@ -1239,6 +1241,13 @@ export class ApiClient {
 
   async createChannelBinding(workspaceId: string, data: CreateChannelBindingRequest): Promise<ChannelBinding> {
     return this.fetch(`/api/workspaces/${workspaceId}/channel-bindings`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async createChannelUserBinding(data: CreateChannelUserBindingRequest): Promise<ChannelUserBindingResponse> {
+    return this.fetch("/api/channel-user-bindings", {
       method: "POST",
       body: JSON.stringify(data),
     });

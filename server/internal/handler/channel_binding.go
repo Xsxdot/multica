@@ -1,12 +1,13 @@
 package handler
 
 import (
-	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/channel/binding"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -51,8 +52,90 @@ type CreateChannelBindingRequest struct {
 	Provider string `json:"provider"`
 }
 
+type CreateChannelUserBindingRequest struct {
+	Token    string `json:"token"`
+	Provider string `json:"provider"`
+}
+
 type SetPrimaryChannelBindingRequest struct {
 	IsPrimary bool `json:"is_primary"`
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/channel-user-bindings
+// ---------------------------------------------------------------------------
+
+func (h *Handler) CreateChannelUserBinding(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+
+	var req CreateChannelUserBindingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Token == "" || req.Provider == "" {
+		writeError(w, http.StatusBadRequest, "token and provider are required")
+		return
+	}
+
+	consumer := binding.NewTokenConsumer(h.Queries)
+	token, err := consumer.Consume(r.Context(), req.Token)
+	if err != nil {
+		switch {
+		case errors.Is(err, binding.ErrTokenExpired):
+			writeError(w, http.StatusBadRequest, "binding token expired")
+		case errors.Is(err, binding.ErrTokenAlreadyConsumed):
+			writeError(w, http.StatusConflict, "binding token already consumed")
+		case errors.Is(err, binding.ErrTokenInvalid):
+			writeError(w, http.StatusBadRequest, "invalid binding token")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to consume binding token")
+		}
+		return
+	}
+	if token.Provider != req.Provider {
+		writeError(w, http.StatusBadRequest, "provider mismatch")
+		return
+	}
+
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start binding transaction")
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	if _, err := tx.Exec(r.Context(), `
+		DELETE FROM channel_user_binding
+		WHERE provider = $1 AND user_id = $2 AND external_user_id <> $3
+	`, token.Provider, parseUUID(userID), token.ExternalUserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to replace existing user binding")
+		return
+	}
+
+	_, err = tx.Exec(r.Context(), `
+		INSERT INTO channel_user_binding (provider, external_user_id, user_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (provider, external_user_id)
+		DO UPDATE SET user_id = EXCLUDED.user_id, updated_at = now()
+	`, token.Provider, token.ExternalUserID, parseUUID(userID))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create user binding")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit user binding")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider":         token.Provider,
+		"external_user_id": token.ExternalUserID,
+		"user_id":          userID,
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -102,15 +185,10 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hash token and look it up
-	tokenHash := sha256.Sum256([]byte(req.Token))
-	token, err := h.Queries.ConsumeChannelBindToken(r.Context(), tokenHash[:])
+	consumer := binding.NewTokenConsumer(h.Queries)
+	token, err := consumer.Consume(r.Context(), req.Token)
 	if err != nil {
-		if isNotFound(err) {
-			writeError(w, http.StatusBadRequest, "invalid or expired token")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to consume token")
+		writeError(w, http.StatusBadRequest, "invalid or expired token")
 		return
 	}
 

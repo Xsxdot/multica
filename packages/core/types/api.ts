@@ -143,6 +143,17 @@ export interface CreateChannelBindingRequest {
   provider: string;
 }
 
+export interface CreateChannelUserBindingRequest {
+  token: string;
+  provider: string;
+}
+
+export interface ChannelUserBindingResponse {
+  provider: string;
+  external_user_id: string;
+  user_id: string;
+}
+
 export interface SetPrimaryChannelBindingRequest {
   is_primary: boolean;
 }

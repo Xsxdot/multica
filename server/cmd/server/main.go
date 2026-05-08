@@ -250,7 +250,6 @@ func main() {
 
 	// M1-T1: channel port registry — assembly point for external messaging adapters.
 	channelRegistry := channel.NewRegistry()
-	_ = channelRegistry // will be wired into router / service layer in future milestones
 
 	// M1-T7: Postgres advisory-lock leader election.
 	//
@@ -327,10 +326,41 @@ func main() {
 			return fmt.Errorf("feishu: connect: %w", err)
 		}
 
+		pipeline := newChannelInboundPipeline(pool, channelRegistry)
+		go func() {
+			for {
+				select {
+				case <-adapterCtx.Done():
+					return
+				case evt, ok := <-adapter.Events():
+					if !ok {
+						return
+					}
+					outcome, err := pipeline.Run(adapterCtx, evt)
+					if err != nil {
+						slog.Error("channel inbound pipeline failed",
+							"channel", evt.ChannelName,
+							"chat_id", evt.ChatID,
+							"event_id", evt.EventID,
+							"terminal", outcome.Terminal,
+							"error", err,
+						)
+						continue
+					}
+					slog.Debug("channel inbound pipeline completed",
+						"channel", evt.ChannelName,
+						"chat_id", evt.ChatID,
+						"event_id", evt.EventID,
+						"terminal", outcome.Terminal,
+						"decision", outcome.Decision,
+					)
+				}
+			}
+		}()
+
 		// TODO[STA-69-R1]: Wire attachment pipeline step.
-		// The inbound pipeline is not yet instantiated in main.go (it only
-		// exists in test helpers). When the pipeline is wired for production,
-		// add an attachment step between intent-recog and dispatch:
+		// Add an attachment step between intent-recog and dispatch once the
+		// storage service and attachment facade are available in this wiring:
 		//
 		//   inbound.NewAttachmentStep(inbound.AttachmentConfig{
 		//       Storage:           storageSvc,
