@@ -155,6 +155,18 @@ type AutopilotTrigger struct {
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
+type ChannelActionResult struct {
+	ID             pgtype.UUID        `json:"id"`
+	InboundEventID pgtype.UUID        `json:"inbound_event_id"`
+	ActionKind     string             `json:"action_kind"`
+	Status         string             `json:"status"`
+	ResultPayload  []byte             `json:"result_payload"`
+	LastError      pgtype.Text        `json:"last_error"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
 type ChannelBindToken struct {
 	TokenHash        []byte             `json:"token_hash"`
 	Purpose          string             `json:"purpose"`
@@ -179,6 +191,55 @@ type ChannelChatBinding struct {
 	ExternalChatName pgtype.Text        `json:"external_chat_name"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	DefaultProjectID pgtype.UUID        `json:"default_project_id"`
+}
+
+type ChannelConversation struct {
+	Provider         string             `json:"provider"`
+	ConversationKey  string             `json:"conversation_key"`
+	ChatID           string             `json:"chat_id"`
+	ChatType         string             `json:"chat_type"`
+	SenderExternalID string             `json:"sender_external_id"`
+	ActiveEventID    pgtype.UUID        `json:"active_event_id"`
+	ActiveSince      pgtype.Timestamptz `json:"active_since"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ChannelInboundEvent struct {
+	ID                  pgtype.UUID        `json:"id"`
+	Provider            string             `json:"provider"`
+	EventID             string             `json:"event_id"`
+	EventType           string             `json:"event_type"`
+	ConversationKey     string             `json:"conversation_key"`
+	ChatID              string             `json:"chat_id"`
+	ChatType            string             `json:"chat_type"`
+	SenderExternalID    string             `json:"sender_external_id"`
+	SenderName          string             `json:"sender_name"`
+	MessageID           string             `json:"message_id"`
+	Text                string             `json:"text"`
+	CanonicalEvent      []byte             `json:"canonical_event"`
+	RawPayload          []byte             `json:"raw_payload"`
+	Status              string             `json:"status"`
+	Phase               string             `json:"phase"`
+	WaitKind            pgtype.Text        `json:"wait_kind"`
+	WaitTaskID          pgtype.UUID        `json:"wait_task_id"`
+	WaitExpiresAt       pgtype.Timestamptz `json:"wait_expires_at"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	DefaultProjectID    pgtype.UUID        `json:"default_project_id"`
+	IntentPayload       []byte             `json:"intent_payload"`
+	DispatchCompletedAt pgtype.Timestamptz `json:"dispatch_completed_at"`
+	DispatchReplyText   string             `json:"dispatch_reply_text"`
+	Attempts            int32              `json:"attempts"`
+	MaxAttempts         int32              `json:"max_attempts"`
+	NextAttemptAt       pgtype.Timestamptz `json:"next_attempt_at"`
+	LockedAt            pgtype.Timestamptz `json:"locked_at"`
+	LockedBy            pgtype.Text        `json:"locked_by"`
+	StartedAt           pgtype.Timestamptz `json:"started_at"`
+	CompletedAt         pgtype.Timestamptz `json:"completed_at"`
+	LastError           pgtype.Text        `json:"last_error"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
 }
 
 type ChannelInboundEventDedup struct {

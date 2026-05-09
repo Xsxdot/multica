@@ -6,10 +6,12 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multica-ai/multica/server/internal/channel/facade"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -22,38 +24,43 @@ func NewIssueService(pool *pgxpool.Pool) *IssueService {
 }
 
 func (s *IssueService) CreateIssue(ctx context.Context, req facade.CreateIssueReq) (facade.Issue, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return facade.Issue{}, fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	payload, err := withChannelAction(ctx, s.pool, req.InboundEventID, channelActionCreateIssue, func(tx pgx.Tx) (channelActionPayload, error) {
+		var number int32
+		if err := tx.QueryRow(ctx, `
+			UPDATE workspace SET issue_counter = issue_counter + 1
+			WHERE id = $1
+			RETURNING issue_counter
+		`, req.WorkspaceID).Scan(&number); err != nil {
+			return channelActionPayload{}, fmt.Errorf("bump issue counter: %w", err)
+		}
 
-	var number int32
-	if err := tx.QueryRow(ctx, `
-		UPDATE workspace SET issue_counter = issue_counter + 1
-		WHERE id = $1
-		RETURNING issue_counter
-	`, req.WorkspaceID).Scan(&number); err != nil {
-		return facade.Issue{}, fmt.Errorf("bump issue counter: %w", err)
-	}
-
-	queries := db.New(tx)
-	issue, err := queries.CreateIssue(ctx, db.CreateIssueParams{
-		WorkspaceID: req.WorkspaceID,
-		Title:       req.Title,
-		Description: pgtype.Text{String: req.Description, Valid: req.Description != ""},
-		Status:      "todo",
-		Priority:    "none",
-		CreatorType: "member",
-		CreatorID:   req.ActorID,
-		Number:      number,
+		queries := db.New(tx)
+		issue, err := queries.CreateIssue(ctx, db.CreateIssueParams{
+			WorkspaceID: req.WorkspaceID,
+			Title:       req.Title,
+			Description: pgtype.Text{String: req.Description, Valid: req.Description != ""},
+			Status:      "todo",
+			Priority:    "none",
+			CreatorType: "member",
+			CreatorID:   req.ActorID,
+			Number:      number,
+			ProjectID:   req.ProjectID,
+		})
+		if err != nil {
+			return channelActionPayload{}, fmt.Errorf("insert issue: %w", err)
+		}
+		return channelActionPayload{IssueID: util.UUIDToString(issue.ID)}, nil
 	})
 	if err != nil {
-		return facade.Issue{}, fmt.Errorf("insert issue: %w", err)
+		return facade.Issue{}, err
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return facade.Issue{}, fmt.Errorf("commit: %w", err)
+	issueID, err := payloadUUID(payload.IssueID)
+	if err != nil {
+		return facade.Issue{}, err
+	}
+	issue, err := db.New(s.pool).GetIssue(ctx, issueID)
+	if err != nil {
+		return facade.Issue{}, err
 	}
 	return s.toFacadeIssue(ctx, issue)
 }
@@ -108,18 +115,33 @@ func (s *IssueService) GetIssueByIdentifier(ctx context.Context, workspaceID pgt
 	return s.toFacadeIssue(ctx, issue)
 }
 
-func (s *IssueService) SetIssueStatus(ctx context.Context, id pgtype.UUID, _ pgtype.UUID, status string) error {
-	_, err := db.New(s.pool).UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: id, Status: status})
+func (s *IssueService) SetIssueStatus(ctx context.Context, id pgtype.UUID, _ pgtype.UUID, status string, action facade.ChannelMutationContext) error {
+	_, err := withChannelAction(ctx, s.pool, action.InboundEventID, channelActionSetStatus, func(tx pgx.Tx) (channelActionPayload, error) {
+		if _, err := db.New(tx).UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: id, Status: status}); err != nil {
+			return channelActionPayload{}, err
+		}
+		return channelActionPayload{IssueID: util.UUIDToString(id)}, nil
+	})
 	return err
 }
 
-func (s *IssueService) SetIssueAssignee(ctx context.Context, id pgtype.UUID, _ pgtype.UUID, assigneeIdentifier string) error {
+func (s *IssueService) SetIssueAssignee(ctx context.Context, id pgtype.UUID, _ pgtype.UUID, assigneeIdentifier string, action facade.ChannelMutationContext) error {
+	_, err := withChannelAction(ctx, s.pool, action.InboundEventID, channelActionSetAssignee, func(tx pgx.Tx) (channelActionPayload, error) {
+		if err := setIssueAssigneeTx(ctx, tx, id, assigneeIdentifier); err != nil {
+			return channelActionPayload{}, err
+		}
+		return channelActionPayload{IssueID: util.UUIDToString(id)}, nil
+	})
+	return err
+}
+
+func setIssueAssigneeTx(ctx context.Context, tx pgx.Tx, id pgtype.UUID, assigneeIdentifier string) error {
 	var assigneeID pgtype.UUID
 	clean := strings.TrimPrefix(assigneeIdentifier, "@")
-	if err := s.pool.QueryRow(ctx, `
-		SELECT m.user_id
-		FROM member m
-		JOIN issue i ON i.workspace_id = m.workspace_id
+	if err := tx.QueryRow(ctx, `
+			SELECT m.user_id
+			FROM member m
+			JOIN issue i ON i.workspace_id = m.workspace_id
 		LEFT JOIN "user" u ON u.id = m.user_id
 		WHERE i.id = $1
 		  AND (u.name = $2 OR m.user_id::text = $2)
@@ -127,39 +149,56 @@ func (s *IssueService) SetIssueAssignee(ctx context.Context, id pgtype.UUID, _ p
 	`, id, clean).Scan(&assigneeID); err != nil {
 		return fmt.Errorf("user %s is not in this workspace: %w", assigneeIdentifier, err)
 	}
-	_, err := s.pool.Exec(ctx, `
-		UPDATE issue SET assignee_type = 'member', assignee_id = $1, updated_at = now()
-		WHERE id = $2
+	_, err := tx.Exec(ctx, `
+			UPDATE issue SET assignee_type = 'member', assignee_id = $1, updated_at = now()
+			WHERE id = $2
 	`, assigneeID, id)
 	return err
 }
 
-func (s *IssueService) SetIssuePriority(ctx context.Context, id pgtype.UUID, _ pgtype.UUID, priority string) error {
+func (s *IssueService) SetIssuePriority(ctx context.Context, id pgtype.UUID, _ pgtype.UUID, priority string, action facade.ChannelMutationContext) error {
 	valid := map[string]bool{"urgent": true, "high": true, "medium": true, "low": true, "no_priority": true, "none": true}
 	if !valid[priority] {
 		return fmt.Errorf("unsupported priority %q", priority)
 	}
-	if priority == "none" {
-		priority = "no_priority"
+	if priority == "no_priority" {
+		priority = "none"
 	}
-	_, err := s.pool.Exec(ctx, `UPDATE issue SET priority = $1, updated_at = now() WHERE id = $2`, priority, id)
+	_, err := withChannelAction(ctx, s.pool, action.InboundEventID, channelActionSetPriority, func(tx pgx.Tx) (channelActionPayload, error) {
+		if _, err := tx.Exec(ctx, `UPDATE issue SET priority = $1, updated_at = now() WHERE id = $2`, priority, id); err != nil {
+			return channelActionPayload{}, err
+		}
+		return channelActionPayload{IssueID: util.UUIDToString(id)}, nil
+	})
 	return err
 }
 
-func (s *IssueService) AddIssueLabel(ctx context.Context, id pgtype.UUID, _ pgtype.UUID, labelName string) error {
-	wsID, labelID, err := s.resolveIssueLabel(ctx, id, labelName)
-	if err != nil {
-		return err
-	}
-	return db.New(s.pool).AttachLabelToIssue(ctx, db.AttachLabelToIssueParams{IssueID: id, LabelID: labelID, WorkspaceID: wsID})
+func (s *IssueService) AddIssueLabel(ctx context.Context, id pgtype.UUID, _ pgtype.UUID, labelName string, action facade.ChannelMutationContext) error {
+	_, err := withChannelAction(ctx, s.pool, action.InboundEventID, channelActionAddLabel, func(tx pgx.Tx) (channelActionPayload, error) {
+		wsID, labelID, err := resolveIssueLabelTx(ctx, tx, id, labelName)
+		if err != nil {
+			return channelActionPayload{}, err
+		}
+		if err := db.New(tx).AttachLabelToIssue(ctx, db.AttachLabelToIssueParams{IssueID: id, LabelID: labelID, WorkspaceID: wsID}); err != nil {
+			return channelActionPayload{}, err
+		}
+		return channelActionPayload{IssueID: util.UUIDToString(id)}, nil
+	})
+	return err
 }
 
-func (s *IssueService) RemoveIssueLabel(ctx context.Context, id pgtype.UUID, _ pgtype.UUID, labelName string) error {
-	wsID, labelID, err := s.resolveIssueLabel(ctx, id, labelName)
-	if err != nil {
-		return err
-	}
-	return db.New(s.pool).DetachLabelFromIssue(ctx, db.DetachLabelFromIssueParams{IssueID: id, LabelID: labelID, WorkspaceID: wsID})
+func (s *IssueService) RemoveIssueLabel(ctx context.Context, id pgtype.UUID, _ pgtype.UUID, labelName string, action facade.ChannelMutationContext) error {
+	_, err := withChannelAction(ctx, s.pool, action.InboundEventID, channelActionRemoveLabel, func(tx pgx.Tx) (channelActionPayload, error) {
+		wsID, labelID, err := resolveIssueLabelTx(ctx, tx, id, labelName)
+		if err != nil {
+			return channelActionPayload{}, err
+		}
+		if err := db.New(tx).DetachLabelFromIssue(ctx, db.DetachLabelFromIssueParams{IssueID: id, LabelID: labelID, WorkspaceID: wsID}); err != nil {
+			return channelActionPayload{}, err
+		}
+		return channelActionPayload{IssueID: util.UUIDToString(id)}, nil
+	})
+	return err
 }
 
 func (s *IssueService) ListMyTodos(ctx context.Context, workspaceID, userID pgtype.UUID) ([]facade.Issue, error) {
@@ -194,11 +233,17 @@ func (s *IssueService) ListMyTodos(ctx context.Context, workspaceID, userID pgty
 }
 
 func (s *IssueService) resolveIssueLabel(ctx context.Context, issueID pgtype.UUID, labelName string) (pgtype.UUID, pgtype.UUID, error) {
+	return resolveIssueLabelTx(ctx, s.pool, issueID, labelName)
+}
+
+func resolveIssueLabelTx(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, issueID pgtype.UUID, labelName string) (pgtype.UUID, pgtype.UUID, error) {
 	var wsID, labelID pgtype.UUID
-	if err := s.pool.QueryRow(ctx, `SELECT workspace_id FROM issue WHERE id = $1`, issueID).Scan(&wsID); err != nil {
+	if err := q.QueryRow(ctx, `SELECT workspace_id FROM issue WHERE id = $1`, issueID).Scan(&wsID); err != nil {
 		return pgtype.UUID{}, pgtype.UUID{}, err
 	}
-	if err := s.pool.QueryRow(ctx, `
+	if err := q.QueryRow(ctx, `
 		SELECT id FROM issue_label WHERE workspace_id = $1 AND name = $2
 	`, wsID, labelName).Scan(&labelID); err != nil {
 		return pgtype.UUID{}, pgtype.UUID{}, fmt.Errorf("label %q not found: %w", labelName, err)
@@ -230,18 +275,32 @@ func NewCommentService(queries *db.Queries, issueSvc *IssueService) *CommentServ
 }
 
 func (s *CommentService) AddComment(ctx context.Context, req facade.AddCommentReq) (facade.Comment, error) {
-	issue, err := s.issueSvc.GetIssue(ctx, req.IssueID)
+	payload, err := withChannelAction(ctx, s.issueSvc.pool, req.InboundEventID, channelActionAddComment, func(tx pgx.Tx) (channelActionPayload, error) {
+		issue, err := db.New(tx).GetIssue(ctx, req.IssueID)
+		if err != nil {
+			return channelActionPayload{}, err
+		}
+		comment, err := db.New(tx).CreateComment(ctx, db.CreateCommentParams{
+			IssueID:     req.IssueID,
+			WorkspaceID: issue.WorkspaceID,
+			AuthorType:  "member",
+			AuthorID:    req.ActorID,
+			Content:     req.Content,
+			Type:        "comment",
+		})
+		if err != nil {
+			return channelActionPayload{}, err
+		}
+		return channelActionPayload{IssueID: util.UUIDToString(req.IssueID), CommentID: util.UUIDToString(comment.ID)}, nil
+	})
 	if err != nil {
 		return facade.Comment{}, err
 	}
-	comment, err := s.queries.CreateComment(ctx, db.CreateCommentParams{
-		IssueID:     req.IssueID,
-		WorkspaceID: issue.WorkspaceID,
-		AuthorType:  "member",
-		AuthorID:    req.ActorID,
-		Content:     req.Content,
-		Type:        "comment",
-	})
+	commentID, err := payloadUUID(payload.CommentID)
+	if err != nil {
+		return facade.Comment{}, err
+	}
+	comment, err := s.queries.GetComment(ctx, commentID)
 	if err != nil {
 		return facade.Comment{}, err
 	}

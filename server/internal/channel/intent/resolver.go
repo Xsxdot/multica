@@ -15,14 +15,16 @@ const (
 
 // IntentRequest is the stable input every resolver sees.
 type IntentRequest struct {
-	WorkspaceID string
-	Text        string
-	Channel     string
-	ChatID      string
-	ChatType    string
-	SenderID    string
-	SenderName  string
-	SourceHint  IntentSource
+	WorkspaceID      string
+	DefaultProjectID string
+	Text             string
+	Channel          string
+	ChatID           string
+	ChatType         string
+	SenderID         string
+	SenderName       string
+	InboundEventID   string
+	SourceHint       IntentSource
 }
 
 // IntentResult is a resolver's answer. Matched=false lets the chain continue.
@@ -70,6 +72,11 @@ type ChatIntentClient interface {
 	CompleteIntent(ctx context.Context, req IntentRequest) (string, error)
 }
 
+type AsyncChatIntentClient interface {
+	StartIntent(ctx context.Context, req IntentRequest) (string, error)
+	ParseIntentResult(ctx context.Context, taskID string) (IntentResult, bool, error)
+}
+
 type ChatIntentResolver struct {
 	client  ChatIntentClient
 	timeout time.Duration
@@ -103,18 +110,11 @@ func (r *ChatIntentResolver) Resolve(ctx context.Context, req IntentRequest) (In
 		return IntentResult{Matched: true, Intent: fallbackIntent(IntentUnknown)}, nil
 	}
 
-	in, err := parseChatIntent(raw)
+	result, err := NormalizeChatIntentResult(raw)
 	if err != nil {
 		return IntentResult{Matched: true, Intent: fallbackIntent(IntentUnknown)}, nil
 	}
-	if in.Confidence < minChatConfidence {
-		return IntentResult{Matched: true, Intent: fallbackIntent(IntentASKClarify)}, nil
-	}
-	if !intentHasRequiredParams(in) {
-		return IntentResult{Matched: true, Intent: fallbackIntent(IntentASKClarify)}, nil
-	}
-	in.Source = SourceChat
-	return IntentResult{Matched: true, Intent: in}, nil
+	return result, nil
 }
 
 type chatIntentResponse struct {
@@ -129,7 +129,7 @@ func BuildChatIntentPrompt(req IntentRequest) string {
 	b.WriteString("Return only JSON: {\"intent\":\"<IntentKind>\",\"confidence\":0.0-1.0,\"params\":{...}}\n")
 	b.WriteString("Allowed intents: CreateIssue, AddComment, QueryIssue, SetStatus, SetAssignee, SetPriority, SetLabel, Unsupported, Unknown, ASK_CLARIFY.\n")
 	b.WriteString("Destructive operations such as delete must be Unsupported. Do not execute anything.\n\n")
-	fmt.Fprintf(&b, "Workspace ID: %s\nChannel: %s\nChat type: %s\nSender: %s (%s)\n\n", req.WorkspaceID, req.Channel, req.ChatType, req.SenderName, req.SenderID)
+	fmt.Fprintf(&b, "Workspace ID: %s\nDefault project ID: %s\nChannel: %s\nChat type: %s\nSender: %s (%s)\n\n", req.WorkspaceID, req.DefaultProjectID, req.Channel, req.ChatType, req.SenderName, req.SenderID)
 	fmt.Fprintf(&b, "User message:\n%s\n", req.Text)
 	return b.String()
 }
@@ -157,6 +157,21 @@ func parseChatIntent(raw string) (Intent, error) {
 		params = map[string]string{}
 	}
 	return Intent{Kind: kind, Confidence: resp.Confidence, Params: params, Source: SourceChat}, nil
+}
+
+func NormalizeChatIntentResult(raw string) (IntentResult, error) {
+	in, err := parseChatIntent(raw)
+	if err != nil {
+		return IntentResult{}, err
+	}
+	if in.Confidence < minChatConfidence {
+		return IntentResult{Matched: true, Intent: fallbackIntent(IntentASKClarify)}, nil
+	}
+	if !intentHasRequiredParams(in) {
+		return IntentResult{Matched: true, Intent: fallbackIntent(IntentASKClarify)}, nil
+	}
+	in.Source = SourceChat
+	return IntentResult{Matched: true, Intent: in}, nil
 }
 
 func fallbackIntent(kind IntentKind) Intent {

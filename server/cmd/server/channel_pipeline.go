@@ -17,11 +17,19 @@ import (
 )
 
 type channelPipelineOptions struct {
-	Storage        storage.Storage
-	FileDownloader inbound.FileDownloader
-	Observer       inbound.Observer
-	ChatIntent     chintent.ChatIntentClient
-	TaskService    *service.TaskService
+	Storage         storage.Storage
+	FileDownloader  inbound.FileDownloader
+	Observer        inbound.Observer
+	ChatIntent      chintent.ChatIntentClient
+	AsyncChatIntent chintent.AsyncChatIntentClient
+	TaskService     *service.TaskService
+}
+
+type channelInboundRuntimeComponents struct {
+	PrePipeline   *inbound.Pipeline
+	PostPipeline  *inbound.Pipeline
+	RuleResolvers []chintent.IntentResolver
+	ChatIntent    chintent.AsyncChatIntentClient
 }
 
 func newChannelInboundPipeline(pool *pgxpool.Pool, registry *channel.Registry, opts ...channelPipelineOptions) *inbound.Pipeline {
@@ -78,11 +86,13 @@ func newChannelInboundPipeline(pool *pgxpool.Pool, registry *channel.Registry, o
 
 	steps = append(steps,
 		inbound.NewDispatchStep(inbound.DispatchConfig{
-			IssueFacade:   facade.NewIssueFacade(issueSvc),
-			CommentFacade: facade.NewCommentFacade(commentSvc),
-			Registry:      registry,
-			ChatBinding:   bindings,
-			UserResolver:  userResolver,
+			IssueFacade:      facade.NewIssueFacade(issueSvc),
+			CommentFacade:    facade.NewCommentFacade(commentSvc),
+			Registry:         registry,
+			ChatBinding:      bindings,
+			UserResolver:     userResolver,
+			ProjectValidator: inbound.NewDBProjectWorkspaceValidator(pool),
+			DispatchStore:    inbound.NewDBDispatchCompletionStore(pool),
 		}),
 		inbound.NewReplyStep(),
 	)
@@ -90,4 +100,82 @@ func newChannelInboundPipeline(pool *pgxpool.Pool, registry *channel.Registry, o
 	pipeline := inbound.NewPipeline(steps...)
 	pipeline.SetObserver(opt.Observer)
 	return pipeline
+}
+
+func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, registry *channel.Registry, opts ...channelPipelineOptions) channelInboundRuntimeComponents {
+	queries := db.New(pool)
+	issueSvc := facadeimpl.NewIssueService(pool)
+	commentSvc := facadeimpl.NewCommentService(queries, issueSvc)
+	bindings := inbound.NewDBChatBindingLookup(pool)
+	userResolver := inbound.NewDBUserInfoResolver(pool)
+	issuer := binding.NewTokenIssuer(queries)
+
+	var opt channelPipelineOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
+	ruleResolvers := []chintent.IntentResolver{
+		chintent.NewRuleResolver(chintent.NewRuleMatcher()),
+	}
+	asyncChatIntent := opt.AsyncChatIntent
+	if asyncChatIntent == nil {
+		if typed, ok := opt.ChatIntent.(chintent.AsyncChatIntentClient); ok {
+			asyncChatIntent = typed
+		}
+	}
+	if asyncChatIntent == nil && opt.TaskService != nil {
+		asyncChatIntent = facadeimpl.NewTaskBackedChatIntentClient(queries, opt.TaskService, bindings)
+	}
+
+	pre := inbound.NewPipeline(
+		inbound.NewNormalizeStep(),
+		inbound.NewUserIdentityBindStep(pool, registry, issuer),
+		inbound.NewChatBindCommandStep(registry, issuer),
+		inbound.NewSlashStep(inbound.SlashConfig{Registry: registry}),
+	)
+	pre.SetObserver(opt.Observer)
+
+	postSteps := []inbound.Step{
+		inbound.NewAuthzStep(inbound.AuthzConfig{
+			Store:        bindings,
+			Registry:     registry,
+			SendReplies:  true,
+			RejectAsSkip: true,
+		}),
+	}
+	if opt.Storage != nil && opt.FileDownloader != nil {
+		postSteps = append(postSteps, inbound.NewAttachmentStep(inbound.AttachmentConfig{
+			Storage:           opt.Storage,
+			AttachmentQuerier: facade.NewAttachmentFacade(facadeimpl.NewAttachmentService(queries)),
+			FileDownloader:    opt.FileDownloader,
+			Registry:          registry,
+			ChatBinding:       bindings,
+			UserResolver:      userResolver,
+			IssueFacade:       facade.NewIssueFacade(issueSvc),
+		}))
+	} else if len(opts) > 0 && (opt.Storage != nil || opt.FileDownloader != nil) {
+		slog.Info("channel attachment step disabled: storage or file downloader is not configured")
+	}
+	postSteps = append(postSteps,
+		inbound.NewDispatchStep(inbound.DispatchConfig{
+			IssueFacade:      facade.NewIssueFacade(issueSvc),
+			CommentFacade:    facade.NewCommentFacade(commentSvc),
+			Registry:         registry,
+			ChatBinding:      bindings,
+			UserResolver:     userResolver,
+			ProjectValidator: inbound.NewDBProjectWorkspaceValidator(pool),
+			DispatchStore:    inbound.NewDBDispatchCompletionStore(pool),
+		}),
+		inbound.NewReplyStep(),
+	)
+	post := inbound.NewPipeline(postSteps...)
+	post.SetObserver(opt.Observer)
+
+	return channelInboundRuntimeComponents{
+		PrePipeline:   pre,
+		PostPipeline:  post,
+		RuleResolvers: ruleResolvers,
+		ChatIntent:    asyncChatIntent,
+	}
 }

@@ -35,15 +35,21 @@ type Comment struct {
 	Content string
 }
 
+type ChannelMutationContext struct {
+	InboundEventID pgtype.UUID
+}
+
 // CreateIssueReq carries the inputs CreateIssue needs from the channel layer.
 // ActorID is the Multica user_id resolved from `channel_user_binding`; it is
 // passed through verbatim so existing service-level permission checks stay
 // the single source of truth (TC-facade-1).
 type CreateIssueReq struct {
-	WorkspaceID pgtype.UUID
-	ActorID     pgtype.UUID
-	Title       string
-	Description string
+	WorkspaceID    pgtype.UUID
+	ActorID        pgtype.UUID
+	ProjectID      pgtype.UUID
+	InboundEventID pgtype.UUID
+	Title          string
+	Description    string
 }
 
 // AddCommentReq carries the inputs AddComment needs from the channel layer.
@@ -51,9 +57,10 @@ type CreateIssueReq struct {
 // existing service layer's validation is the single source of truth
 // (TC-facade-2 / PRD E9).
 type AddCommentReq struct {
-	IssueID pgtype.UUID
-	ActorID pgtype.UUID
-	Content string
+	IssueID        pgtype.UUID
+	ActorID        pgtype.UUID
+	InboundEventID pgtype.UUID
+	Content        string
 }
 
 // Attachment is the facade-layer projection of an attachment record.

@@ -14,11 +14,11 @@ type IssueFacade interface {
 	CreateIssue(ctx context.Context, req CreateIssueReq) (Issue, error)
 	GetIssue(ctx context.Context, id pgtype.UUID) (Issue, error)
 	GetIssueByIdentifier(ctx context.Context, workspaceID pgtype.UUID, identifier string) (Issue, error)
-	SetIssueStatus(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, status string) error
-	SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error
-	SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error
-	AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error
-	RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error
+	SetIssueStatus(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, status string, action ChannelMutationContext) error
+	SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string, action ChannelMutationContext) error
+	SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string, action ChannelMutationContext) error
+	AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, action ChannelMutationContext) error
+	RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, action ChannelMutationContext) error
 	ListMyTodos(ctx context.Context, workspaceID, userID pgtype.UUID) ([]Issue, error)
 }
 
@@ -62,31 +62,31 @@ func (f *issueFacade) GetIssueByIdentifier(ctx context.Context, workspaceID pgty
 	return f.svc.GetIssueByIdentifier(ctx, workspaceID, identifier)
 }
 
-func (f *issueFacade) SetIssueStatus(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, status string) error {
-	return f.svc.SetIssueStatus(ctx, id, actorID, status)
+func (f *issueFacade) SetIssueStatus(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, status string, action ChannelMutationContext) error {
+	return f.svc.SetIssueStatus(ctx, id, actorID, status, action)
 }
 
 // SetIssueAssignee forwards the assignee change to the underlying service.
 // The assigneeIdentifier is resolved by the service layer (open_id or username).
-func (f *issueFacade) SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error {
-	return f.svc.SetIssueAssignee(ctx, id, actorID, assigneeIdentifier)
+func (f *issueFacade) SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string, action ChannelMutationContext) error {
+	return f.svc.SetIssueAssignee(ctx, id, actorID, assigneeIdentifier, action)
 }
 
 // SetIssuePriority forwards the priority change to the underlying service.
-// Valid values: urgent, high, medium, low, no_priority.
-func (f *issueFacade) SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error {
-	return f.svc.SetIssuePriority(ctx, id, actorID, priority)
+// Valid values: urgent, high, medium, low, none.
+func (f *issueFacade) SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string, action ChannelMutationContext) error {
+	return f.svc.SetIssuePriority(ctx, id, actorID, priority, action)
 }
 
 // AddIssueLabel forwards the label attachment to the underlying service.
 // The labelName is resolved against the workspace's label library.
-func (f *issueFacade) AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
-	return f.svc.AddIssueLabel(ctx, id, actorID, labelName)
+func (f *issueFacade) AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, action ChannelMutationContext) error {
+	return f.svc.AddIssueLabel(ctx, id, actorID, labelName, action)
 }
 
 // RemoveIssueLabel forwards the label detachment to the underlying service.
-func (f *issueFacade) RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
-	return f.svc.RemoveIssueLabel(ctx, id, actorID, labelName)
+func (f *issueFacade) RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, action ChannelMutationContext) error {
+	return f.svc.RemoveIssueLabel(ctx, id, actorID, labelName, action)
 }
 
 func (f *issueFacade) ListMyTodos(ctx context.Context, workspaceID, userID pgtype.UUID) ([]Issue, error) {

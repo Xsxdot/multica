@@ -16,6 +16,8 @@ import (
 	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
 )
 
+const rawEventEnqueueTimeout = 5 * time.Second
+
 // RealClient implements Client using the official Feishu/Lark SDK
 // (github.com/larksuite/oapi-sdk-go/v3). It manages the WebSocket long
 // connection for inbound events and uses the OpenAPI client for outbound
@@ -60,8 +62,10 @@ func NewRealClient(appID, appSecret, encryptKey, verifyToken string) *RealClient
 	// im.message.receive_v1 event type that feeds RawEvents into our channel.
 	eventDispatcher := dispatcher.NewEventDispatcher(verifyToken, encryptKey)
 	eventDispatcher.OnP2MessageReceiveV1(func(ctx context.Context, ev *larkim.P2MessageReceiveV1) error {
-		rc.handleMessageReceive(ctx, ev)
-		return nil
+		return rc.handleMessageReceive(ctx, ev)
+	})
+	eventDispatcher.OnP2MessageRecalledV1(func(ctx context.Context, ev *larkim.P2MessageRecalledV1) error {
+		return rc.handleMessageRecalled(ctx, ev)
 	})
 
 	// Build the WebSocket client with auto-reconnect enabled.
@@ -280,15 +284,15 @@ func (rc *RealClient) GetUserInfo(ctx context.Context, userID string) (UserInfoR
 // handleMessageReceive bridges the SDK's typed event to our RawEvent
 // envelope. We re-marshal the event to JSON so the adapter's normaliseEvent
 // can parse it — this keeps the adapter SDK-agnostic.
-func (rc *RealClient) handleMessageReceive(ctx context.Context, ev *larkim.P2MessageReceiveV1) {
+func (rc *RealClient) handleMessageReceive(ctx context.Context, ev *larkim.P2MessageReceiveV1) error {
 	if ev == nil {
-		return
+		return nil
 	}
 
 	payload, err := json.Marshal(ev)
 	if err != nil {
 		slog.ErrorContext(ctx, "feishu: marshal event failed", "error", err)
-		return
+		return fmt.Errorf("feishu: marshal message receive event: %w", err)
 	}
 
 	// Extract event ID from the event header. The P2MessageReceiveV1 struct
@@ -307,18 +311,66 @@ func (rc *RealClient) handleMessageReceive(ctx context.Context, ev *larkim.P2Mes
 		Payload:   payload,
 	}
 
+	return rc.enqueueRawEvent(ctx, raw)
+}
+
+// handleMessageRecalled bridges the SDK recall event into the same RawEvent
+// stream consumed by the adapter normalizer.
+func (rc *RealClient) handleMessageRecalled(ctx context.Context, ev *larkim.P2MessageRecalledV1) error {
+	if ev == nil {
+		return nil
+	}
+
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		slog.ErrorContext(ctx, "feishu: marshal recall event failed", "error", err)
+		return fmt.Errorf("feishu: marshal message recalled event: %w", err)
+	}
+
+	eventID := ""
+	if ev.EventV2Base != nil && ev.EventV2Base.Header != nil {
+		eventID = ev.EventV2Base.Header.EventID
+	}
+
+	raw := RawEvent{
+		EventID:   eventID,
+		EventType: "im.message.recalled_v1",
+		Payload:   payload,
+	}
+
+	return rc.enqueueRawEvent(ctx, raw)
+}
+
+func (rc *RealClient) enqueueRawEvent(ctx context.Context, raw RawEvent) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	enqueueCtx, cancel := context.WithTimeout(ctx, rawEventEnqueueTimeout)
+	defer cancel()
+
 	rc.eventMu.RLock()
 	defer rc.eventMu.RUnlock()
 	if rc.closed {
 		channelmetrics.M.RecordAdapterDrop("feishu", "closed")
-		slog.Warn("feishu: events channel closed, dropping event", "event_id", eventID)
-		return
+		slog.Warn("feishu: events channel closed, dropping event",
+			"event_id", raw.EventID,
+			"event_type", raw.EventType,
+		)
+		return nil
 	}
+
 	select {
 	case rc.events <- raw:
-	default:
+		return nil
+	case <-enqueueCtx.Done():
+		err := enqueueCtx.Err()
 		channelmetrics.M.RecordAdapterDrop("feishu", "buffer_full")
-		slog.Warn("feishu: events channel full, dropping event", "event_id", eventID)
+		slog.WarnContext(ctx, "feishu: events channel enqueue timed out",
+			"event_id", raw.EventID,
+			"event_type", raw.EventType,
+			"error", err,
+		)
+		return fmt.Errorf("feishu: enqueue raw event %s (%s): %w", raw.EventID, raw.EventType, err)
 	}
 }
 

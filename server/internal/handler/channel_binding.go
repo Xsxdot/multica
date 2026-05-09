@@ -23,6 +23,7 @@ type ChannelBindingResponse struct {
 	ExternalChatID   string  `json:"external_chat_id"`
 	ChatType         string  `json:"chat_type"`
 	ExternalChatName *string `json:"external_chat_name"`
+	DefaultProjectID *string `json:"default_project_id"`
 	IsPrimary        bool    `json:"is_primary"`
 	BoundByUserID    string  `json:"bound_by_user_id"`
 	CreatedAt        string  `json:"created_at"`
@@ -43,6 +44,7 @@ func bindingToResponse(b db.ChannelChatBinding) ChannelBindingResponse {
 		ExternalChatID:   b.ExternalChatID,
 		ChatType:         b.ChatType,
 		ExternalChatName: textToPtr(b.ExternalChatName),
+		DefaultProjectID: uuidToPtr(b.DefaultProjectID),
 		IsPrimary:        b.IsPrimary,
 		BoundByUserID:    uuidToString(b.BoundByUserID),
 		CreatedAt:        timestampToString(b.CreatedAt),
@@ -57,8 +59,9 @@ func lockChannelBindingProvider(ctx context.Context, tx pgx.Tx, workspaceID pgty
 }
 
 type CreateChannelBindingRequest struct {
-	Token    string `json:"token"`
-	Provider string `json:"provider"`
+	Token            string  `json:"token"`
+	Provider         string  `json:"provider"`
+	DefaultProjectID *string `json:"default_project_id"`
 }
 
 type CreateChannelUserBindingRequest struct {
@@ -209,6 +212,26 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var defaultProjectID pgtype.UUID
+	if req.DefaultProjectID != nil {
+		projectID, ok := parseUUIDOrBadRequest(w, *req.DefaultProjectID, "default_project_id")
+		if !ok {
+			return
+		}
+		if _, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+			ID:          projectID,
+			WorkspaceID: member.WorkspaceID,
+		}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusBadRequest, "default_project_id does not belong to this workspace")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to validate default project")
+			return
+		}
+		defaultProjectID = projectID
+	}
+
 	tx, err := h.TxStarter.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start binding transaction")
@@ -247,6 +270,17 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	})
 	if err == nil {
 		if existing.WorkspaceID == member.WorkspaceID {
+			if req.DefaultProjectID != nil {
+				updated, updateErr := qtx.UpdateChannelChatBindingDefaultProject(r.Context(), db.UpdateChannelChatBindingDefaultProjectParams{
+					ID:               existing.ID,
+					DefaultProjectID: defaultProjectID,
+				})
+				if updateErr != nil {
+					writeError(w, http.StatusInternalServerError, "failed to update default project")
+					return
+				}
+				existing = updated
+			}
 			if _, consumeErr := consumer.Consume(r.Context(), req.Token); consumeErr != nil {
 				writeError(w, http.StatusBadRequest, "invalid or expired token")
 				return
@@ -283,6 +317,17 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	})
 	if err == nil {
 		if existing.WorkspaceID == member.WorkspaceID {
+			if req.DefaultProjectID != nil {
+				updated, updateErr := qtx.UpdateChannelChatBindingDefaultProject(r.Context(), db.UpdateChannelChatBindingDefaultProjectParams{
+					ID:               existing.ID,
+					DefaultProjectID: defaultProjectID,
+				})
+				if updateErr != nil {
+					writeError(w, http.StatusInternalServerError, "failed to update default project")
+					return
+				}
+				existing = updated
+			}
 			if err := tx.Commit(r.Context()); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to commit binding transaction")
 				return
@@ -330,6 +375,7 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 		IsPrimary:        isPrimary,
 		BoundByUserID:    member.UserID,
 		ExternalChatName: token.ExternalChatName,
+		DefaultProjectID: defaultProjectID,
 	})
 	if err != nil {
 		if isUniqueViolation(err) {

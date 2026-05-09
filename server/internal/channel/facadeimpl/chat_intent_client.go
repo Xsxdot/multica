@@ -3,10 +3,12 @@ package facadeimpl
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
@@ -40,6 +42,23 @@ func NewTaskBackedChatIntentClient(queries *db.Queries, tasks *service.TaskServi
 }
 
 func (c *TaskBackedChatIntentClient) CompleteIntent(ctx context.Context, req chintent.IntentRequest) (string, error) {
+	taskID, err := c.StartIntent(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	taskUUID, err := util.ParseUUID(taskID)
+	if err != nil {
+		return "", err
+	}
+	output, err := c.waitForResult(ctx, taskUUID)
+	if err != nil {
+		c.cancelTask(taskUUID)
+		return "", err
+	}
+	return output, nil
+}
+
+func (c *TaskBackedChatIntentClient) StartIntent(ctx context.Context, req chintent.IntentRequest) (string, error) {
 	if c == nil || c.queries == nil || c.tasks == nil {
 		return "", fmt.Errorf("chat intent client is not configured")
 	}
@@ -51,31 +70,78 @@ func (c *TaskBackedChatIntentClient) CompleteIntent(ctx context.Context, req chi
 	if err != nil {
 		return "", err
 	}
+	if req.InboundEventID != "" {
+		existing, err := c.queries.GetChannelIntentTaskByInboundEvent(ctx, req.InboundEventID)
+		if err == nil {
+			return util.UUIDToString(existing.ID), nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("lookup existing channel intent task: %w", err)
+		}
+	}
 	agent, err := c.selectAgent(ctx, workspaceID)
 	if err != nil {
 		return "", err
 	}
 
 	task, err := c.tasks.EnqueueChannelIntentTask(ctx, workspaceID, agent.ID, service.ChannelIntentTaskParams{
-		Prompt:      chintent.BuildChatIntentPrompt(req),
-		Message:     req.Text,
-		RequesterID: requesterID,
-		Channel:     req.Channel,
-		ChatID:      req.ChatID,
-		ChatType:    req.ChatType,
-		SenderID:    req.SenderID,
-		SenderName:  req.SenderName,
+		Prompt:         chintent.BuildChatIntentPrompt(req),
+		Message:        req.Text,
+		RequesterID:    requesterID,
+		Channel:        req.Channel,
+		ChatID:         req.ChatID,
+		ChatType:       req.ChatType,
+		SenderID:       req.SenderID,
+		SenderName:     req.SenderName,
+		InboundEventID: req.InboundEventID,
 	})
 	if err != nil {
 		return "", err
 	}
+	return util.UUIDToString(task.ID), nil
+}
 
-	output, err := c.waitForResult(ctx, task.ID)
-	if err != nil {
-		c.cancelTask(task.ID)
-		return "", err
+func (c *TaskBackedChatIntentClient) ParseIntentResult(ctx context.Context, taskID string) (chintent.IntentResult, bool, error) {
+	if c == nil || c.queries == nil {
+		return chintent.IntentResult{}, true, fmt.Errorf("chat intent client is not configured")
 	}
-	return output, nil
+	taskUUID, err := util.ParseUUID(strings.TrimSpace(taskID))
+	if err != nil {
+		return chintent.IntentResult{}, true, err
+	}
+	task, err := c.queries.GetAgentTask(ctx, taskUUID)
+	if err != nil {
+		return chintent.IntentResult{}, true, fmt.Errorf("load channel intent task: %w", err)
+	}
+	switch task.Status {
+	case "completed":
+		output, err := channelIntentOutput(task)
+		if err != nil {
+			return chintent.IntentResult{}, true, err
+		}
+		result, err := chintent.NormalizeChatIntentResult(output)
+		if err != nil {
+			return chintent.IntentResult{
+				Matched: true,
+				Intent: chintent.Intent{
+					Kind:       chintent.IntentUnknown,
+					Confidence: 0,
+					Params:     map[string]string{},
+					Source:     chintent.SourceChat,
+				},
+			}, true, nil
+		}
+		return result, true, nil
+	case "failed":
+		if task.Error.Valid && strings.TrimSpace(task.Error.String) != "" {
+			return chintent.IntentResult{}, true, fmt.Errorf("channel intent task failed: %s", task.Error.String)
+		}
+		return chintent.IntentResult{}, true, fmt.Errorf("channel intent task failed")
+	case "cancelled":
+		return chintent.IntentResult{}, true, fmt.Errorf("channel intent task cancelled")
+	default:
+		return chintent.IntentResult{}, false, nil
+	}
 }
 
 func (c *TaskBackedChatIntentClient) authorizeRequester(ctx context.Context, req chintent.IntentRequest, workspaceID pgtype.UUID) (string, error) {
@@ -183,4 +249,7 @@ func channelIntentOutput(task db.AgentTaskQueue) (string, error) {
 	return output, nil
 }
 
-var _ chintent.ChatIntentClient = (*TaskBackedChatIntentClient)(nil)
+var (
+	_ chintent.ChatIntentClient      = (*TaskBackedChatIntentClient)(nil)
+	_ chintent.AsyncChatIntentClient = (*TaskBackedChatIntentClient)(nil)
+)

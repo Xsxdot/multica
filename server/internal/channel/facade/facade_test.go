@@ -95,7 +95,7 @@ func (m *mockIssueService) GetIssueByIdentifier(_ context.Context, workspaceID p
 	return m.getByIdentifierReturn, m.getByIdentifierErr
 }
 
-func (m *mockIssueService) SetIssueStatus(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, status string) error {
+func (m *mockIssueService) SetIssueStatus(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, status string, _ facade.ChannelMutationContext) error {
 	m.setStatusCalls = append(m.setStatusCalls, struct {
 		ID      pgtype.UUID
 		ActorID pgtype.UUID
@@ -104,7 +104,7 @@ func (m *mockIssueService) SetIssueStatus(_ context.Context, id pgtype.UUID, act
 	return m.setStatusErr
 }
 
-func (m *mockIssueService) SetIssueAssignee(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error {
+func (m *mockIssueService) SetIssueAssignee(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string, _ facade.ChannelMutationContext) error {
 	m.setAssigneeCalls = append(m.setAssigneeCalls, struct {
 		ID                 pgtype.UUID
 		ActorID            pgtype.UUID
@@ -113,7 +113,7 @@ func (m *mockIssueService) SetIssueAssignee(_ context.Context, id pgtype.UUID, a
 	return m.setAssigneeErr
 }
 
-func (m *mockIssueService) SetIssuePriority(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error {
+func (m *mockIssueService) SetIssuePriority(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string, _ facade.ChannelMutationContext) error {
 	m.setPriorityCalls = append(m.setPriorityCalls, struct {
 		ID       pgtype.UUID
 		ActorID  pgtype.UUID
@@ -122,7 +122,7 @@ func (m *mockIssueService) SetIssuePriority(_ context.Context, id pgtype.UUID, a
 	return m.setPriorityErr
 }
 
-func (m *mockIssueService) AddIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+func (m *mockIssueService) AddIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, _ facade.ChannelMutationContext) error {
 	m.addLabelCalls = append(m.addLabelCalls, struct {
 		ID        pgtype.UUID
 		ActorID   pgtype.UUID
@@ -131,7 +131,7 @@ func (m *mockIssueService) AddIssueLabel(_ context.Context, id pgtype.UUID, acto
 	return m.addLabelErr
 }
 
-func (m *mockIssueService) RemoveIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+func (m *mockIssueService) RemoveIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, _ facade.ChannelMutationContext) error {
 	m.removeLabelCalls = append(m.removeLabelCalls, struct {
 		ID        pgtype.UUID
 		ActorID   pgtype.UUID
@@ -268,7 +268,7 @@ func TestIssueFacade_SetIssueStatus_PassesActorIDThrough(t *testing.T) {
 	svc := &mockIssueService{}
 	f := facade.NewIssueFacade(svc)
 
-	if err := f.SetIssueStatus(context.Background(), id, actorID, "in_progress"); err != nil {
+	if err := f.SetIssueStatus(context.Background(), id, actorID, "in_progress", facade.ChannelMutationContext{}); err != nil {
 		t.Fatalf("SetIssueStatus: %v", err)
 	}
 	if len(svc.setStatusCalls) != 1 {
@@ -288,7 +288,7 @@ func TestIssueFacade_SetIssueAssignee_PassesArgsThrough(t *testing.T) {
 	svc := &mockIssueService{}
 	f := facade.NewIssueFacade(svc)
 
-	if err := f.SetIssueAssignee(context.Background(), id, actorID, "@张三"); err != nil {
+	if err := f.SetIssueAssignee(context.Background(), id, actorID, "@张三", facade.ChannelMutationContext{}); err != nil {
 		t.Fatalf("SetIssueAssignee: %v", err)
 	}
 	if len(svc.setAssigneeCalls) != 1 {
@@ -308,7 +308,7 @@ func TestIssueFacade_SetIssuePriority_PassesArgsThrough(t *testing.T) {
 	svc := &mockIssueService{}
 	f := facade.NewIssueFacade(svc)
 
-	if err := f.SetIssuePriority(context.Background(), id, actorID, "high"); err != nil {
+	if err := f.SetIssuePriority(context.Background(), id, actorID, "high", facade.ChannelMutationContext{}); err != nil {
 		t.Fatalf("SetIssuePriority: %v", err)
 	}
 	if len(svc.setPriorityCalls) != 1 {
@@ -328,7 +328,7 @@ func TestIssueFacade_AddIssueLabel_PassesArgsThrough(t *testing.T) {
 	svc := &mockIssueService{}
 	f := facade.NewIssueFacade(svc)
 
-	if err := f.AddIssueLabel(context.Background(), id, actorID, "bug"); err != nil {
+	if err := f.AddIssueLabel(context.Background(), id, actorID, "bug", facade.ChannelMutationContext{}); err != nil {
 		t.Fatalf("AddIssueLabel: %v", err)
 	}
 	if len(svc.addLabelCalls) != 1 {
@@ -348,7 +348,7 @@ func TestIssueFacade_RemoveIssueLabel_PassesArgsThrough(t *testing.T) {
 	svc := &mockIssueService{}
 	f := facade.NewIssueFacade(svc)
 
-	if err := f.RemoveIssueLabel(context.Background(), id, actorID, "bug"); err != nil {
+	if err := f.RemoveIssueLabel(context.Background(), id, actorID, "bug", facade.ChannelMutationContext{}); err != nil {
 		t.Fatalf("RemoveIssueLabel: %v", err)
 	}
 	if len(svc.removeLabelCalls) != 1 {

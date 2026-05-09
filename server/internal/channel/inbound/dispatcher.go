@@ -2,15 +2,18 @@ package inbound
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/channel/facade"
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	"github.com/multica-ai/multica/server/internal/util"
 )
 
 const (
@@ -40,17 +43,23 @@ type UserInfoResolver interface {
 	Resolve(ctx context.Context, channelName, externalUserID string) (ResolvedUser, error)
 }
 
+type ProjectWorkspaceValidator interface {
+	ValidateProjectInWorkspace(ctx context.Context, workspaceID, projectID pgtype.UUID) error
+}
+
 type ResolvedUser struct {
 	MulticaUserID pgtype.UUID
 	DisplayName   string
 }
 
 type DispatchConfig struct {
-	IssueFacade   facade.IssueFacade
-	CommentFacade facade.CommentFacade
-	Registry      *channel.Registry
-	ChatBinding   ChatBindingLookup
-	UserResolver  UserInfoResolver
+	IssueFacade      facade.IssueFacade
+	CommentFacade    facade.CommentFacade
+	Registry         *channel.Registry
+	ChatBinding      ChatBindingLookup
+	UserResolver     UserInfoResolver
+	ProjectValidator ProjectWorkspaceValidator
+	DispatchStore    DispatchCompletionStore
 }
 
 type dispatchStep struct {
@@ -64,16 +73,28 @@ func NewDispatchStep(cfg DispatchConfig) Step {
 func (dispatchStep) Name() string { return "dispatch" }
 
 func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
+	if d.cfg.DispatchStore != nil && evt.RuntimeEventID != "" {
+		reply, ok, err := d.cfg.DispatchStore.GetDispatchCompletion(ctx, evt.RuntimeEventID)
+		if err != nil {
+			return evt, DecisionContinue, fmt.Errorf("load dispatch completion: %w", err)
+		}
+		if ok {
+			if err := d.sendReply(ctx, evt, reply); err != nil {
+				return evt, DecisionContinue, fmt.Errorf("send completed dispatch reply: %w", err)
+			}
+			return evt, DecisionContinue, nil
+		}
+	}
+
 	// PRD E6: recall events are annotated in the chat thread but never
 	// mutate any Issue or Comment. They bypass intent recognition entirely.
 	if evt.Type == port.EventTypeMessageRecalled {
 		reply := fmt.Sprintf("[%s] 上游消息已撤回 (message_id: %s)", replyMessageRecalled, evt.MessageID)
+		if err := d.persistDispatchCompletion(ctx, evt, reply); err != nil {
+			return evt, DecisionContinue, err
+		}
 		if sendErr := d.sendReply(ctx, evt, reply); sendErr != nil {
-			slog.Error("dispatch: send recall annotation failed",
-				"channel", evt.ChannelName,
-				"chat_id", evt.ChatID,
-				"error", sendErr,
-			)
+			return evt, DecisionContinue, fmt.Errorf("send recall annotation: %w", sendErr)
 		}
 		return evt, DecisionContinue, nil
 	}
@@ -118,23 +139,34 @@ func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inb
 
 	if err != nil {
 		slog.Error("dispatch: handler error", "intent", string(intent.Kind), "error", err)
-		reply = fmt.Sprintf("[%s] 处理请求时出错，请稍后重试。", replyInternalError)
-		err = nil
+		return evt, DecisionContinue, err
 	}
 
 	if _, hasSuffix := intent.Params["_ignored_suffix"]; hasSuffix {
 		reply += fmt.Sprintf("\n[%s] 消息中包含多个意图，已忽略附加部分。", replyIgnoredSuffix)
 	}
 
+	// This checkpoint replays already persisted replies. Query replies are
+	// intentionally at-least-current if a worker crashes before this write.
+	if err := d.persistDispatchCompletion(ctx, evt, reply); err != nil {
+		return evt, DecisionContinue, err
+	}
+
 	if sendErr := d.sendReply(ctx, evt, reply); sendErr != nil {
-		slog.Error("dispatch: send reply failed",
-			"channel", evt.ChannelName,
-			"chat_id", evt.ChatID,
-			"error", sendErr,
-		)
+		return evt, DecisionContinue, fmt.Errorf("send dispatch reply: %w", sendErr)
 	}
 
 	return evt, DecisionContinue, nil
+}
+
+func (d *dispatchStep) persistDispatchCompletion(ctx context.Context, evt port.InboundEvent, reply string) error {
+	if d.cfg.DispatchStore == nil || evt.RuntimeEventID == "" {
+		return nil
+	}
+	if err := d.cfg.DispatchStore.MarkDispatchCompleted(ctx, evt.RuntimeEventID, reply); err != nil {
+		return fmt.Errorf("mark dispatch completed: %w", err)
+	}
+	return nil
 }
 
 func (d *dispatchStep) handleCreateIssue(ctx context.Context, evt port.InboundEvent) (string, error) {
@@ -153,11 +185,31 @@ func (d *dispatchStep) handleCreateIssue(ctx context.Context, evt port.InboundEv
 		return "", fmt.Errorf("resolve user: %w", err)
 	}
 
+	var projectID pgtype.UUID
+	if rawProjectID := evt.Intent.Params["project_id"]; rawProjectID != "" {
+		parsed, err := util.ParseUUID(rawProjectID)
+		if err != nil {
+			return fmt.Sprintf("[%s] project_id 格式不正确。", replyMissingParam), nil
+		}
+		projectID = parsed
+		if d.cfg.ProjectValidator == nil {
+			return "", errors.New("validate project: project validator is not configured")
+		}
+		if err := d.cfg.ProjectValidator.ValidateProjectInWorkspace(ctx, wsID, projectID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Sprintf("[%s] project_id 不属于当前 workspace。", replyMissingParam), nil
+			}
+			return "", fmt.Errorf("validate project: %w", err)
+		}
+	}
+
 	issue, err := d.cfg.IssueFacade.CreateIssue(ctx, facade.CreateIssueReq{
-		WorkspaceID: wsID,
-		ActorID:     user.MulticaUserID,
-		Title:       title,
-		Description: evt.Intent.Params["description"],
+		WorkspaceID:    wsID,
+		ActorID:        user.MulticaUserID,
+		ProjectID:      projectID,
+		InboundEventID: parseRuntimeEventID(evt.RuntimeEventID),
+		Title:          title,
+		Description:    evt.Intent.Params["description"],
 	})
 	if err != nil {
 		return "", fmt.Errorf("create issue: %w", err)
@@ -193,9 +245,10 @@ func (d *dispatchStep) handleAddComment(ctx context.Context, evt port.InboundEve
 	}
 
 	if _, err := d.cfg.CommentFacade.AddComment(ctx, facade.AddCommentReq{
-		IssueID: issue.ID,
-		ActorID: user.MulticaUserID,
-		Content: comment,
+		IssueID:        issue.ID,
+		ActorID:        user.MulticaUserID,
+		InboundEventID: parseRuntimeEventID(evt.RuntimeEventID),
+		Content:        comment,
 	}); err != nil {
 		return "", fmt.Errorf("add comment: %w", err)
 	}
@@ -266,7 +319,7 @@ func (d *dispatchStep) handleSetStatus(ctx context.Context, evt port.InboundEven
 	if issue.ID == (pgtype.UUID{}) {
 		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil
 	}
-	if err := d.cfg.IssueFacade.SetIssueStatus(ctx, issue.ID, user.MulticaUserID, status); err != nil {
+	if err := d.cfg.IssueFacade.SetIssueStatus(ctx, issue.ID, user.MulticaUserID, status, facade.ChannelMutationContext{InboundEventID: parseRuntimeEventID(evt.RuntimeEventID)}); err != nil {
 		return "", fmt.Errorf("set status: %w", err)
 	}
 	return fmt.Sprintf("[%s] 已将 %s 状态改为 %s。", replyStatusChanged, issueKey, status), nil
@@ -284,7 +337,7 @@ func (d *dispatchStep) handleSetAssignee(ctx context.Context, evt port.InboundEv
 	if issue.ID == (pgtype.UUID{}) {
 		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil
 	}
-	if err := d.cfg.IssueFacade.SetIssueAssignee(ctx, issue.ID, user.MulticaUserID, assignee); err != nil {
+	if err := d.cfg.IssueFacade.SetIssueAssignee(ctx, issue.ID, user.MulticaUserID, assignee, facade.ChannelMutationContext{InboundEventID: parseRuntimeEventID(evt.RuntimeEventID)}); err != nil {
 		return "", fmt.Errorf("set assignee: %w", err)
 	}
 	return fmt.Sprintf("[%s] 已将 %s 的指派人改为 %s。", replyAssigneeChanged, issueKey, assignee), nil
@@ -302,7 +355,7 @@ func (d *dispatchStep) handleSetPriority(ctx context.Context, evt port.InboundEv
 	if issue.ID == (pgtype.UUID{}) {
 		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil
 	}
-	if err := d.cfg.IssueFacade.SetIssuePriority(ctx, issue.ID, user.MulticaUserID, priority); err != nil {
+	if err := d.cfg.IssueFacade.SetIssuePriority(ctx, issue.ID, user.MulticaUserID, priority, facade.ChannelMutationContext{InboundEventID: parseRuntimeEventID(evt.RuntimeEventID)}); err != nil {
 		return "", fmt.Errorf("set priority: %w", err)
 	}
 	return fmt.Sprintf("[%s] 已将 %s 的优先级改为 %s。", replyPriorityChanged, issueKey, priority), nil
@@ -321,12 +374,12 @@ func (d *dispatchStep) handleSetLabel(ctx context.Context, evt port.InboundEvent
 		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil
 	}
 	if op == "remove" {
-		if err := d.cfg.IssueFacade.RemoveIssueLabel(ctx, issue.ID, user.MulticaUserID, label); err != nil {
+		if err := d.cfg.IssueFacade.RemoveIssueLabel(ctx, issue.ID, user.MulticaUserID, label, facade.ChannelMutationContext{InboundEventID: parseRuntimeEventID(evt.RuntimeEventID)}); err != nil {
 			return "", fmt.Errorf("remove label: %w", err)
 		}
 		return fmt.Sprintf("[%s] 已从 %s 去掉标签 %s。", replyLabelRemoved, issueKey, label), nil
 	}
-	if err := d.cfg.IssueFacade.AddIssueLabel(ctx, issue.ID, user.MulticaUserID, label); err != nil {
+	if err := d.cfg.IssueFacade.AddIssueLabel(ctx, issue.ID, user.MulticaUserID, label, facade.ChannelMutationContext{InboundEventID: parseRuntimeEventID(evt.RuntimeEventID)}); err != nil {
 		return "", fmt.Errorf("add label: %w", err)
 	}
 	return fmt.Sprintf("[%s] 已为 %s 添加标签 %s。", replyLabelAdded, issueKey, label), nil
@@ -365,6 +418,17 @@ func (d *dispatchStep) sendReply(ctx context.Context, evt port.InboundEvent, tex
 		Text:   text,
 	})
 	return err
+}
+
+func parseRuntimeEventID(id string) pgtype.UUID {
+	if id == "" {
+		return pgtype.UUID{}
+	}
+	parsed, err := util.ParseUUID(id)
+	if err != nil {
+		return pgtype.UUID{}
+	}
+	return parsed
 }
 
 // identifierRe matches valid issue identifiers like STA-39, MUL-123.

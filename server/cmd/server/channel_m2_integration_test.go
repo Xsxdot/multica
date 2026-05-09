@@ -41,6 +41,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/channel"
+	"github.com/multica-ai/multica/server/internal/channel/facade"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	"github.com/multica-ai/multica/server/internal/channel/outbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
@@ -879,7 +880,7 @@ func TestChannelIntegration_TC_risk_5_OutboundFailureDoesNotBlockWeb(t *testing.
 // workspace + an actor ID resolved through channel_user_binding for
 // externalUserID. Most M2 tests pre-bind the user; this helper hides
 // the resolution boilerplate.
-func mustCreateReq(t *testing.T, wsID pgtype.UUID, externalUserID, title string) facadeCreateIssueReq {
+func mustCreateReq(t *testing.T, wsID pgtype.UUID, externalUserID, title string) facade.CreateIssueReq {
 	t.Helper()
 	var actor pgtype.UUID
 	if err := testPool.QueryRow(context.Background(), `
@@ -891,16 +892,5 @@ func mustCreateReq(t *testing.T, wsID pgtype.UUID, externalUserID, title string)
 		}
 		t.Fatalf("mustCreateReq: lookup user_id: %v", err)
 	}
-	return facadeCreateIssueReq{WorkspaceID: wsID, ActorID: actor, Title: title}
-}
-
-// facadeCreateIssueReq is a local type alias so callers don't need to
-// import channel/facade. Re-defining it here is cheaper than dragging
-// the import through every test file when only a couple of fields are
-// referenced.
-type facadeCreateIssueReq = struct {
-	WorkspaceID pgtype.UUID
-	ActorID     pgtype.UUID
-	Title       string
-	Description string
+	return facade.CreateIssueReq{WorkspaceID: wsID, ActorID: actor, Title: title}
 }

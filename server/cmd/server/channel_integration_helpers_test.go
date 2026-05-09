@@ -356,12 +356,12 @@ func (s *directIssueService) GetIssueByIdentifier(ctx context.Context, workspace
 	return facade.Issue{}, errors.New("directIssueService.GetIssueByIdentifier: not implemented for tests")
 }
 
-func (s *directIssueService) SetIssueStatus(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, status string) error {
+func (s *directIssueService) SetIssueStatus(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, status string, _ facade.ChannelMutationContext) error {
 	_, err := s.pool.Exec(ctx, `UPDATE issue SET status=$1 WHERE id=$2`, status, id)
 	return err
 }
 
-func (s *directIssueService) SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error {
+func (s *directIssueService) SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string, _ facade.ChannelMutationContext) error {
 	var assigneeID pgtype.UUID
 	clean := strings.TrimPrefix(assigneeIdentifier, "@")
 	if err := s.pool.QueryRow(ctx, `
@@ -380,19 +380,19 @@ func (s *directIssueService) SetIssueAssignee(ctx context.Context, id pgtype.UUI
 	return err
 }
 
-func (s *directIssueService) SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error {
+func (s *directIssueService) SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string, _ facade.ChannelMutationContext) error {
 	valid := map[string]bool{"urgent": true, "high": true, "medium": true, "low": true, "no_priority": true, "none": true}
 	if !valid[priority] {
-		return fmt.Errorf("优先级仅支持 urgent/high/medium/low/no_priority")
+		return fmt.Errorf("优先级仅支持 urgent/high/medium/low/none")
 	}
-	if priority == "none" {
-		priority = "no_priority"
+	if priority == "no_priority" {
+		priority = "none"
 	}
 	_, err := s.pool.Exec(ctx, `UPDATE issue SET priority = $1 WHERE id = $2`, priority, id)
 	return err
 }
 
-func (s *directIssueService) AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+func (s *directIssueService) AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, _ facade.ChannelMutationContext) error {
 	var labelID pgtype.UUID
 	var wsID pgtype.UUID
 	if err := s.pool.QueryRow(ctx, `SELECT workspace_id FROM issue WHERE id = $1`, id).Scan(&wsID); err != nil {
@@ -409,7 +409,7 @@ func (s *directIssueService) AddIssueLabel(ctx context.Context, id pgtype.UUID, 
 	return err
 }
 
-func (s *directIssueService) RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+func (s *directIssueService) RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, _ facade.ChannelMutationContext) error {
 	var wsID pgtype.UUID
 	if err := s.pool.QueryRow(ctx, `SELECT workspace_id FROM issue WHERE id = $1`, id).Scan(&wsID); err != nil {
 		return err

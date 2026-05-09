@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/channel"
@@ -36,26 +37,60 @@ func (f *fakeUserResolver) Resolve(_ context.Context, _, _ string) (inbound.Reso
 	return f.user, f.err
 }
 
+type fakeProjectValidator struct {
+	err error
+}
+
+func (f fakeProjectValidator) ValidateProjectInWorkspace(context.Context, pgtype.UUID, pgtype.UUID) error {
+	return f.err
+}
+
 type fakeIssueService struct {
-	created             []facade.CreateIssueReq
-	gotByID             []struct{ WorkspaceID pgtype.UUID; Identifier string }
-	setStatus           []struct{ ID pgtype.UUID; ActorID pgtype.UUID; Status string }
-	setAssignee         []struct{ ID pgtype.UUID; ActorID pgtype.UUID; AssigneeIdentifier string }
-	setPriority         []struct{ ID pgtype.UUID; ActorID pgtype.UUID; Priority string }
-	addLabel            []struct{ ID pgtype.UUID; ActorID pgtype.UUID; LabelName string }
-	removeLabel         []struct{ ID pgtype.UUID; ActorID pgtype.UUID; LabelName string }
-	listTodos           []struct{ WorkspaceID pgtype.UUID; UserID pgtype.UUID }
-	createReturn        facade.Issue
-	getByIdentifierRet  facade.Issue
-	listTodosReturn     []facade.Issue
-	createErr           error
-	getByIdentifierErr  error
-	setStatusErr        error
-	setAssigneeErr      error
-	setPriorityErr      error
-	addLabelErr         error
-	removeLabelErr      error
-	listTodosErr        error
+	created []facade.CreateIssueReq
+	gotByID []struct {
+		WorkspaceID pgtype.UUID
+		Identifier  string
+	}
+	setStatus []struct {
+		ID      pgtype.UUID
+		ActorID pgtype.UUID
+		Status  string
+	}
+	setAssignee []struct {
+		ID                 pgtype.UUID
+		ActorID            pgtype.UUID
+		AssigneeIdentifier string
+	}
+	setPriority []struct {
+		ID       pgtype.UUID
+		ActorID  pgtype.UUID
+		Priority string
+	}
+	addLabel []struct {
+		ID        pgtype.UUID
+		ActorID   pgtype.UUID
+		LabelName string
+	}
+	removeLabel []struct {
+		ID        pgtype.UUID
+		ActorID   pgtype.UUID
+		LabelName string
+	}
+	listTodos []struct {
+		WorkspaceID pgtype.UUID
+		UserID      pgtype.UUID
+	}
+	createReturn       facade.Issue
+	getByIdentifierRet facade.Issue
+	listTodosReturn    []facade.Issue
+	createErr          error
+	getByIdentifierErr error
+	setStatusErr       error
+	setAssigneeErr     error
+	setPriorityErr     error
+	addLabelErr        error
+	removeLabelErr     error
+	listTodosErr       error
 }
 
 func (f *fakeIssueService) CreateIssue(_ context.Context, req facade.CreateIssueReq) (facade.Issue, error) {
@@ -75,7 +110,7 @@ func (f *fakeIssueService) GetIssueByIdentifier(_ context.Context, wsID pgtype.U
 	return f.getByIdentifierRet, f.getByIdentifierErr
 }
 
-func (f *fakeIssueService) SetIssueStatus(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, status string) error {
+func (f *fakeIssueService) SetIssueStatus(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, status string, _ facade.ChannelMutationContext) error {
 	f.setStatus = append(f.setStatus, struct {
 		ID      pgtype.UUID
 		ActorID pgtype.UUID
@@ -84,7 +119,7 @@ func (f *fakeIssueService) SetIssueStatus(_ context.Context, id pgtype.UUID, act
 	return f.setStatusErr
 }
 
-func (f *fakeIssueService) SetIssueAssignee(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error {
+func (f *fakeIssueService) SetIssueAssignee(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string, _ facade.ChannelMutationContext) error {
 	f.setAssignee = append(f.setAssignee, struct {
 		ID                 pgtype.UUID
 		ActorID            pgtype.UUID
@@ -93,7 +128,7 @@ func (f *fakeIssueService) SetIssueAssignee(_ context.Context, id pgtype.UUID, a
 	return f.setAssigneeErr
 }
 
-func (f *fakeIssueService) SetIssuePriority(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error {
+func (f *fakeIssueService) SetIssuePriority(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string, _ facade.ChannelMutationContext) error {
 	f.setPriority = append(f.setPriority, struct {
 		ID       pgtype.UUID
 		ActorID  pgtype.UUID
@@ -102,7 +137,7 @@ func (f *fakeIssueService) SetIssuePriority(_ context.Context, id pgtype.UUID, a
 	return f.setPriorityErr
 }
 
-func (f *fakeIssueService) AddIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+func (f *fakeIssueService) AddIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, _ facade.ChannelMutationContext) error {
 	f.addLabel = append(f.addLabel, struct {
 		ID        pgtype.UUID
 		ActorID   pgtype.UUID
@@ -111,7 +146,7 @@ func (f *fakeIssueService) AddIssueLabel(_ context.Context, id pgtype.UUID, acto
 	return f.addLabelErr
 }
 
-func (f *fakeIssueService) RemoveIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error {
+func (f *fakeIssueService) RemoveIssueLabel(_ context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, _ facade.ChannelMutationContext) error {
 	f.removeLabel = append(f.removeLabel, struct {
 		ID        pgtype.UUID
 		ActorID   pgtype.UUID
@@ -145,10 +180,10 @@ type recordingChannel struct {
 	sendErr error
 }
 
-func (r *recordingChannel) Name() string                                               { return r.name }
-func (r *recordingChannel) Connect(_ context.Context) error                             { return nil }
-func (r *recordingChannel) Disconnect(_ context.Context) error                          { return nil }
-func (r *recordingChannel) Events() <-chan port.InboundEvent                            { return nil }
+func (r *recordingChannel) Name() string                       { return r.name }
+func (r *recordingChannel) Connect(_ context.Context) error    { return nil }
+func (r *recordingChannel) Disconnect(_ context.Context) error { return nil }
+func (r *recordingChannel) Events() <-chan port.InboundEvent   { return nil }
 func (r *recordingChannel) GetChatInfo(_ context.Context, _ string) (port.ChatInfo, error) {
 	return port.ChatInfo{}, nil
 }
@@ -313,6 +348,89 @@ func TestDispatchStep_CreateIssue_MissingTitle_ReturnsMissingParam(t *testing.T)
 	}
 	if !strings.Contains(recCh.sends[0].Text, "MISSING_PARAM") {
 		t.Errorf("reply missing MISSING_PARAM: %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_CreateIssue_ProjectOutsideWorkspaceRejected(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	cfg.ProjectValidator = fakeProjectValidator{err: pgx.ErrNoRows}
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentCreateIssue, map[string]string{
+		"title":      "登录页加载慢",
+		"project_id": "11111111-1111-1111-1111-111111111111",
+	})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(issueSvc.created) != 0 {
+		t.Fatalf("CreateIssue called %d times, want 0", len(issueSvc.created))
+	}
+	if len(recCh.sends) != 1 {
+		t.Fatalf("expected 1 send, got %d", len(recCh.sends))
+	}
+	if !strings.Contains(recCh.sends[0].Text, "MISSING_PARAM") {
+		t.Errorf("reply missing MISSING_PARAM: %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_CreateIssue_ProjectIDRequiresValidator(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentCreateIssue, map[string]string{
+		"title":      "登录页加载慢",
+		"project_id": "11111111-1111-1111-1111-111111111111",
+	})
+	_, _, err := step.Run(context.Background(), evt)
+	if err == nil {
+		t.Fatal("Run should return infrastructure error")
+	}
+	if !strings.Contains(err.Error(), "project validator is not configured") {
+		t.Fatalf("error = %q, want missing project validator", err.Error())
+	}
+	if len(issueSvc.created) != 0 {
+		t.Fatalf("CreateIssue called %d times, want 0", len(issueSvc.created))
+	}
+	if len(recCh.sends) != 0 {
+		t.Fatalf("expected no send on retryable error, got %d", len(recCh.sends))
+	}
+}
+
+func TestDispatchStep_CreateIssue_ProjectIDValidatedAndPassedThrough(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	cfg.ProjectValidator = fakeProjectValidator{}
+	issueSvc.createReturn = facade.Issue{
+		ID:         uuid(0xBC),
+		Identifier: "STA-41",
+		Title:      "登录页加载慢",
+		Status:     "todo",
+	}
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentCreateIssue, map[string]string{
+		"title":      "登录页加载慢",
+		"project_id": "11111111-1111-1111-1111-111111111111",
+	})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(issueSvc.created) != 1 {
+		t.Fatalf("CreateIssue called %d times, want 1", len(issueSvc.created))
+	}
+	if got := issueSvc.created[0].ProjectID; got != uuid(0x11) {
+		t.Fatalf("ProjectID = %v, want parsed project id", got)
+	}
+	if len(recCh.sends) != 1 {
+		t.Fatalf("expected 1 send, got %d", len(recCh.sends))
 	}
 }
 
@@ -747,11 +865,11 @@ func TestDispatchStep_SetAssignee_FacadeError_ReturnsInternalError(t *testing.T)
 		"assignee":  "@张三",
 	})
 	_, _, err := step.Run(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("Run should swallow error: %v", err)
+	if err == nil {
+		t.Fatal("Run should return infrastructure error")
 	}
-	if !strings.Contains(recCh.sends[0].Text, "INTERNAL_ERROR") {
-		t.Errorf("reply missing INTERNAL_ERROR: %q", recCh.sends[0].Text)
+	if len(recCh.sends) != 0 {
+		t.Fatalf("expected no send on retryable error, got %d", len(recCh.sends))
 	}
 }
 
@@ -760,7 +878,7 @@ func TestDispatchStep_SetPriority_FacadeError_ReturnsInternalError(t *testing.T)
 
 	cfg, issueSvc, _, recCh := buildDispatchConfig()
 	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x41), Identifier: "STA-8", Title: "t", Status: "todo"}
-	issueSvc.setPriorityErr = errors.New("优先级仅支持 urgent/high/medium/low/no_priority")
+	issueSvc.setPriorityErr = errors.New("优先级仅支持 urgent/high/medium/low/none")
 	step := inbound.NewDispatchStep(cfg)
 
 	evt := makeEvt(port.IntentSetPriority, map[string]string{
@@ -768,11 +886,11 @@ func TestDispatchStep_SetPriority_FacadeError_ReturnsInternalError(t *testing.T)
 		"priority":  "invalid",
 	})
 	_, _, err := step.Run(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("Run should swallow error: %v", err)
+	if err == nil {
+		t.Fatal("Run should return infrastructure error")
 	}
-	if !strings.Contains(recCh.sends[0].Text, "INTERNAL_ERROR") {
-		t.Errorf("reply missing INTERNAL_ERROR: %q", recCh.sends[0].Text)
+	if len(recCh.sends) != 0 {
+		t.Fatalf("expected no send on retryable error, got %d", len(recCh.sends))
 	}
 }
 
@@ -790,11 +908,11 @@ func TestDispatchStep_SetLabel_FacadeError_ReturnsInternalError(t *testing.T) {
 		"op":        "add",
 	})
 	_, _, err := step.Run(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("Run should swallow error: %v", err)
+	if err == nil {
+		t.Fatal("Run should return infrastructure error")
 	}
-	if !strings.Contains(recCh.sends[0].Text, "INTERNAL_ERROR") {
-		t.Errorf("reply missing INTERNAL_ERROR: %q", recCh.sends[0].Text)
+	if len(recCh.sends) != 0 {
+		t.Fatalf("expected no send on retryable error, got %d", len(recCh.sends))
 	}
 }
 
@@ -938,14 +1056,14 @@ func TestDispatchStep_CreateIssue_FacadeError_ReturnsInternalError(t *testing.T)
 
 	evt := makeEvt(port.IntentCreateIssue, map[string]string{"title": "test"})
 	_, d, err := step.Run(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("Run should not return error (swallowed): %v", err)
+	if err == nil {
+		t.Fatal("Run should return infrastructure error")
 	}
 	if d != inbound.DecisionContinue {
 		t.Errorf("decision = %v, want Continue", d)
 	}
-	if !strings.Contains(recCh.sends[0].Text, "INTERNAL_ERROR") {
-		t.Errorf("reply missing INTERNAL_ERROR: %q", recCh.sends[0].Text)
+	if len(recCh.sends) != 0 {
+		t.Fatalf("expected no send on retryable error, got %d", len(recCh.sends))
 	}
 }
 
@@ -962,8 +1080,8 @@ func TestDispatchStep_SendFailure_DoesNotAbortPipeline(t *testing.T) {
 
 	evt := makeEvt(port.IntentUnknown, map[string]string{})
 	_, d, err := step.Run(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("Run should not error on send failure: %v", err)
+	if err == nil {
+		t.Fatal("Run should return send error")
 	}
 	if d != inbound.DecisionContinue {
 		t.Errorf("decision = %v, want Continue", d)
@@ -988,8 +1106,8 @@ func TestDispatchStep_ChannelNotInRegistry_DoesNotAbort(t *testing.T) {
 
 	evt := makeEvt(port.IntentUnknown, map[string]string{})
 	_, d, err := step.Run(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("Run should not error: %v", err)
+	if err == nil {
+		t.Fatal("Run should return missing channel error")
 	}
 	if d != inbound.DecisionContinue {
 		t.Errorf("decision = %v, want Continue", d)
@@ -1009,11 +1127,11 @@ func TestDispatchStep_ChatBindingError_ReturnsInternalError(t *testing.T) {
 
 	evt := makeEvt(port.IntentCreateIssue, map[string]string{"title": "test"})
 	_, _, err := step.Run(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("Run should swallow error: %v", err)
+	if err == nil {
+		t.Fatal("Run should return infrastructure error")
 	}
-	if !strings.Contains(recCh.sends[0].Text, "INTERNAL_ERROR") {
-		t.Errorf("reply missing INTERNAL_ERROR: %q", recCh.sends[0].Text)
+	if len(recCh.sends) != 0 {
+		t.Fatalf("expected no send on retryable error, got %d", len(recCh.sends))
 	}
 }
 
@@ -1030,11 +1148,11 @@ func TestDispatchStep_UserResolverError_ReturnsInternalError(t *testing.T) {
 
 	evt := makeEvt(port.IntentCreateIssue, map[string]string{"title": "test"})
 	_, _, err := step.Run(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("Run should swallow error: %v", err)
+	if err == nil {
+		t.Fatal("Run should return infrastructure error")
 	}
-	if !strings.Contains(recCh.sends[0].Text, "INTERNAL_ERROR") {
-		t.Errorf("reply missing INTERNAL_ERROR: %q", recCh.sends[0].Text)
+	if len(recCh.sends) != 0 {
+		t.Fatalf("expected no send on retryable error, got %d", len(recCh.sends))
 	}
 }
 
@@ -1101,7 +1219,7 @@ func TestValidIdentifierFormat(t *testing.T) {
 		"STA-0",    // leading zero
 		"STA-",     // missing number
 		"-39",      // missing prefix
-		"中文-哈哈", // non-ASCII
+		"中文-哈哈",    // non-ASCII
 		"A-1",      // prefix too short
 		"ABCDEF-1", // prefix too long
 		"",         // empty

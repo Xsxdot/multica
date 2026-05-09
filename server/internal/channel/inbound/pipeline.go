@@ -130,6 +130,11 @@ func (p *Pipeline) SetObserver(observer Observer) {
 // the entire mechanism by which downstream Steps see upstream
 // modifications.
 func (p *Pipeline) Run(ctx context.Context, evt port.InboundEvent) (Outcome, error) {
+	_, outcome, err := p.RunEvent(ctx, evt)
+	return outcome, err
+}
+
+func (p *Pipeline) RunEvent(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, Outcome, error) {
 	var (
 		outcome Outcome
 		err     error
@@ -147,19 +152,19 @@ func (p *Pipeline) Run(ctx context.Context, evt port.InboundEvent) (Outcome, err
 				err = finalizeErr
 			}
 			p.observePipeline(evt, failed, time.Since(started), err)
-			return Outcome{}, err
+			return evt, Outcome{}, err
 		}
 		outcome = Outcome{Terminal: s.Name(), Decision: d}
 		p.observeStep(evt, s.Name(), d, time.Since(stepStarted), nil)
 		if d == DecisionSkip {
 			err = p.finalize(ctx, evt, outcome, nil, i)
 			p.observePipeline(evt, outcome, time.Since(started), err)
-			return outcome, err
+			return evt, outcome, err
 		}
 	}
 	err = p.finalize(ctx, evt, outcome, nil, len(p.steps)-1)
 	p.observePipeline(evt, outcome, time.Since(started), err)
-	return outcome, err
+	return evt, outcome, err
 }
 
 func (p *Pipeline) finalize(ctx context.Context, evt port.InboundEvent, outcome Outcome, runErr error, lastIdx int) error {

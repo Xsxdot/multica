@@ -14,8 +14,15 @@ WHERE provider = $1 AND external_chat_id = $2;
 -- name: CreateChannelChatBinding :one
 INSERT INTO channel_chat_binding (
     provider, external_chat_id, chat_type, workspace_id,
-    is_primary, bound_by_user_id, external_chat_name
-) VALUES ($1, $2, $3, $4, $5, $6, $7)
+    is_primary, bound_by_user_id, external_chat_name, default_project_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, sqlc.narg('default_project_id'))
+RETURNING *;
+
+-- name: UpdateChannelChatBindingDefaultProject :one
+UPDATE channel_chat_binding SET
+    default_project_id = sqlc.narg('default_project_id'),
+    updated_at = now()
+WHERE id = $1
 RETURNING *;
 
 -- name: DeleteChannelChatBinding :exec

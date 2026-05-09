@@ -93,6 +93,13 @@ INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, 
 VALUES ($1, $2, NULL, 'queued', $3, $4)
 RETURNING *;
 
+-- name: GetChannelIntentTaskByInboundEvent :one
+SELECT * FROM agent_task_queue
+WHERE COALESCE(context->>'type', '') = 'channel_intent'
+  AND context->>'channel_inbound_event_id' = sqlc.arg(inbound_event_id)::text
+ORDER BY created_at ASC
+LIMIT 1;
+
 -- name: LinkTaskToIssue :exec
 -- Attaches the issue a quick-create task produced back to the task row, once
 -- the agent has finished and the issue exists. Guarded by `issue_id IS NULL`

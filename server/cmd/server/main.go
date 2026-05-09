@@ -15,6 +15,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/channel"
 	feishuadapter "github.com/multica-ai/multica/server/internal/channel/adapter/feishu"
+	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	"github.com/multica-ai/multica/server/internal/channel/leader"
 	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
 	"github.com/multica-ai/multica/server/internal/channel/outbound"
@@ -34,6 +35,17 @@ var (
 )
 
 const feishuReconnectDelay = 5 * time.Second
+
+const (
+	defaultChannelInboundConversationLimit = 3
+	defaultChannelInboundGlobalLimit       = 5000
+	defaultChannelInboundWorkers           = 16
+	defaultChannelInboundClaimBatch        = 32
+	defaultChannelIntentTaskTimeout        = 15 * time.Minute
+	defaultChannelActionTaskTimeout        = 30 * time.Minute
+	defaultChannelClarificationTimeout     = 30 * time.Minute
+	defaultChannelInboundProcessingLease   = 5 * time.Minute
+)
 
 func newNamedRedisClient(base *redis.Options, suffix string) *redis.Client {
 	opts := *base
@@ -348,7 +360,25 @@ func main() {
 				} else {
 					slog.Info("channel attachment step disabled: storage is not configured")
 				}
-				pipeline := newChannelInboundPipeline(pool, channelRegistry, pipelineOpt)
+				components := newChannelInboundRuntimeComponents(pool, channelRegistry, pipelineOpt)
+				inboundRuntime := inbound.NewRuntime(inbound.RuntimeConfig{
+					Store:                inbound.NewDBInboundEventStore(pool),
+					PrePipeline:          components.PrePipeline,
+					PostPipeline:         components.PostPipeline,
+					RuleResolvers:        components.RuleResolvers,
+					ChatIntent:           components.ChatIntent,
+					ReplySink:            inbound.NewRegistryReplySink(channelRegistry),
+					Workers:              envPositiveInt("CHANNEL_INBOUND_WORKERS", defaultChannelInboundWorkers),
+					ClaimBatch:           envPositiveInt("CHANNEL_INBOUND_CLAIM_BATCH", defaultChannelInboundClaimBatch),
+					IntentTaskTimeout:    envDuration("CHANNEL_INTENT_TASK_TIMEOUT", defaultChannelIntentTaskTimeout),
+					ActionTaskTimeout:    envDuration("CHANNEL_ACTION_TASK_TIMEOUT", defaultChannelActionTaskTimeout),
+					ClarificationTimeout: envDuration("CHANNEL_CLARIFICATION_TIMEOUT", defaultChannelClarificationTimeout),
+					ProcessingLease:      envDuration("CHANNEL_INBOUND_PROCESSING_LEASE", defaultChannelInboundProcessingLease),
+				})
+				runtimeCtx, runtimeCancel := context.WithCancel(adapterCtx)
+				go inboundRuntime.Run(runtimeCtx)
+				conversationLimit := envPositiveInt("CHANNEL_INBOUND_CONVERSATION_LIMIT", defaultChannelInboundConversationLimit)
+				globalLimit := envPositiveInt("CHANNEL_INBOUND_GLOBAL_PENDING_LIMIT", defaultChannelInboundGlobalLimit)
 				slog.Info("channel leader: feishu adapter connected", "app_id", feishuAppID)
 
 				reconnect := false
@@ -362,28 +392,33 @@ func main() {
 							reconnect = true
 							goto reconnectFeishu
 						}
-						outcome, err := pipeline.Run(adapterCtx, evt)
+						result, err := inboundRuntime.Accept(adapterCtx, evt, inbound.AcceptOptions{
+							ConversationLimit: conversationLimit,
+							GlobalLimit:       globalLimit,
+						})
 						if err != nil {
-							slog.Error("channel inbound pipeline failed",
+							slog.Error("channel inbound accept failed",
 								"channel", evt.ChannelName,
 								"chat_id", evt.ChatID,
 								"event_id", evt.EventID,
-								"terminal", outcome.Terminal,
 								"error", err,
 							)
 							continue
 						}
-						slog.Debug("channel inbound pipeline completed",
+						slog.Debug("channel inbound event accepted",
 							"channel", evt.ChannelName,
 							"chat_id", evt.ChatID,
 							"event_id", evt.EventID,
-							"terminal", outcome.Terminal,
-							"decision", outcome.Decision,
+							"row_id", result.EventID,
+							"duplicate", result.Duplicate,
+							"rejected_backpressure", result.RejectedBackpressure,
+							"clarification_consumed", result.ClarificationConsumed,
 						)
 					}
 				}
 
 			reconnectFeishu:
+				runtimeCancel()
 				channelAdapterReady.Store(false)
 				channelmetrics.M.SetAdapterConnected("feishu", false)
 				disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 5*time.Second)

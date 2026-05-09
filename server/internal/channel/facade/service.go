@@ -25,11 +25,11 @@ type IssueService interface {
 	CreateIssue(ctx context.Context, req CreateIssueReq) (Issue, error)
 	GetIssue(ctx context.Context, id pgtype.UUID) (Issue, error)
 	GetIssueByIdentifier(ctx context.Context, workspaceID pgtype.UUID, identifier string) (Issue, error)
-	SetIssueStatus(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, status string) error
-	SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string) error
-	SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string) error
-	AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error
-	RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string) error
+	SetIssueStatus(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, status string, action ChannelMutationContext) error
+	SetIssueAssignee(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, assigneeIdentifier string, action ChannelMutationContext) error
+	SetIssuePriority(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, priority string, action ChannelMutationContext) error
+	AddIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, action ChannelMutationContext) error
+	RemoveIssueLabel(ctx context.Context, id pgtype.UUID, actorID pgtype.UUID, labelName string, action ChannelMutationContext) error
 	ListMyTodos(ctx context.Context, workspaceID, userID pgtype.UUID) ([]Issue, error)
 }
 

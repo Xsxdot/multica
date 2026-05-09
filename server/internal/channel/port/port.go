@@ -101,18 +101,19 @@ const (
 //     re-marshal it without a re-encoding step (and so a nil payload is
 //     trivially distinguishable from an empty object).
 type InboundEvent struct {
-	ChannelName string
-	EventID     string
-	Type        EventType
-	ChatID      string
-	ChatType    ChatType
-	SenderID    string
-	SenderName  string
-	Text        string
-	MessageID   string
-	Intent      InboundIntent
-	Attachments []AttachmentInfo
-	RawPayload  json.RawMessage
+	ChannelName    string
+	EventID        string
+	Type           EventType
+	ChatID         string
+	ChatType       ChatType
+	SenderID       string
+	SenderName     string
+	Text           string
+	MessageID      string
+	RuntimeEventID string `json:"-"`
+	Intent         InboundIntent
+	Attachments    []AttachmentInfo
+	RawPayload     json.RawMessage
 }
 
 // AttachmentInfo carries metadata about a non-text attachment (image, file,

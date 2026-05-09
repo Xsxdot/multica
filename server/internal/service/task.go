@@ -222,30 +222,32 @@ const QuickCreateContextType = "quick_create"
 // channel message, but they are not user-visible chat sessions and must not
 // perform business side effects directly.
 type ChannelIntentContext struct {
-	Type        string `json:"type"`
-	Prompt      string `json:"prompt"`
-	Message     string `json:"message"`
-	WorkspaceID string `json:"workspace_id"`
-	RequesterID string `json:"requester_id,omitempty"`
-	Channel     string `json:"channel,omitempty"`
-	ChatID      string `json:"chat_id,omitempty"`
-	ChatType    string `json:"chat_type,omitempty"`
-	SenderID    string `json:"sender_id,omitempty"`
-	SenderName  string `json:"sender_name,omitempty"`
+	Type           string `json:"type"`
+	Prompt         string `json:"prompt"`
+	Message        string `json:"message"`
+	WorkspaceID    string `json:"workspace_id"`
+	RequesterID    string `json:"requester_id,omitempty"`
+	Channel        string `json:"channel,omitempty"`
+	ChatID         string `json:"chat_id,omitempty"`
+	ChatType       string `json:"chat_type,omitempty"`
+	SenderID       string `json:"sender_id,omitempty"`
+	SenderName     string `json:"sender_name,omitempty"`
+	InboundEventID string `json:"channel_inbound_event_id,omitempty"`
 }
 
 // ChannelIntentContextType marks an internal channel intent classification job.
 const ChannelIntentContextType = "channel_intent"
 
 type ChannelIntentTaskParams struct {
-	Prompt      string
-	Message     string
-	RequesterID string
-	Channel     string
-	ChatID      string
-	ChatType    string
-	SenderID    string
-	SenderName  string
+	Prompt         string
+	Message        string
+	RequesterID    string
+	Channel        string
+	ChatID         string
+	ChatType       string
+	SenderID       string
+	SenderName     string
+	InboundEventID string
 }
 
 // EnqueueQuickCreateTask creates a queued task that has no issue / chat /
@@ -319,16 +321,17 @@ func (s *TaskService) EnqueueChannelIntentTask(ctx context.Context, workspaceID 
 	}
 
 	payload := ChannelIntentContext{
-		Type:        ChannelIntentContextType,
-		Prompt:      params.Prompt,
-		Message:     params.Message,
-		WorkspaceID: util.UUIDToString(workspaceID),
-		RequesterID: params.RequesterID,
-		Channel:     params.Channel,
-		ChatID:      params.ChatID,
-		ChatType:    params.ChatType,
-		SenderID:    params.SenderID,
-		SenderName:  params.SenderName,
+		Type:           ChannelIntentContextType,
+		Prompt:         params.Prompt,
+		Message:        params.Message,
+		WorkspaceID:    util.UUIDToString(workspaceID),
+		RequesterID:    params.RequesterID,
+		Channel:        params.Channel,
+		ChatID:         params.ChatID,
+		ChatType:       params.ChatType,
+		SenderID:       params.SenderID,
+		SenderName:     params.SenderName,
+		InboundEventID: params.InboundEventID,
 	}
 	contextJSON, err := json.Marshal(payload)
 	if err != nil {

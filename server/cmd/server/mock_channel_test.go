@@ -303,11 +303,12 @@ func newProductionDispatchStep(
 	issueSvc facade.IssueService,
 ) inbound.Step {
 	return inbound.NewDispatchStep(inbound.DispatchConfig{
-		IssueFacade:   facade.NewIssueFacade(issueSvc),
-		CommentFacade: facade.NewCommentFacade(noopCommentService{}),
-		Registry:      registry,
-		ChatBinding:   newDBChatBindingLookup(pool),
-		UserResolver:  newDBUserInfoResolver(pool),
+		IssueFacade:      facade.NewIssueFacade(issueSvc),
+		CommentFacade:    facade.NewCommentFacade(noopCommentService{}),
+		Registry:         registry,
+		ChatBinding:      newDBChatBindingLookup(pool),
+		UserResolver:     newDBUserInfoResolver(pool),
+		ProjectValidator: inbound.NewDBProjectWorkspaceValidator(pool),
 	})
 }
 
