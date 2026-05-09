@@ -13,12 +13,16 @@ import (
 type fakeNotificationStore struct {
 	claimed   []OutboxNotification
 	reclaimed []OutboxNotification
+	claimErr  error
 	sent      []pgtype.UUID
 	retried   []pgtype.UUID
 	dead      []pgtype.UUID
 }
 
 func (f *fakeNotificationStore) ClaimDue(context.Context, int32) ([]OutboxNotification, error) {
+	if f.claimErr != nil {
+		return nil, f.claimErr
+	}
 	return f.claimed, nil
 }
 
@@ -124,6 +128,27 @@ func TestOutboxWorker_ReclaimStaleProcessing(t *testing.T) {
 
 	if len(sender.calls) != 1 {
 		t.Fatalf("send calls = %d, want 1", len(sender.calls))
+	}
+	if len(store.sent) != 1 {
+		t.Fatalf("sent ids = %d, want 1", len(store.sent))
+	}
+}
+
+func TestOutboxWorker_ProcessesReclaimedRowsEvenWhenClaimFails(t *testing.T) {
+	t.Parallel()
+
+	userID := pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}
+	reclaimed := []OutboxNotification{
+		{ID: pgtype.UUID{Bytes: [16]byte{0x61}, Valid: true}, Provider: "feishu", EventKind: "issue_assigned", TargetUserID: userID, TargetExternalUserID: "ou_1", Title: "R", MaxAttempts: 3},
+	}
+	store := &fakeNotificationStore{reclaimed: reclaimed, claimErr: errors.New("claim fails")}
+	sender := &mockRetrySender{}
+	worker := NewOutboxWorker(store, sender)
+
+	worker.processBatch(context.Background())
+
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1 (reclaimed rows should still be processed)", len(sender.calls))
 	}
 	if len(store.sent) != 1 {
 		t.Fatalf("sent ids = %d, want 1", len(store.sent))

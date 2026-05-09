@@ -256,6 +256,75 @@ func TestDeleteChannelBinding_OtherUserForbidden(t *testing.T) {
 	}
 }
 
+func TestDeleteChannelBinding_LastBindingAllowed(t *testing.T) {
+	// Create a fresh workspace with exactly one binding.
+	var wsID string
+	if err := testPool.QueryRow(t.Context(), `
+		INSERT INTO workspace (name, slug, description, issue_prefix)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id
+	`, "Delete Last Test", "del-last-test", "Temporary workspace", "DLT").Scan(&wsID); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(t.Context(), `DELETE FROM workspace WHERE id = $1`, wsID)
+	})
+
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO member (workspace_id, user_id, role)
+		VALUES ($1, $2, 'owner')
+	`, wsID, testUserID); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+
+	bindingID := createTestBinding(t, wsID, "feishu", "oc_test_last", "group", true, testUserID)
+
+	w := httptest.NewRecorder()
+	req := newRequest("DELETE", "/api/workspaces/"+wsID+"/channel-bindings/"+bindingID, nil)
+	req = withURLParam(req, "id", wsID)
+	req = withURLParam(req, "bindingId", bindingID)
+	testHandler.DeleteChannelBinding(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 for last binding deletion, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDeleteChannelBinding_PrimaryWithOthersBlocked(t *testing.T) {
+	// Create a fresh workspace with two bindings for the same provider.
+	var wsID string
+	if err := testPool.QueryRow(t.Context(), `
+		INSERT INTO workspace (name, slug, description, issue_prefix)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id
+	`, "Delete Primary Test", "del-primary-test", "Temporary workspace", "DPT").Scan(&wsID); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(t.Context(), `DELETE FROM workspace WHERE id = $1`, wsID)
+	})
+
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO member (workspace_id, user_id, role)
+		VALUES ($1, $2, 'owner')
+	`, wsID, testUserID); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+
+	primaryID := createTestBinding(t, wsID, "feishu", "oc_test_pri", "group", true, testUserID)
+	createTestBinding(t, wsID, "feishu", "oc_test_sec", "group", false, testUserID)
+
+	w := httptest.NewRecorder()
+	req := newRequest("DELETE", "/api/workspaces/"+wsID+"/channel-bindings/"+primaryID, nil)
+	req = withURLParam(req, "id", wsID)
+	req = withURLParam(req, "bindingId", primaryID)
+	testHandler.DeleteChannelBinding(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when deleting primary with other bindings, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SetPrimaryChannelBinding
 // ---------------------------------------------------------------------------

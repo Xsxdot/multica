@@ -110,7 +110,8 @@ RETURNING id, provider, event_kind, target_user_id, target_external_user_id,
 func (s *DBNotificationStore) ReclaimStaleProcessing(ctx context.Context, limit int32, staleAfter time.Duration) ([]OutboxNotification, error) {
 	const q = `
 UPDATE channel_outbound_notification SET
-    status = 'pending',
+    status = 'processing',
+    next_attempt_at = now() + interval '5 minutes',
     updated_at = now()
 WHERE id IN (
     SELECT id FROM channel_outbound_notification
@@ -123,11 +124,11 @@ WHERE id IN (
 RETURNING id, provider, event_kind, target_user_id, target_external_user_id,
           title, body, attempts, max_attempts
 `
-	return s.queryNotifications(ctx, q, limit)
+	return s.queryNotifications(ctx, q, limit, pgInterval(staleAfter))
 }
 
-func (s *DBNotificationStore) queryNotifications(ctx context.Context, q string, limit int32, args ...any) ([]OutboxNotification, error) {
-	rows, err := s.db.Query(ctx, q, append(args, limit)...)
+func (s *DBNotificationStore) queryNotifications(ctx context.Context, q string, args ...any) ([]OutboxNotification, error) {
+	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +274,7 @@ func (w *OutboxWorker) processBatch(ctx context.Context) {
 	if err != nil {
 		channelmetrics.M.RecordOutboundOutbox("unknown", "claim_error", 1)
 		slog.Error("outbox worker: claim failed", "error", err)
-		return
+		rows = nil
 	}
 	groups := groupNotifications(append(reclaimed, rows...))
 	for _, g := range groups {

@@ -356,21 +356,23 @@ func (h *Handler) DeleteChannelBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Prevent deleting the only primary binding for a workspace/provider
+	// Prevent deleting the primary binding while other bindings for the
+	// same provider still exist — zero bindings is a valid state, but
+	// orphaned non-primary bindings are not.
 	if binding.IsPrimary {
 		bindings, err := h.Queries.ListChannelChatBindings(r.Context(), binding.WorkspaceID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to check primary bindings")
 			return
 		}
-		primaryCount := 0
+		providerBindingCount := 0
 		for _, b := range bindings {
-			if b.Provider == binding.Provider && b.IsPrimary {
-				primaryCount++
+			if b.Provider == binding.Provider {
+				providerBindingCount++
 			}
 		}
-		if primaryCount <= 1 {
-			writeError(w, http.StatusBadRequest, "cannot delete the only primary binding for this workspace")
+		if providerBindingCount > 1 {
+			writeError(w, http.StatusBadRequest, "cannot delete primary binding: promote another binding first")
 			return
 		}
 	}

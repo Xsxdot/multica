@@ -39,6 +39,11 @@ type fakeDedupStore struct {
 	// more times than there are responses, the test fails with a clear
 	// "ran out of fixtures" message via the helper next() below.
 	responses []dedupResp
+
+	// failMarkErr, when non-nil, causes MarkInboundEventFailed to return
+	// this error instead of nil — used to exercise Pipeline.finalize error
+	// joining.
+	failMarkErr error
 }
 
 type dedupCall struct {
@@ -71,7 +76,7 @@ func (f *fakeDedupStore) MarkInboundEventFailed(_ context.Context, provider, eve
 		dedupCall
 		LastError string
 	}{dedupCall: dedupCall{Provider: provider, EventID: eventID}, LastError: lastError})
-	return nil
+	return f.failMarkErr
 }
 
 // ---------------------------------------------------------------------------
@@ -277,5 +282,35 @@ func TestPipeline_DedupFinalizer_MarksFailedOnError(t *testing.T) {
 	}
 	if store.failed[0].LastError == "" {
 		t.Fatal("failed mark should keep last error")
+	}
+}
+
+func TestPipeline_DedupFinalizer_ReturnsBothErrors(t *testing.T) {
+	t.Parallel()
+
+	stepErr := errors.New("dispatch failed")
+	markErr := errors.New("dedup mark failed")
+	store := &fakeDedupStore{
+		responses:   []dedupResp{{Inserted: true}},
+		failMarkErr: markErr,
+	}
+	var log []string
+	p := inbound.NewPipeline(
+		inbound.NewDedupStep(store),
+		&spyStep{name: "dispatch", decision: inbound.DecisionContinue, err: stepErr, log: &log},
+	)
+
+	_, err := p.Run(context.Background(), port.InboundEvent{ChannelName: "feishu", EventID: "evt-both"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, stepErr) {
+		t.Errorf("errors.Is(err, stepErr) = false, want true; err = %v", err)
+	}
+	if !errors.Is(err, markErr) {
+		t.Errorf("errors.Is(err, markErr) = false, want true; err = %v", err)
+	}
+	if len(store.failed) != 1 {
+		t.Fatalf("failed marks = %d, want 1", len(store.failed))
 	}
 }

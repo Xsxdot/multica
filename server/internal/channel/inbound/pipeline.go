@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/channel/port"
@@ -165,14 +166,21 @@ func (p *Pipeline) finalize(ctx context.Context, evt port.InboundEvent, outcome 
 	if lastIdx < 0 {
 		return runErr
 	}
+	var finalizerErr error
 	for i := lastIdx; i >= 0; i-- {
 		f, ok := p.steps[i].(Finalizer)
 		if !ok {
 			continue
 		}
-		if err := f.Finalize(ctx, evt, outcome, runErr); err != nil && runErr == nil {
-			return err
+		if err := f.Finalize(ctx, evt, outcome, runErr); err != nil {
+			finalizerErr = errors.Join(finalizerErr, err)
 		}
+	}
+	if finalizerErr != nil {
+		if runErr != nil {
+			return errors.Join(runErr, finalizerErr)
+		}
+		return finalizerErr
 	}
 	return runErr
 }
