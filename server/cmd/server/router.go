@@ -72,6 +72,7 @@ type RouterOptions struct {
 	HTTPMetrics  *obsmetrics.HTTPMetrics
 	DaemonHub    *daemonws.Hub
 	DaemonWakeup service.TaskWakeupNotifier
+	Storage      storage.Storage
 }
 
 func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analyticsClient analytics.Client, rdb *redis.Client, opts RouterOptions) chi.Router {
@@ -82,16 +83,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		daemonHub = daemonws.NewHub()
 	}
 
-	// Initialize storage with S3 as primary, fallback to local
-	var store storage.Storage
-	s3 := storage.NewS3StorageFromEnv()
-	if s3 != nil {
-		store = s3
-	} else {
-		local := storage.NewLocalStorageFromEnv()
-		if local != nil {
-			store = local
-		}
+	store := opts.Storage
+	if store == nil {
+		store = newStorageFromEnv()
 	}
 
 	cfSigner := auth.NewCloudFrontSignerFromEnv()

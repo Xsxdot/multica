@@ -390,29 +390,25 @@ func TestProcessOne_NoExternalUserID_MarksDead(t *testing.T) {
 
 // --- Helper function tests ---
 
-// C4 gate: RetryWorkerEnabled() defaults to false (refuses to start
-// without explicit env opt-in + real RetrySender wiring). main.go must
-// gate retry worker startup on this — the noop sender previously deleted
-// every pending failure within seconds; safe default is "off".
-func TestRetryWorkerEnabled_DefaultDisabled(t *testing.T) {
+func TestRetryWorkerEnabled_DefaultEnabled(t *testing.T) {
 	t.Setenv("CHANNEL_RETRY_WORKER_ENABLED", "")
-	if RetryWorkerEnabled() {
-		t.Error("expected RetryWorkerEnabled()=false when env unset")
-	}
-}
-
-func TestRetryWorkerEnabled_OptIn(t *testing.T) {
-	t.Setenv("CHANNEL_RETRY_WORKER_ENABLED", "true")
 	if !RetryWorkerEnabled() {
-		t.Error("expected RetryWorkerEnabled()=true when env=true")
+		t.Error("expected RetryWorkerEnabled()=true when env unset")
 	}
 }
 
-func TestRetryWorkerEnabled_RejectsAmbiguousValues(t *testing.T) {
+func TestRetryWorkerEnabled_ExplicitFalseDisables(t *testing.T) {
+	t.Setenv("CHANNEL_RETRY_WORKER_ENABLED", "false")
+	if RetryWorkerEnabled() {
+		t.Error("expected RetryWorkerEnabled()=false when env=false")
+	}
+}
+
+func TestRetryWorkerEnabled_NonFalseValuesStayEnabled(t *testing.T) {
 	for _, v := range []string{"1", "yes", "TRUE", "True", "on"} {
 		t.Setenv("CHANNEL_RETRY_WORKER_ENABLED", v)
-		if RetryWorkerEnabled() {
-			t.Errorf("expected RetryWorkerEnabled()=false for env=%q (only literal \"true\" enables)", v)
+		if !RetryWorkerEnabled() {
+			t.Errorf("expected RetryWorkerEnabled()=true for env=%q (only literal \"false\" disables)", v)
 		}
 	}
 }

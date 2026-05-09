@@ -275,6 +275,7 @@ func main() {
 	feishuEncryptKey := os.Getenv("FEISHU_ENCRYPT_KEY")
 	feishuVerifyToken := os.Getenv("FEISHU_VERIFY_TOKEN")
 	feishuEnabled := feishuAppID != "" && feishuAppSecret != ""
+	channelStorage := newStorageFromEnv()
 
 	// adapterCancel is cancelled on leader release to stop the WS client.
 	var adapterCancel context.CancelFunc
@@ -330,7 +331,16 @@ func main() {
 		}
 		channelAdapterReady.Store(true)
 
-		pipeline := newChannelInboundPipeline(pool, channelRegistry)
+		var pipelineOpts []channelPipelineOptions
+		if channelStorage != nil {
+			pipelineOpts = append(pipelineOpts, channelPipelineOptions{
+				Storage:        channelStorage,
+				FileDownloader: feishuadapter.NewRealFileDownloader(sdkClient.APIClient()),
+			})
+		} else {
+			slog.Info("channel attachment step disabled: storage is not configured")
+		}
+		pipeline := newChannelInboundPipeline(pool, channelRegistry, pipelineOpts...)
 		go func() {
 			for {
 				select {
@@ -361,25 +371,6 @@ func main() {
 				}
 			}
 		}()
-
-		// TODO[STA-69-R1]: Wire attachment pipeline step.
-		// Add an attachment step between intent-recog and dispatch once the
-		// storage service and attachment facade are available in this wiring:
-		//
-		//   inbound.NewAttachmentStep(inbound.AttachmentConfig{
-		//       Storage:           storageSvc,
-		//       AttachmentQuerier: attachmentFacade, // facade.NewAttachmentFacade(attachmentSvc)
-		//       FileDownloader:    feishuadapter.NewRealFileDownloader(sdkClient),
-		//       Registry:          channelRegistry,
-		//       ChatBinding:       chatBindingStore,
-		//       UserResolver:      userResolver,
-		//       IssueFacade:       issueFacade,
-		//   })
-		//
-		// This requires:
-		//   1. An AttachmentService implementation (internal/service/attachment.go)
-		//   2. Storage service wiring in main.go
-		//   3. Pipeline instantiation (currently only in test helpers)
 
 		slog.Info("channel leader: feishu adapter connected", "app_id", feishuAppID)
 		return nil
@@ -477,6 +468,7 @@ func main() {
 		HTTPMetrics:  httpMetrics,
 		DaemonHub:    daemonHub,
 		DaemonWakeup: daemonWakeup,
+		Storage:      channelStorage,
 	})
 
 	srv := &http.Server{
@@ -497,15 +489,22 @@ func main() {
 	go runDBStatsLogger(sweepCtx, pool)
 
 	// Start outbound retry + cleanup workers (T15).
-	// Retry worker is explicitly gated by CHANNEL_RETRY_WORKER_ENABLED=true.
 	var retryCancel context.CancelFunc
-	if outbound.RetryWorkerEnabled() {
+	if !feishuEnabled {
+		slog.Info("channel outbound retry worker disabled: Feishu credentials are not configured")
+	} else if outbound.RetryWorkerEnabled() {
 		retryCtx, cancel := context.WithCancel(context.Background())
 		retryCancel = cancel
 		retryWorker := outbound.NewRetryWorker(pool, queries, newRegistryRetrySender(channelRegistry))
 		retryWorker.SetActiveFunc(channelAdapterReady.Load)
 		go retryWorker.Run(retryCtx)
-		slog.Info("channel outbound retry worker started")
+		if os.Getenv("CHANNEL_RETRY_WORKER_ENABLED") == "" {
+			slog.Info("channel outbound retry worker started by default")
+		} else {
+			slog.Info("channel outbound retry worker started by env")
+		}
+	} else {
+		slog.Info("channel outbound retry worker disabled by CHANNEL_RETRY_WORKER_ENABLED=false")
 	}
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	cleanupWorker := outbound.NewCleanupWorker(queries)

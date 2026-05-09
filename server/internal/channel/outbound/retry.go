@@ -122,10 +122,10 @@ func (w *RetryWorker) isActive() bool {
 }
 
 // RetryWorkerEnabled reports whether the retry worker should start.
-// Controlled by CHANNEL_RETRY_WORKER_ENABLED env var (default: false).
-// Must be explicitly enabled after the real RetrySender is wired.
+// CHANNEL_RETRY_WORKER_ENABLED=false explicitly disables it; any other value,
+// including unset, keeps the production default enabled.
 func RetryWorkerEnabled() bool {
-	return os.Getenv("CHANNEL_RETRY_WORKER_ENABLED") == "true"
+	return os.Getenv("CHANNEL_RETRY_WORKER_ENABLED") != "false"
 }
 
 // Run starts the retry loop. It blocks until ctx is cancelled.

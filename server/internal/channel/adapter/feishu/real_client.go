@@ -124,6 +124,10 @@ func (rc *RealClient) Subscribe() <-chan RawEvent {
 	return rc.events
 }
 
+func (rc *RealClient) APIClient() *lark.Client {
+	return rc.apiClient
+}
+
 // BotUserID returns the open_id of the bot account. Blocks until the
 // bot info has been fetched (i.e. until Start completes successfully).
 func (rc *RealClient) BotUserID() string {
