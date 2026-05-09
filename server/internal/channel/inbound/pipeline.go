@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"time"
 
 	"github.com/multica-ai/multica/server/internal/channel/port"
 )
@@ -62,6 +63,13 @@ type Outcome struct {
 	Decision Decision
 }
 
+// Observer receives low-cardinality pipeline telemetry. Implementations must
+// not block the hot inbound path.
+type Observer interface {
+	StepDone(evt port.InboundEvent, step string, decision Decision, duration time.Duration, err error)
+	PipelineDone(evt port.InboundEvent, outcome Outcome, duration time.Duration, err error)
+}
+
 // Pipeline runs a fixed, ordered list of Steps over a single
 // InboundEvent. The list is captured at construction time and is
 // immutable thereafter; Pipeline is therefore safe for concurrent use
@@ -72,7 +80,8 @@ type Outcome struct {
 // implementations against the same constructor — the orchestration
 // here does not need to change when intent recognition lands.
 type Pipeline struct {
-	steps []Step
+	steps    []Step
+	observer Observer
 }
 
 // NewPipeline composes the supplied steps into a Pipeline. Steps run in
@@ -85,6 +94,10 @@ func NewPipeline(steps ...Step) *Pipeline {
 	cp := make([]Step, len(steps))
 	copy(cp, steps)
 	return &Pipeline{steps: cp}
+}
+
+func (p *Pipeline) SetObserver(observer Observer) {
+	p.observer = observer
 }
 
 // Run executes each Step in order, threading the (possibly mutated)
@@ -117,15 +130,35 @@ func (p *Pipeline) Run(ctx context.Context, evt port.InboundEvent) (Outcome, err
 		err     error
 		d       Decision
 	)
+	started := time.Now()
 	for _, s := range p.steps {
+		stepStarted := time.Now()
 		evt, d, err = s.Run(ctx, evt)
 		if err != nil {
+			failed := Outcome{Terminal: s.Name(), Decision: d}
+			p.observeStep(evt, s.Name(), d, time.Since(stepStarted), err)
+			p.observePipeline(evt, failed, time.Since(started), err)
 			return Outcome{}, err
 		}
 		outcome = Outcome{Terminal: s.Name(), Decision: d}
+		p.observeStep(evt, s.Name(), d, time.Since(stepStarted), nil)
 		if d == DecisionSkip {
+			p.observePipeline(evt, outcome, time.Since(started), nil)
 			return outcome, nil
 		}
 	}
+	p.observePipeline(evt, outcome, time.Since(started), nil)
 	return outcome, nil
+}
+
+func (p *Pipeline) observeStep(evt port.InboundEvent, step string, decision Decision, duration time.Duration, err error) {
+	if p.observer != nil {
+		p.observer.StepDone(evt, step, decision, duration, err)
+	}
+}
+
+func (p *Pipeline) observePipeline(evt port.InboundEvent, outcome Outcome, duration time.Duration, err error) {
+	if p.observer != nil {
+		p.observer.PipelineDone(evt, outcome, duration, err)
+	}
 }

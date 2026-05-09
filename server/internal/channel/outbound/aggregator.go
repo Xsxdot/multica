@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -38,6 +39,10 @@ func registerMetrics() {
 	})
 }
 
+func AggregatorCollectors() []prometheus.Collector {
+	return []prometheus.Collector{aggregatedTotal, droppedTotal}
+}
+
 // CardSender is the interface used by the Aggregator to deliver merged
 // card messages. The channel adapter (or a thin wrapper) typically
 // implements this. SendCard returns an error on transient failures so
@@ -51,11 +56,13 @@ type pendingCard struct {
 	externalUserID string
 	card           port.OutboundCardMessage
 	meta           AggregationMeta
+	count          int
 }
 
 // AggregationMeta preserves the per-user notification identity while cards
 // wait in the aggregation buffer.
 type AggregationMeta struct {
+	Provider     string
 	EventKind    string
 	TargetUserID pgtype.UUID
 }
@@ -109,11 +116,13 @@ func aggregationKey(externalUserID string, meta AggregationMeta) string {
 // sendCardSafe calls sender.SendCard with panic recovery and error
 // handling. On error or panic the notification is counted as dropped
 // and logged. (C1-new, R4-new)
-func sendCardSafe(sender CardSender, externalUserID string, card port.OutboundCardMessage, meta AggregationMeta) {
+func sendCardSafe(sender CardSender, externalUserID string, card port.OutboundCardMessage, meta AggregationMeta) bool {
 	var err error
+	ok := true
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
+				ok = false
 				slog.Error("outbound aggregator: send card panic",
 					"user_id", externalUserID,
 					"title", card.Title,
@@ -127,6 +136,7 @@ func sendCardSafe(sender CardSender, externalUserID string, card port.OutboundCa
 		err = sender.SendCard(externalUserID, card, meta)
 	}()
 	if err != nil {
+		ok = false
 		slog.Error("outbound aggregator: send card failed",
 			"user_id", externalUserID,
 			"title", card.Title,
@@ -135,6 +145,7 @@ func sendCardSafe(sender CardSender, externalUserID string, card port.OutboundCa
 		droppedTotal.Inc()
 		// TODO(T15): enqueue to failure queue for retry
 	}
+	return ok
 }
 
 // Add enqueues a notification for the given external user. If bypass is
@@ -148,7 +159,11 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 // AddWithMeta enqueues a notification with failure/audit metadata.
 func (a *Aggregator) AddWithMeta(externalUserID string, card port.OutboundCardMessage, meta AggregationMeta, bypass bool) {
 	if bypass {
-		sendCardSafe(a.sender, externalUserID, card, meta)
+		if sendCardSafe(a.sender, externalUserID, card, meta) {
+			channelmetrics.M.RecordOutboundAggregate(meta.Provider, meta.EventKind, "sent", 1)
+		} else {
+			channelmetrics.M.RecordOutboundAggregate(meta.Provider, meta.EventKind, "error", 1)
+		}
 		aggregatedTotal.Inc()
 		return
 	}
@@ -158,6 +173,7 @@ func (a *Aggregator) AddWithMeta(externalUserID string, card port.OutboundCardMe
 	if a.closed {
 		a.mu.Unlock()
 		droppedTotal.Inc()
+		channelmetrics.M.RecordOutboundAggregate(meta.Provider, meta.EventKind, "closed", 1)
 		return
 	}
 
@@ -196,16 +212,24 @@ func (a *Aggregator) AddWithMeta(externalUserID string, card port.OutboundCardMe
 
 		// Send merged card (50 items) then the 51st — both outside the lock.
 		if merged != nil {
-			sendCardSafe(a.sender, merged.externalUserID, merged.card, merged.meta)
+			if sendCardSafe(a.sender, merged.externalUserID, merged.card, merged.meta) {
+				channelmetrics.M.RecordOutboundAggregate(merged.meta.Provider, merged.meta.EventKind, "merged", merged.count)
+			} else {
+				channelmetrics.M.RecordOutboundAggregate(merged.meta.Provider, merged.meta.EventKind, "error", merged.count)
+			}
 			aggregatedTotal.Inc()
 		}
 
-		sendCardSafe(a.sender, externalUserID, port.OutboundCardMessage{
+		if sendCardSafe(a.sender, externalUserID, port.OutboundCardMessage{
 			Target: port.TargetUser(externalUserID),
 			ChatID: externalUserID,
 			Title:  last.title,
 			Body:   last.body,
-		}, last.meta)
+		}, last.meta) {
+			channelmetrics.M.RecordOutboundAggregate(last.meta.Provider, last.meta.EventKind, "sent", 1)
+		} else {
+			channelmetrics.M.RecordOutboundAggregate(last.meta.Provider, last.meta.EventKind, "error", 1)
+		}
 		aggregatedTotal.Inc()
 		return
 	}
@@ -224,7 +248,11 @@ func (a *Aggregator) flushKey(key string) {
 		return
 	}
 
-	sendCardSafe(a.sender, pending.externalUserID, pending.card, pending.meta)
+	if sendCardSafe(a.sender, pending.externalUserID, pending.card, pending.meta) {
+		channelmetrics.M.RecordOutboundAggregate(pending.meta.Provider, pending.meta.EventKind, "merged", pending.count)
+	} else {
+		channelmetrics.M.RecordOutboundAggregate(pending.meta.Provider, pending.meta.EventKind, "error", pending.count)
+	}
 	aggregatedTotal.Inc()
 }
 
@@ -262,7 +290,8 @@ func (a *Aggregator) prepareMerge(key string) *pendingCard {
 			Title:  fmt.Sprintf("你有 %d 条新通知", count),
 			Body:   mergedBody,
 		},
-		meta: meta,
+		meta:  meta,
+		count: count,
 	}
 }
 
@@ -306,6 +335,10 @@ func (a *Aggregator) Stop() {
 			// per-notification, not per-user, so the SLO metric reflects
 			// actual loss. (R1-r3)
 			droppedTotal.Add(float64(len(buf.items)))
+			if len(buf.items) > 0 {
+				meta := buf.items[0].meta
+				channelmetrics.M.RecordOutboundAggregate(meta.Provider, meta.EventKind, "stop_dropped", len(buf.items))
+			}
 		}
 		a.buffers = make(map[string]*userBuffer)
 	})

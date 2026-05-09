@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/multica-ai/multica/server/internal/events"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -331,6 +332,7 @@ func statusLabel(status string) string {
 // sends a card message.
 func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body string) {
 	if !s.isActive() {
+		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "inactive")
 		return
 	}
 
@@ -339,21 +341,25 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 	// R4: parseUUID returns error; log+drop on invalid UUID.
 	wsUUID, err := parseUUID(workspaceID)
 	if err != nil {
+		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "parse_workspace_id", false)
 		slog.Error("outbound: invalid workspace id", "workspace_id", workspaceID, "error", err)
 		return
 	}
 	userUUID, err := parseUUID(userID)
 	if err != nil {
+		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "parse_user_id", false)
 		slog.Error("outbound: invalid user id", "user_id", userID, "error", err)
 		return
 	}
 
 	enabled, err := s.prefs.GetChannelPref(ctx, wsUUID, userUUID, s.channel.Name(), eventKind)
 	if err != nil {
+		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "pref_lookup", false)
 		slog.Error("outbound: check pref", "user_id", userID, "error", err)
 		return
 	}
 	if !enabled {
+		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "muted")
 		return // muted
 	}
 
@@ -361,8 +367,10 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 	externalUserID, err := s.bindings.ResolveExternalID(ctx, s.channel.Name(), userID)
 	if err != nil {
 		if errors.Is(err, ErrNotBound) {
+			channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "unbound")
 			return // TC-out-2: unbound -> drop silently
 		}
+		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "binding_lookup", false)
 		slog.Error("outbound: resolve binding", "user_id", userID, "error", err)
 		return
 	}
@@ -376,14 +384,18 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 
 	if s.aggregator != nil {
 		s.aggregator.AddWithMeta(externalUserID, card, AggregationMeta{
+			Provider:     s.channel.Name(),
 			EventKind:    eventKind,
 			TargetUserID: userUUID,
 		}, false)
+		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "queued")
 		return
 	}
 
 	result, err := s.channel.SendCard(ctx, card)
 	if err != nil {
+		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "error")
+		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "send", result.Retryable)
 		if result.Retryable {
 			s.recordFailure(ctx, eventKind, userUUID, externalUserID, card, err)
 		}
@@ -391,6 +403,7 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 		return
 	}
 
+	channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "sent")
 	slog.Info("outbound: card sent",
 		"user_id", userID,
 		"platform_msg_id", result.PlatformMessageID,
@@ -443,6 +456,7 @@ func (s *Subscriber) recordFailure(ctx context.Context, eventKind string, target
 		Body:  card.Body,
 	})
 	if err != nil {
+		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "retry_payload_marshal", true)
 		slog.Error("outbound: marshal retry payload", "user_id", uuidStr(targetUserID), "error", err)
 		return
 	}
@@ -454,12 +468,15 @@ func (s *Subscriber) recordFailure(ctx context.Context, eventKind string, target
 		Payload:              payload,
 		MaxAttempts:          3,
 	}); err != nil {
+		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "failure_insert", true)
 		slog.Error("outbound: insert failure",
 			"user_id", uuidStr(targetUserID),
 			"event_kind", eventKind,
 			"send_error", sendErr,
 			"error", err,
 		)
+	} else {
+		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "failure_recorded", true)
 	}
 }
 

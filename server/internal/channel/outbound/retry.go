@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -166,11 +167,12 @@ func (w *RetryWorker) processBatch(ctx context.Context) {
 
 	failures, err := w.store.ClaimPendingOutboundFailures(ctx, RetryBatchSize)
 	if err != nil {
+		channelmetrics.M.RecordOutboundRetry("unknown", "claim_error")
 		slog.Error("retry worker: claim failed", "error", err)
 		return
 	}
-
 	for _, f := range failures {
+		channelmetrics.M.RecordOutboundRetry(f.Provider, "claimed")
 		w.processOne(ctx, f)
 	}
 }
@@ -179,6 +181,8 @@ func (w *RetryWorker) processBatch(ctx context.Context) {
 func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailure) {
 	var payload RetryPayload
 	if err := json.Unmarshal(f.Payload, &payload); err != nil {
+		channelmetrics.M.RecordOutboundRetry(f.Provider, "bad_payload")
+		channelmetrics.M.RecordOutboundDead(f.Provider, "bad_payload")
 		slog.Error("retry worker: bad payload, marking dead",
 			"id", uuidStr(f.ID), "error", err)
 		w.markDead(ctx, f, fmt.Sprintf("unmarshal payload: %s", err))
@@ -190,6 +194,8 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 	// if the column is missing, mark dead instead of silently falling back
 	// (a fallback would hide upstream inserter bugs). See ReviewBot v2 R3.
 	if !f.TargetExternalUserID.Valid || f.TargetExternalUserID.String == "" {
+		channelmetrics.M.RecordOutboundRetry(f.Provider, "missing_target")
+		channelmetrics.M.RecordOutboundDead(f.Provider, "missing_target")
 		slog.Error("retry worker: missing target_external_user_id, marking dead",
 			"id", uuidStr(f.ID))
 		w.markDead(ctx, f, "missing target_external_user_id (column is single source of truth)")
@@ -201,6 +207,7 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 
 	if err == nil {
 		// Success — delete the failure record entirely.
+		channelmetrics.M.RecordOutboundRetry(f.Provider, "sent")
 		slog.Info("retry worker: send succeeded, deleting record",
 			"id", uuidStr(f.ID), "provider", f.Provider, "attempts", f.Attempts)
 		w.deleteRecord(ctx, f.ID)
@@ -218,6 +225,8 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 		// all three backoff tiers (30s/2min/10min, attempts 0/1/2) run
 		// before dead — see ReviewBot v2 C2.
 		if int(f.Attempts) >= int(f.MaxAttempts) {
+			channelmetrics.M.RecordOutboundRetry(f.Provider, "max_attempts")
+			channelmetrics.M.RecordOutboundDead(f.Provider, "max_attempts")
 			slog.Warn("retry worker: max attempts reached, marking dead",
 				"id", uuidStr(f.ID), "attempts", f.Attempts, "error", err)
 			w.markDead(ctx, f, fmt.Sprintf("max attempts (%d) exhausted: %s", f.MaxAttempts, err))
@@ -231,9 +240,11 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 			Column3:   pgInterval(backoff),
 		})
 		if updateErr != nil {
+			channelmetrics.M.RecordOutboundRetry(f.Provider, "schedule_error")
 			slog.Error("retry worker: increment attempts failed",
 				"id", uuidStr(f.ID), "error", updateErr)
 		} else {
+			channelmetrics.M.RecordOutboundRetry(f.Provider, "scheduled")
 			slog.Info("retry worker: scheduled retry",
 				"id", uuidStr(f.ID), "next_attempt", int(f.Attempts)+1, "backoff", backoff, "error", err)
 		}
@@ -241,6 +252,8 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 	}
 
 	// Non-retryable — mark dead immediately.
+	channelmetrics.M.RecordOutboundRetry(f.Provider, "non_retryable")
+	channelmetrics.M.RecordOutboundDead(f.Provider, "non_retryable")
 	slog.Warn("retry worker: non-retryable error, marking dead",
 		"id", uuidStr(f.ID), "error", err)
 	w.markDead(ctx, f, fmt.Sprintf("non-retryable: %s", err))

@@ -17,6 +17,7 @@ import (
 type channelPipelineOptions struct {
 	Storage        storage.Storage
 	FileDownloader inbound.FileDownloader
+	Observer       inbound.Observer
 }
 
 func newChannelInboundPipeline(pool *pgxpool.Pool, registry *channel.Registry, opts ...channelPipelineOptions) *inbound.Pipeline {
@@ -42,17 +43,22 @@ func newChannelInboundPipeline(pool *pgxpool.Pool, registry *channel.Registry, o
 		}),
 	}
 
-	if len(opts) > 0 && opts[0].Storage != nil && opts[0].FileDownloader != nil {
+	var opt channelPipelineOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
+	if opt.Storage != nil && opt.FileDownloader != nil {
 		steps = append(steps, inbound.NewAttachmentStep(inbound.AttachmentConfig{
-			Storage:           opts[0].Storage,
+			Storage:           opt.Storage,
 			AttachmentQuerier: facade.NewAttachmentFacade(facadeimpl.NewAttachmentService(queries)),
-			FileDownloader:    opts[0].FileDownloader,
+			FileDownloader:    opt.FileDownloader,
 			Registry:          registry,
 			ChatBinding:       bindings,
 			UserResolver:      userResolver,
 			IssueFacade:       facade.NewIssueFacade(issueSvc),
 		}))
-	} else if len(opts) > 0 {
+	} else if len(opts) > 0 && (opt.Storage != nil || opt.FileDownloader != nil) {
 		slog.Info("channel attachment step disabled: storage or file downloader is not configured")
 	}
 
@@ -67,5 +73,7 @@ func newChannelInboundPipeline(pool *pgxpool.Pool, registry *channel.Registry, o
 		inbound.NewReplyStep(),
 	)
 
-	return inbound.NewPipeline(steps...)
+	pipeline := inbound.NewPipeline(steps...)
+	pipeline.SetObserver(opt.Observer)
+	return pipeline
 }

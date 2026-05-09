@@ -17,6 +17,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel"
 	feishuadapter "github.com/multica-ai/multica/server/internal/channel/adapter/feishu"
 	"github.com/multica-ai/multica/server/internal/channel/leader"
+	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
 	"github.com/multica-ai/multica/server/internal/channel/outbound"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
@@ -282,6 +283,8 @@ func main() {
 	var channelAdapterReady atomic.Bool
 
 	channelLeader.OnAcquire(func(ctx context.Context) error {
+		channelmetrics.M.SetLeaderState("feishu", true)
+		channelmetrics.M.SetAdapterConnected("feishu", false)
 		slog.Info("channel leader: acquired", "lock_id", leader.ChannelFeishuLockID)
 
 		if !feishuEnabled {
@@ -312,10 +315,12 @@ func main() {
 					return fmt.Errorf("feishu: get existing adapter: %w", getErr)
 				}
 				if connErr := existing.Connect(adapterCtx); connErr != nil {
+					channelmetrics.M.SetAdapterConnected("feishu", false)
 					slog.Error("channel leader: failed to connect existing feishu adapter", "error", connErr)
 					return fmt.Errorf("feishu: connect existing: %w", connErr)
 				}
 				channelAdapterReady.Store(true)
+				channelmetrics.M.SetAdapterConnected("feishu", true)
 				slog.Info("channel leader: reconnected existing feishu adapter")
 				return nil
 			}
@@ -324,22 +329,23 @@ func main() {
 		}
 
 		if err := adapter.Connect(adapterCtx); err != nil {
+			channelmetrics.M.SetAdapterConnected("feishu", false)
 			slog.Error("channel leader: failed to connect feishu adapter", "error", err)
 			// Unregister on failure so the next acquire can try again.
 			_ = channelRegistry.Unregister("feishu")
 			return fmt.Errorf("feishu: connect: %w", err)
 		}
 		channelAdapterReady.Store(true)
+		channelmetrics.M.SetAdapterConnected("feishu", true)
 
-		var pipelineOpts []channelPipelineOptions
+		pipelineOpt := channelPipelineOptions{Observer: channelmetrics.M}
 		if channelStorage != nil {
-			pipelineOpts = append(pipelineOpts, channelPipelineOptions{
-				Storage:        channelStorage,
-				FileDownloader: feishuadapter.NewRealFileDownloader(sdkClient.APIClient()),
-			})
+			pipelineOpt.Storage = channelStorage
+			pipelineOpt.FileDownloader = feishuadapter.NewRealFileDownloader(sdkClient.APIClient())
 		} else {
 			slog.Info("channel attachment step disabled: storage is not configured")
 		}
+		pipelineOpts := []channelPipelineOptions{pipelineOpt}
 		pipeline := newChannelInboundPipeline(pool, channelRegistry, pipelineOpts...)
 		go func() {
 			for {
@@ -378,6 +384,8 @@ func main() {
 	channelLeader.OnRelease(func(ctx context.Context) error {
 		slog.Info("channel leader: released", "lock_id", leader.ChannelFeishuLockID)
 		channelAdapterReady.Store(false)
+		channelmetrics.M.SetAdapterConnected("feishu", false)
+		channelmetrics.M.SetLeaderState("feishu", false)
 
 		// Cancel the adapter context to stop the WS client.
 		if adapterCancel != nil {
