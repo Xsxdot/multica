@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -407,5 +408,88 @@ func TestSetPrimaryChannelBinding_OtherUserForbidden(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent safety
+// ---------------------------------------------------------------------------
+
+func TestDeleteChannelBinding_LocksWorkspaceProvider(t *testing.T) {
+	var wsID string
+	if err := testPool.QueryRow(t.Context(), `
+		INSERT INTO workspace (name, slug, description, issue_prefix)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id
+	`, "Lock Test", "lock-test", "Temporary workspace", "LT").Scan(&wsID); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(t.Context(), `DELETE FROM workspace WHERE id = $1`, wsID)
+	})
+
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO member (workspace_id, user_id, role)
+		VALUES ($1, $2, 'owner')
+	`, wsID, testUserID); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+
+	createTestBinding(t, wsID, "feishu", "oc_test_lock", "group", true, testUserID)
+
+	// Simulate the delete handler's lock acquisition.
+	tx1, err := testPool.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin tx1: %v", err)
+	}
+	defer tx1.Rollback(t.Context())
+
+	if _, err := tx1.Exec(t.Context(), `
+		SELECT id FROM channel_chat_binding
+		WHERE workspace_id = $1 AND provider = $2
+		FOR UPDATE
+	`, parseUUID(wsID), "feishu"); err != nil {
+		t.Fatalf("lock bindings: %v", err)
+	}
+
+	// Another goroutine trying to acquire the same lock (simulating create handler).
+	done := make(chan error, 1)
+	go func() {
+		tx2, err := testPool.Begin(t.Context())
+		if err != nil {
+			done <- err
+			return
+		}
+		defer tx2.Rollback(t.Context())
+
+		if _, err := tx2.Exec(t.Context(), `
+			SELECT id FROM channel_chat_binding
+			WHERE workspace_id = $1 AND provider = $2
+			FOR UPDATE
+		`, parseUUID(wsID), "feishu"); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
+
+	// tx2 should block because tx1 holds the lock.
+	select {
+	case err := <-done:
+		t.Fatalf("expected tx2 to block, but returned: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		// expected — lock is held
+	}
+
+	// Release the lock.
+	tx1.Rollback(t.Context())
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("tx2 failed after unblock: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tx2 did not unblock after tx1 rollback")
 	}
 }

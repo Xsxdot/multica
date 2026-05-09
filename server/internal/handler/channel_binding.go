@@ -265,14 +265,29 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if there are existing bindings for this workspace/provider
+	// Lock and check existing bindings for this workspace/provider
 	// to determine is_primary
+	if _, err := tx.Exec(r.Context(), `
+		SELECT id FROM channel_chat_binding
+		WHERE workspace_id = $1 AND provider = $2
+		FOR UPDATE
+	`, member.WorkspaceID, req.Provider); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
+		return
+	}
+
 	existingBindings, err := qtx.ListChannelChatBindings(r.Context(), member.WorkspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check existing bindings")
 		return
 	}
-	isPrimary := len(existingBindings) == 0
+	providerCount := 0
+	for _, b := range existingBindings {
+		if b.Provider == req.Provider {
+			providerCount++
+		}
+	}
+	isPrimary := providerCount == 0
 
 	binding, err := qtx.CreateChannelChatBinding(r.Context(), db.CreateChannelChatBindingParams{
 		Provider:         req.Provider,
@@ -356,11 +371,28 @@ func (h *Handler) DeleteChannelBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start binding transaction")
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	qtx := db.New(tx)
+
 	// Prevent deleting the primary binding while other bindings for the
 	// same provider still exist — zero bindings is a valid state, but
 	// orphaned non-primary bindings are not.
 	if binding.IsPrimary {
-		bindings, err := h.Queries.ListChannelChatBindings(r.Context(), binding.WorkspaceID)
+		if _, err := tx.Exec(r.Context(), `
+			SELECT id FROM channel_chat_binding
+			WHERE workspace_id = $1 AND provider = $2
+			FOR UPDATE
+		`, binding.WorkspaceID, binding.Provider); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
+			return
+		}
+
+		bindings, err := qtx.ListChannelChatBindings(r.Context(), binding.WorkspaceID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to check primary bindings")
 			return
@@ -377,8 +409,13 @@ func (h *Handler) DeleteChannelBinding(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.Queries.DeleteChannelChatBinding(r.Context(), bindingUUID); err != nil {
+	if err := qtx.DeleteChannelChatBinding(r.Context(), bindingUUID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete binding")
+		return
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit binding transaction")
 		return
 	}
 
