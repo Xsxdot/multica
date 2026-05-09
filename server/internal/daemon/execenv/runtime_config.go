@@ -199,6 +199,13 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("- If asked to perform actions (create issues, update status, etc.), use the appropriate CLI commands\n")
 		b.WriteString("- If the task requires code changes, use `multica repo checkout <url>` to get the code first. Use `--ref <branch-or-sha>` when you need an exact revision\n")
 		b.WriteString("- Keep responses concise and direct\n\n")
+	} else if ctx.ChannelIntentPrompt != "" {
+		// Channel intent task: internal semantic classification mode.
+		b.WriteString("**You are resolving a channel message into a structured intent.** This is an internal classifier task, not a chat session and not an issue assignment.\n\n")
+		b.WriteString("- Return only the JSON object requested in the user message.\n")
+		b.WriteString("- Do NOT call the `multica` CLI or modify workspace data.\n")
+		b.WriteString("- Do NOT create issues, comments, labels, assignees, or status changes directly.\n")
+		b.WriteString("- Destructive requests such as delete must be classified as `Unsupported`.\n\n")
 	} else if ctx.QuickCreatePrompt != "" {
 		// Quick-create task: detailed field / output rules live in the
 		// per-turn prompt (BuildPrompt → buildQuickCreatePrompt) so they
@@ -321,6 +328,8 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 	switch {
 	case ctx.AutopilotRunID != "":
 		b.WriteString("This is a run-only autopilot task, so there may be no issue comment to post. Your final assistant output is captured automatically as the autopilot run result. Keep it concise and state the outcome.\n")
+	case ctx.ChannelIntentPrompt != "":
+		b.WriteString("This is an internal channel intent task. Print exactly one JSON object and nothing else. The JSON is parsed by the server; no user sees free-form assistant text.\n")
 	case ctx.QuickCreatePrompt != "":
 		b.WriteString("This is a quick-create task. There is NO existing issue to comment on. Your final stdout is captured automatically and the platform writes the user's success/failure inbox notification based on whether `multica issue create` succeeded.\n\n")
 		b.WriteString("- Do NOT call `multica issue comment add` — the issue you just created has no conversation context for this run.\n")

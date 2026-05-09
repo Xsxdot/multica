@@ -249,6 +249,9 @@ func main() {
 		slog.Info("realtime: REDIS_URL not set — using in-memory hub (single-node mode)")
 	}
 	registerListeners(bus, broadcaster)
+	queries := db.New(pool)
+	taskSvc := service.NewTaskService(queries, pool, hub, bus, daemonWakeup)
+	taskSvc.EmptyClaim = service.NewEmptyClaimCache(storeRedis)
 
 	// M1-T1: channel port registry — assembly point for external messaging adapters.
 	channelRegistry := channel.NewRegistry()
@@ -338,7 +341,7 @@ func main() {
 		channelAdapterReady.Store(true)
 		channelmetrics.M.SetAdapterConnected("feishu", true)
 
-		pipelineOpt := channelPipelineOptions{Observer: channelmetrics.M}
+		pipelineOpt := channelPipelineOptions{Observer: channelmetrics.M, TaskService: taskSvc}
 		if channelStorage != nil {
 			pipelineOpt.Storage = channelStorage
 			pipelineOpt.FileDownloader = feishuadapter.NewRealFileDownloader(sdkClient.APIClient())
@@ -418,7 +421,6 @@ func main() {
 	analyticsClient := analytics.NewFromEnv()
 	defer analyticsClient.Close()
 
-	queries := db.New(pool)
 	hub.SetAuthorizer(newScopeAuthorizer(queries))
 	// Order matters: subscriber listeners must register BEFORE notification listeners.
 	// The notification listener queries the subscriber table to determine recipients,
@@ -487,7 +489,6 @@ func main() {
 	// Start background workers.
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	autopilotCtx, autopilotCancel := context.WithCancel(context.Background())
-	taskSvc := service.NewTaskService(queries, pool, hub, bus, daemonWakeup)
 	autopilotSvc := service.NewAutopilotService(queries, pool, bus, taskSvc)
 	registerAutopilotListeners(bus, autopilotSvc)
 

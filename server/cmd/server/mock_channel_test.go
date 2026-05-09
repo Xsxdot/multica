@@ -218,9 +218,9 @@ func (s *failingCardSender) callCount() int {
 
 // ---------------------------------------------------------------------------
 // staticIntentStep — test-time intent-recog step. Production (T9/T10)
-// has rule + LLM classifiers; the M2 integration tests do not exercise
+// has rule + chat resolvers; the M2 integration tests do not exercise
 // classification accuracy (that lives in TC-risk-1~3 in STA-65 and the
-// rule/llm unit tests). They DO exercise the dispatcher's response to
+// resolver unit tests). They DO exercise the dispatcher's response to
 // a given Intent. So this step simply attaches a pre-baked Intent to
 // the event and Continues.
 // ---------------------------------------------------------------------------

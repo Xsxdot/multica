@@ -53,13 +53,14 @@ type TaskContextForEnv struct {
 	ProjectTitle            string                  // human-readable project title
 	ProjectResources        []ProjectResourceForEnv // resources attached to the project
 	ChatSessionID           string                  // non-empty for chat tasks
-	AutopilotRunID          string              // non-empty for autopilot run_only tasks
+	AutopilotRunID          string                  // non-empty for autopilot run_only tasks
 	AutopilotID             string
 	AutopilotTitle          string
 	AutopilotDescription    string
 	AutopilotSource         string
 	AutopilotTriggerPayload string
 	QuickCreatePrompt       string // non-empty for quick-create tasks
+	ChannelIntentPrompt     string // non-empty for internal channel intent tasks
 }
 
 // SkillContextForEnv represents a skill to be written into the execution environment.

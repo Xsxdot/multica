@@ -14,7 +14,7 @@ import (
 //                          binding.TokenIssuer and pushes the one-shot
 //                          link via channel.Registry.Get(provider).Send)
 //   - intent-recog   → T9–T10 (parses the user message into IntentKind
-//                              per PRD F5)
+//                              per PRD F5 via resolver chain)
 //   - dispatch       → T11 (routes IntentKind to the appropriate
 //                            facade.IssueFacade / facade.CommentFacade
 //                            handler)

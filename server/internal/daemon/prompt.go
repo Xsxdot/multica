@@ -20,6 +20,9 @@ func BuildPrompt(task Task) string {
 	if task.AutopilotRunID != "" {
 		return buildAutopilotPrompt(task)
 	}
+	if task.ChannelIntentPrompt != "" {
+		return buildChannelIntentPrompt(task)
+	}
 	if task.QuickCreatePrompt != "" {
 		return buildQuickCreatePrompt(task)
 	}
@@ -27,6 +30,17 @@ func BuildPrompt(task Task) string {
 	b.WriteString("You are running as a local coding agent for a Multica workspace.\n\n")
 	fmt.Fprintf(&b, "Your assigned issue ID is: %s\n\n", task.IssueID)
 	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then complete it.\n", task.IssueID)
+	return b.String()
+}
+
+func buildChannelIntentPrompt(task Task) string {
+	if strings.TrimSpace(task.ChannelIntentPrompt) != "" {
+		return task.ChannelIntentPrompt
+	}
+	var b strings.Builder
+	b.WriteString("You are resolving a Multica channel chat message into one safe structured intent.\n")
+	b.WriteString("Return only JSON: {\"intent\":\"Unknown\",\"confidence\":0.0,\"params\":{}}.\n\n")
+	fmt.Fprintf(&b, "User message:\n%s\n", task.ChannelIntentMessage)
 	return b.String()
 }
 

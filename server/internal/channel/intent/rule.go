@@ -1,6 +1,4 @@
-// Package intent implements the zero-token rule matcher for channel inbound
-// messages (DESIGN §8 T9). Regex hits are bounded to sub-millisecond CPU work;
-// LLM fallback lives elsewhere (T10).
+// Package intent implements structured channel intent resolution.
 package intent
 
 import "strings"
@@ -9,10 +7,12 @@ import "strings"
 type IntentSource string
 
 const (
+	// SourceCommand means a slash/command path produced this intent.
+	SourceCommand IntentSource = "command"
 	// SourceRule means the regex rule engine produced this intent.
 	SourceRule IntentSource = "rule"
-	// SourceLLM means the LLM fallback produced this intent.
-	SourceLLM IntentSource = "llm"
+	// SourceChat means the chat semantic resolver produced this intent.
+	SourceChat IntentSource = "chat"
 )
 
 // IntentKind is the high-level command category per PRD F5 / outbound tests.
@@ -26,6 +26,7 @@ const (
 	IntentSetAssignee IntentKind = "SetAssignee"
 	IntentSetPriority IntentKind = "SetPriority"
 	IntentSetLabel    IntentKind = "SetLabel"
+	IntentDelete      IntentKind = "Delete"
 	IntentUnsupported IntentKind = "Unsupported"
 	IntentUnknown     IntentKind = "Unknown"
 	IntentASKClarify  IntentKind = "ASK_CLARIFY"
@@ -40,9 +41,7 @@ type Intent struct {
 	Source     IntentSource
 }
 
-// RuleMatcher matches normalised user text (mention markers already stripped)
-// against ordered regex rules. A false second return means “no rule hit” so
-// upstream can fall back to LLM recognition (T10).
+// RuleMatcher matches normalised user text (mention markers already stripped).
 type RuleMatcher interface {
 	Match(text string) (Intent, bool)
 }

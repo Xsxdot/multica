@@ -196,7 +196,7 @@ func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 	// --- 4. Delete rejection (TC-authz-4) ---
 	// Defence-in-depth: T9 already maps delete commands to
 	// IntentUnsupported, but we reject IntentDelete here as well in
-	// case a future intent source (e.g. LLM fallback T10) emits
+	// case a future intent source (e.g. chat semantic fallback) emits
 	// IntentDelete directly.
 	if evt.Intent.Kind == port.IntentDelete {
 		return s.reject(ctx, evt, AuthzUnsupportedDelete)

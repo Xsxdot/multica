@@ -10,7 +10,6 @@
 // Skip (terminate the pipeline cleanly). Errors abort the pipeline and
 // propagate to the caller.
 //
-// In M1 (T6) the intent-recog and dispatch steps are placeholders that
-// will be replaced in T9–T11; the orchestration here does not need to
-// change when those land.
+// intent-recog is a resolver chain: command-expanded text, deterministic
+// rules, then an optional chat semantic resolver.
 package inbound

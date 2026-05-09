@@ -71,12 +71,14 @@ func (s *slashStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 			return evt, DecisionContinue, nil
 		}
 		evt.Text = expanded
+		evt.Intent.Source = port.SourceCommand
 		return evt, DecisionContinue, nil
 	}
 
 	expanded, ok := expandBuiltin(lcmd, rest)
 	if ok {
 		evt.Text = expanded
+		evt.Intent.Source = port.SourceCommand
 		return evt, DecisionContinue, nil
 	}
 

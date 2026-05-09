@@ -217,6 +217,37 @@ type QuickCreateContext struct {
 // QuickCreateContextType marks a task as a quick-create job.
 const QuickCreateContextType = "quick_create"
 
+// ChannelIntentContext is the JSON payload stored on an internal channel
+// intent task. These tasks reuse the daemon/agent runtime to classify a
+// channel message, but they are not user-visible chat sessions and must not
+// perform business side effects directly.
+type ChannelIntentContext struct {
+	Type        string `json:"type"`
+	Prompt      string `json:"prompt"`
+	Message     string `json:"message"`
+	WorkspaceID string `json:"workspace_id"`
+	RequesterID string `json:"requester_id,omitempty"`
+	Channel     string `json:"channel,omitempty"`
+	ChatID      string `json:"chat_id,omitempty"`
+	ChatType    string `json:"chat_type,omitempty"`
+	SenderID    string `json:"sender_id,omitempty"`
+	SenderName  string `json:"sender_name,omitempty"`
+}
+
+// ChannelIntentContextType marks an internal channel intent classification job.
+const ChannelIntentContextType = "channel_intent"
+
+type ChannelIntentTaskParams struct {
+	Prompt      string
+	Message     string
+	RequesterID string
+	Channel     string
+	ChatID      string
+	ChatType    string
+	SenderID    string
+	SenderName  string
+}
+
 // EnqueueQuickCreateTask creates a queued task that has no issue / chat /
 // autopilot link — the user's natural-language prompt is stored in the
 // task's context JSONB and the agent is expected to translate it into a
@@ -267,6 +298,58 @@ func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, r
 	// cycle. Without this the user perceives "quick create never
 	// triggered" because the modal closes immediately and the task
 	// sits in 'queued' until the next sleepWithContextOrWakeup tick.
+	s.notifyTaskAvailable(task)
+	return task, nil
+}
+
+// EnqueueChannelIntentTask creates an internal queued task for semantic
+// channel intent classification. It intentionally skips task broadcasts:
+// callers synchronously wait for the task result, and no user-facing activity
+// row or chat message should appear for this resolver implementation detail.
+func (s *TaskService) EnqueueChannelIntentTask(ctx context.Context, workspaceID pgtype.UUID, agentID pgtype.UUID, params ChannelIntentTaskParams) (db.AgentTaskQueue, error) {
+	agent, err := s.Queries.GetAgent(ctx, agentID)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
+	}
+	if agent.ArchivedAt.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("agent is archived")
+	}
+	if !agent.RuntimeID.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
+	}
+
+	payload := ChannelIntentContext{
+		Type:        ChannelIntentContextType,
+		Prompt:      params.Prompt,
+		Message:     params.Message,
+		WorkspaceID: util.UUIDToString(workspaceID),
+		RequesterID: params.RequesterID,
+		Channel:     params.Channel,
+		ChatID:      params.ChatID,
+		ChatType:    params.ChatType,
+		SenderID:    params.SenderID,
+		SenderName:  params.SenderName,
+	}
+	contextJSON, err := json.Marshal(payload)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("marshal channel intent context: %w", err)
+	}
+
+	task, err := s.Queries.CreateChannelIntentTask(ctx, db.CreateChannelIntentTaskParams{
+		AgentID:   agentID,
+		RuntimeID: agent.RuntimeID,
+		Priority:  priorityToInt("high"),
+		Context:   contextJSON,
+	})
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("create channel intent task: %w", err)
+	}
+
+	slog.Info("channel intent task enqueued",
+		"task_id", util.UUIDToString(task.ID),
+		"workspace_id", util.UUIDToString(workspaceID),
+		"agent_id", util.UUIDToString(agentID),
+	)
 	s.notifyTaskAvailable(task)
 	return task, nil
 }
@@ -1248,6 +1331,9 @@ func (s *TaskService) notifyTaskAvailable(task db.AgentTaskQueue) {
 }
 
 func (s *TaskService) broadcastTaskDispatch(ctx context.Context, task db.AgentTaskQueue) {
+	if s.isChannelIntentTask(task) {
+		return
+	}
 	var payload map[string]any
 	if task.Context != nil {
 		json.Unmarshal(task.Context, &payload)
@@ -1280,6 +1366,9 @@ func (s *TaskService) broadcastTaskDispatch(ctx context.Context, task db.AgentTa
 }
 
 func (s *TaskService) broadcastTaskEvent(ctx context.Context, eventType string, task db.AgentTaskQueue) {
+	if s.isChannelIntentTask(task) {
+		return
+	}
 	workspaceID := s.ResolveTaskWorkspaceID(ctx, task)
 	if workspaceID == "" {
 		return
@@ -1304,7 +1393,8 @@ func (s *TaskService) broadcastTaskEvent(ctx context.Context, eventType string, 
 
 // ResolveTaskWorkspaceID determines the workspace ID for a task.
 // For issue tasks, it comes from the issue. For chat tasks, from the chat session.
-// For autopilot tasks, from the autopilot via its run.
+// For autopilot tasks, from the autopilot via its run. For internal context
+// tasks such as quick-create and channel-intent, from the context JSONB.
 // Returns "" when none of the links resolve — callers treat that as "not found".
 func (s *TaskService) ResolveTaskWorkspaceID(ctx context.Context, task db.AgentTaskQueue) string {
 	if task.IssueID.Valid {
@@ -1331,6 +1421,9 @@ func (s *TaskService) ResolveTaskWorkspaceID(ctx context.Context, task db.AgentT
 	// broadcasts, which is why quick-create tasks appeared stuck queued.
 	if qc, ok := s.parseQuickCreateContext(task); ok {
 		return qc.WorkspaceID
+	}
+	if ci, ok := s.parseChannelIntentContext(task); ok {
+		return ci.WorkspaceID
 	}
 	return ""
 }
@@ -1466,6 +1559,28 @@ func (s *TaskService) parseQuickCreateContext(task db.AgentTaskQueue) (QuickCrea
 		return QuickCreateContext{}, false
 	}
 	return qc, true
+}
+
+func (s *TaskService) parseChannelIntentContext(task db.AgentTaskQueue) (ChannelIntentContext, bool) {
+	if task.IssueID.Valid || task.ChatSessionID.Valid || task.AutopilotRunID.Valid {
+		return ChannelIntentContext{}, false
+	}
+	if len(task.Context) == 0 {
+		return ChannelIntentContext{}, false
+	}
+	var ci ChannelIntentContext
+	if err := json.Unmarshal(task.Context, &ci); err != nil {
+		return ChannelIntentContext{}, false
+	}
+	if ci.Type != ChannelIntentContextType {
+		return ChannelIntentContext{}, false
+	}
+	return ci, true
+}
+
+func (s *TaskService) isChannelIntentTask(task db.AgentTaskQueue) bool {
+	_, ok := s.parseChannelIntentContext(task)
+	return ok
 }
 
 // notifyQuickCreateCompleted writes a success inbox notification to the

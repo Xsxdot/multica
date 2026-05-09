@@ -126,6 +126,7 @@ type DaemonRegisterRequest struct {
 	DeviceName      string   `json:"device_name"`
 	CLIVersion      string   `json:"cli_version"` // multica CLI version
 	LaunchedBy      string   `json:"launched_by"` // "desktop" when spawned by the Electron app
+	Capabilities    []string `json:"capabilities"`
 	Runtimes        []struct {
 		Name    string `json:"name"`
 		Type    string `json:"type"`
@@ -273,9 +274,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			status = "offline"
 		}
 		metadata, _ := json.Marshal(map[string]any{
-			"version":     runtime.Version,
-			"cli_version": req.CLIVersion,
-			"launched_by": req.LaunchedBy,
+			"version":      runtime.Version,
+			"cli_version":  req.CLIVersion,
+			"launched_by":  req.LaunchedBy,
+			"capabilities": req.Capabilities,
 		})
 
 		row, err := h.Queries.UpsertAgentRuntime(r.Context(), db.UpsertAgentRuntimeParams{
@@ -1105,6 +1107,26 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Channel-intent task: internal resolver work with no issue / chat /
+	// autopilot link. It reuses the daemon runtime but must only return the
+	// structured intent JSON captured in task completion output.
+	hasChannelIntent := false
+	if task.Context != nil && !task.IssueID.Valid && !task.ChatSessionID.Valid && !task.AutopilotRunID.Valid {
+		var ci service.ChannelIntentContext
+		if json.Unmarshal(task.Context, &ci) == nil && ci.Type == service.ChannelIntentContextType {
+			hasChannelIntent = true
+			resp.ChannelIntentPrompt = ci.Prompt
+			resp.ChannelIntentMessage = ci.Message
+			resp.WorkspaceID = ci.WorkspaceID
+			if ws, err := h.Queries.GetWorkspace(r.Context(), parseUUID(ci.WorkspaceID)); err == nil && ws.Repos != nil {
+				var repos []RepoData
+				if json.Unmarshal(ws.Repos, &repos) == nil && len(repos) > 0 {
+					resp.Repos = repos
+				}
+			}
+		}
+	}
+
 	// Workspace isolation check: the daemon uses this response's workspace_id
 	// as the only authority for MULTICA_WORKSPACE_ID in the agent env. An
 	// empty value would make the CLI silently fall back to the user-global
@@ -1124,6 +1146,7 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 			"has_chat", task.ChatSessionID.Valid,
 			"has_autopilot_run", task.AutopilotRunID.Valid,
 			"has_quick_create", hasQuickCreate,
+			"has_channel_intent", hasChannelIntent,
 		)
 		if _, cerr := h.TaskService.CancelTask(r.Context(), task.ID); cerr != nil {
 			slog.Error("task claim: cancel after workspace check failed",
@@ -1259,7 +1282,7 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 // triggered follow-ups hit the WHERE first_executed_at IS NULL clause and
 // no-op, so the funnel counts unique issues, not tasks.
 func (h *Handler) emitIssueExecutedOnFirstCompletion(r *http.Request, task *db.AgentTaskQueue) {
-	if task == nil {
+	if task == nil || !task.IssueID.Valid {
 		return
 	}
 	marked, err := h.Queries.MarkIssueFirstExecuted(r.Context(), task.IssueID)

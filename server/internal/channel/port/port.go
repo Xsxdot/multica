@@ -50,8 +50,9 @@ const (
 type IntentSource string
 
 const (
-	SourceRule IntentSource = "rule"
-	SourceLLM  IntentSource = "llm"
+	SourceCommand IntentSource = "command"
+	SourceRule    IntentSource = "rule"
+	SourceChat    IntentSource = "chat"
 )
 
 // InboundIntent carries the parsed intent attached to an InboundEvent by

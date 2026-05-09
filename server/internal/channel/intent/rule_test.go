@@ -209,10 +209,10 @@ func TestRuleMatcher_SetLabel_Variants(t *testing.T) {
 	t.Parallel()
 	m := in.NewRuleMatcher()
 	variants := []struct {
-		text     string
-		wantKey  string
+		text      string
+		wantKey   string
 		wantLabel string
-		wantOp   string
+		wantOp    string
 	}{
 		{"把 [STA-2] 加标签 bug", "STA-2", "bug", "add"},
 		{"STA-3 加标签 feature", "STA-3", "feature", "add"},
@@ -247,7 +247,7 @@ func TestRuleMatcher_Unknown_Variants(t *testing.T) {
 	}
 }
 
-// Negatives: must not match any rule (LLM / future stages handle these).
+// Negatives: must not match any rule (chat semantic resolver may handle these).
 func TestRuleMatcher_NoHit_Negatives(t *testing.T) {
 	t.Parallel()
 	m := in.NewRuleMatcher()

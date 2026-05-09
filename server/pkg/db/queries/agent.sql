@@ -62,6 +62,7 @@ RETURNING *;
 -- name: ListAgentTasks :many
 SELECT * FROM agent_task_queue
 WHERE agent_id = $1
+  AND COALESCE(context->>'type', '') <> 'channel_intent'
 ORDER BY created_at DESC;
 
 -- name: CreateAgentTask :one
@@ -80,6 +81,14 @@ RETURNING *;
 -- Quick-create tasks have no issue / chat / autopilot link; the entire job
 -- description (prompt, requester, workspace) lives in context JSONB. The
 -- daemon detects this variant via context.type == "quick_create".
+INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, context)
+VALUES ($1, $2, NULL, 'queued', $3, $4)
+RETURNING *;
+
+-- name: CreateChannelIntentTask :one
+-- Channel-intent tasks are internal semantic classification jobs. They have no
+-- issue / chat / autopilot link; the daemon detects them via
+-- context.type == "channel_intent" and returns structured JSON only.
 INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, context)
 VALUES ($1, $2, NULL, 'queued', $3, $4)
 RETURNING *;
@@ -167,10 +176,10 @@ WHERE id = $1;
 -- already dispatched or running. This allows different agents to work on the same
 -- issue in parallel while preventing a single agent from running duplicate tasks.
 -- Chat tasks (issue_id IS NULL) use chat_session_id for serialization instead.
--- Quick-create tasks have no issue / chat / autopilot link, so they serialize on
--- "any other quick-create-shaped task" (all four FKs NULL) for the same agent —
--- otherwise a user mashing the create button could fire concurrent quick-creates
--- whose completion lookup would race over "most recent issue by this agent".
+-- Internal context-only tasks have no issue / chat / autopilot link, so they
+-- serialize only with the same context.type for the same agent. This keeps
+-- quick-create races guarded without letting channel intent classification
+-- block unrelated quick-create work.
 UPDATE agent_task_queue
 SET status = 'dispatched', dispatched_at = now()
 WHERE id = (
@@ -190,6 +199,7 @@ WHERE id = (
                 AND active.issue_id IS NULL
                 AND active.chat_session_id IS NULL
                 AND active.autopilot_run_id IS NULL
+                AND COALESCE(atq.context->>'type', '') = COALESCE(active.context->>'type', '')
               )
             )
       )
@@ -353,6 +363,7 @@ FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
 WHERE a.workspace_id = $1
   AND atq.created_at > now() - INTERVAL '30 days'
+  AND COALESCE(atq.context->>'type', '') <> 'channel_intent'
 GROUP BY atq.agent_id;
 
 -- name: GetWorkspaceAgentActivity30d :many
@@ -379,6 +390,7 @@ JOIN agent a ON a.id = atq.agent_id
 WHERE a.workspace_id = $1
   AND atq.completed_at IS NOT NULL
   AND atq.completed_at > now() - INTERVAL '30 days'
+  AND COALESCE(atq.context->>'type', '') <> 'channel_intent'
 GROUP BY atq.agent_id, bucket
 ORDER BY atq.agent_id, bucket;
 
@@ -404,6 +416,7 @@ SELECT atq.* FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
 WHERE a.workspace_id = $1
   AND atq.status IN ('queued', 'dispatched', 'running')
+  AND COALESCE(atq.context->>'type', '') <> 'channel_intent'
 
 UNION ALL
 
@@ -413,6 +426,7 @@ SELECT t.* FROM (
   JOIN agent a ON a.id = atq.agent_id
   WHERE a.workspace_id = $1
     AND atq.status IN ('completed', 'failed')
+    AND COALESCE(atq.context->>'type', '') <> 'channel_intent'
   ORDER BY atq.agent_id, atq.completed_at DESC NULLS LAST
 ) t;
 
@@ -431,6 +445,7 @@ UPDATE agent AS a
 SET status = CASE WHEN EXISTS (
     SELECT 1 FROM agent_task_queue q
     WHERE q.agent_id = a.id AND q.status IN ('dispatched', 'running')
+      AND COALESCE(q.context->>'type', '') <> 'channel_intent'
 ) THEN 'working' ELSE 'idle' END,
     updated_at = now()
 WHERE a.id = $1

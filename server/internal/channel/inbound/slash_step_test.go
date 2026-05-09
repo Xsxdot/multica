@@ -82,6 +82,9 @@ func TestSlashStep_BuiltinExpansionsHitRules(t *testing.T) {
 		if evt.Text != tc.want {
 			t.Fatalf("%q → got %q, want %q", tc.in, evt.Text, tc.want)
 		}
+		if evt.Intent.Source != port.SourceCommand {
+			t.Fatalf("%q source = %q, want command", tc.in, evt.Intent.Source)
+		}
 		assertRuleHit(t, evt.Text)
 	}
 }

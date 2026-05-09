@@ -10,6 +10,8 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel/facade"
 	"github.com/multica-ai/multica/server/internal/channel/facadeimpl"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
+	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -18,6 +20,8 @@ type channelPipelineOptions struct {
 	Storage        storage.Storage
 	FileDownloader inbound.FileDownloader
 	Observer       inbound.Observer
+	ChatIntent     chintent.ChatIntentClient
+	TaskService    *service.TaskService
 }
 
 func newChannelInboundPipeline(pool *pgxpool.Pool, registry *channel.Registry, opts ...channelPipelineOptions) *inbound.Pipeline {
@@ -28,24 +32,34 @@ func newChannelInboundPipeline(pool *pgxpool.Pool, registry *channel.Registry, o
 	userResolver := inbound.NewDBUserInfoResolver(pool)
 	issuer := binding.NewTokenIssuer(queries)
 
+	var opt channelPipelineOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	resolvers := []chintent.IntentResolver{
+		chintent.NewRuleResolver(chintent.NewRuleMatcher()),
+	}
+	chatIntent := opt.ChatIntent
+	if chatIntent == nil && opt.TaskService != nil {
+		chatIntent = facadeimpl.NewTaskBackedChatIntentClient(queries, opt.TaskService, bindings)
+	}
+	if chatIntent != nil {
+		resolvers = append(resolvers, chintent.NewChatIntentResolver(chintent.ChatIntentResolverConfig{Client: chatIntent}))
+	}
+
 	steps := []inbound.Step{
 		inbound.NewNormalizeStep(),
 		inbound.NewDedupStep(inbound.NewDBDedupStore(queries)),
 		inbound.NewUserIdentityBindStep(pool, registry, issuer),
 		inbound.NewChatBindCommandStep(registry, issuer),
 		inbound.NewSlashStep(inbound.SlashConfig{Registry: registry}),
-		inbound.NewRuleIntentStep(),
+		inbound.NewIntentResolveStepWithWorkspace(bindings, resolvers...),
 		inbound.NewAuthzStep(inbound.AuthzConfig{
 			Store:        bindings,
 			Registry:     registry,
 			SendReplies:  true,
 			RejectAsSkip: true,
 		}),
-	}
-
-	var opt channelPipelineOptions
-	if len(opts) > 0 {
-		opt = opts[0]
 	}
 
 	if opt.Storage != nil && opt.FileDownloader != nil {

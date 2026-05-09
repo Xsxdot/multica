@@ -347,6 +347,7 @@ WHERE id = (
                 AND active.issue_id IS NULL
                 AND active.chat_session_id IS NULL
                 AND active.autopilot_run_id IS NULL
+                AND COALESCE(atq.context->>'type', '') = COALESCE(active.context->>'type', '')
               )
             )
       )
@@ -362,10 +363,10 @@ RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, c
 // already dispatched or running. This allows different agents to work on the same
 // issue in parallel while preventing a single agent from running duplicate tasks.
 // Chat tasks (issue_id IS NULL) use chat_session_id for serialization instead.
-// Quick-create tasks have no issue / chat / autopilot link, so they serialize on
-// "any other quick-create-shaped task" (all four FKs NULL) for the same agent —
-// otherwise a user mashing the create button could fire concurrent quick-creates
-// whose completion lookup would race over "most recent issue by this agent".
+// Internal context-only tasks have no issue / chat / autopilot link, so they
+// serialize only with the same context.type for the same agent. This keeps
+// quick-create races guarded without letting channel intent classification
+// block unrelated quick-create work.
 func (q *Queries) ClaimAgentTask(ctx context.Context, agentID pgtype.UUID) (AgentTaskQueue, error) {
 	row := q.db.QueryRow(ctx, claimAgentTask, agentID)
 	var i AgentTaskQueue
@@ -602,6 +603,60 @@ func (q *Queries) CreateAgentTask(ctx context.Context, arg CreateAgentTaskParams
 		arg.TriggerCommentID,
 		arg.TriggerSummary,
 		arg.ForceFreshSession,
+	)
+	var i AgentTaskQueue
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.LastHeartbeatAt,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+	)
+	return i, err
+}
+
+const createChannelIntentTask = `-- name: CreateChannelIntentTask :one
+INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, context)
+VALUES ($1, $2, NULL, 'queued', $3, $4)
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, last_heartbeat_at, trigger_summary, force_fresh_session
+`
+
+type CreateChannelIntentTaskParams struct {
+	AgentID   pgtype.UUID `json:"agent_id"`
+	RuntimeID pgtype.UUID `json:"runtime_id"`
+	Priority  int32       `json:"priority"`
+	Context   []byte      `json:"context"`
+}
+
+// Channel-intent tasks are internal semantic classification jobs. They have no
+// issue / chat / autopilot link; the daemon detects them via
+// context.type == "channel_intent" and returns structured JSON only.
+func (q *Queries) CreateChannelIntentTask(ctx context.Context, arg CreateChannelIntentTaskParams) (AgentTaskQueue, error) {
+	row := q.db.QueryRow(ctx, createChannelIntentTask,
+		arg.AgentID,
+		arg.RuntimeID,
+		arg.Priority,
+		arg.Context,
 	)
 	var i AgentTaskQueue
 	err := row.Scan(
@@ -1038,6 +1093,7 @@ JOIN agent a ON a.id = atq.agent_id
 WHERE a.workspace_id = $1
   AND atq.completed_at IS NOT NULL
   AND atq.completed_at > now() - INTERVAL '30 days'
+  AND COALESCE(atq.context->>'type', '') <> 'channel_intent'
 GROUP BY atq.agent_id, bucket
 ORDER BY atq.agent_id, bucket
 `
@@ -1096,6 +1152,7 @@ FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
 WHERE a.workspace_id = $1
   AND atq.created_at > now() - INTERVAL '30 days'
+  AND COALESCE(atq.context->>'type', '') <> 'channel_intent'
 GROUP BY atq.agent_id
 `
 
@@ -1252,6 +1309,7 @@ func (q *Queries) ListActiveTasksByIssue(ctx context.Context, issueID pgtype.UUI
 const listAgentTasks = `-- name: ListAgentTasks :many
 SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, last_heartbeat_at, trigger_summary, force_fresh_session FROM agent_task_queue
 WHERE agent_id = $1
+  AND COALESCE(context->>'type', '') <> 'channel_intent'
 ORDER BY created_at DESC
 `
 
@@ -1566,6 +1624,7 @@ SELECT atq.id, atq.agent_id, atq.issue_id, atq.status, atq.priority, atq.dispatc
 JOIN agent a ON a.id = atq.agent_id
 WHERE a.workspace_id = $1
   AND atq.status IN ('queued', 'dispatched', 'running')
+  AND COALESCE(atq.context->>'type', '') <> 'channel_intent'
 
 UNION ALL
 
@@ -1575,6 +1634,7 @@ SELECT t.id, t.agent_id, t.issue_id, t.status, t.priority, t.dispatched_at, t.st
   JOIN agent a ON a.id = atq.agent_id
   WHERE a.workspace_id = $1
     AND atq.status IN ('completed', 'failed')
+    AND COALESCE(atq.context->>'type', '') <> 'channel_intent'
   ORDER BY atq.agent_id, atq.completed_at DESC NULLS LAST
 ) t
 `
@@ -1708,6 +1768,7 @@ UPDATE agent AS a
 SET status = CASE WHEN EXISTS (
     SELECT 1 FROM agent_task_queue q
     WHERE q.agent_id = a.id AND q.status IN ('dispatched', 'running')
+      AND COALESCE(q.context->>'type', '') <> 'channel_intent'
 ) THEN 'working' ELSE 'idle' END,
     updated_at = now()
 WHERE a.id = $1
