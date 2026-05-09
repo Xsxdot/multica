@@ -79,6 +79,23 @@ func (f *fakeDedupStore) MarkInboundEventFailed(_ context.Context, provider, eve
 // Continue and the rest of the pipeline executes.
 // ---------------------------------------------------------------------------
 
+func TestDedupStep_EmptyEventID_ReturnsError(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeDedupStore{responses: []dedupResp{{Inserted: true}}}
+	step := inbound.NewDedupStep(store)
+
+	_, _, err := step.Run(context.Background(), port.InboundEvent{ChannelName: "feishu", EventID: ""})
+	if err == nil {
+		t.Fatal("expected error for empty event_id, got nil")
+	}
+
+	_, _, err = step.Run(context.Background(), port.InboundEvent{ChannelName: "", EventID: "evt-001"})
+	if err == nil {
+		t.Fatal("expected error for empty channel_name, got nil")
+	}
+}
+
 func TestDedupStep_FirstDelivery_ReturnsContinueAndCallsStore(t *testing.T) {
 	t.Parallel()
 

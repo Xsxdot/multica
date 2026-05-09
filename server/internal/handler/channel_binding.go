@@ -83,8 +83,10 @@ func (h *Handler) CreateChannelUserBinding(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	consumer := binding.NewTokenConsumer(h.Queries)
-	peeked, err := consumer.Peek(r.Context(), req.Token)
+	// Fast-fail validation: Peek before transaction to avoid starting a tx
+	// for obviously bad input.
+	peeker := binding.NewTokenConsumer(h.Queries)
+	peeked, err := peeker.Peek(r.Context(), req.Token)
 	if err != nil {
 		switch {
 		case errors.Is(err, binding.ErrTokenExpired):
@@ -107,18 +109,21 @@ func (h *Handler) CreateChannelUserBinding(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	token, err := consumer.Consume(r.Context(), req.Token)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid or expired token")
-		return
-	}
-
 	tx, err := h.TxStarter.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start binding transaction")
 		return
 	}
 	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	qtx := db.New(tx)
+	consumer := binding.NewTokenConsumer(qtx)
+
+	token, err := consumer.Consume(r.Context(), req.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or expired token")
+		return
+	}
 
 	if _, err := tx.Exec(r.Context(), `
 		DELETE FROM channel_user_binding
@@ -295,10 +300,6 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, bindingToResponse(binding))
 }
 
-func (h *Handler) userOwnsExternalChannelIdentity(r *http.Request, userID pgtype.UUID, provider, externalUserID string) bool {
-	return userOwnsExternalChannelIdentity(r, h.DB, userID, provider, externalUserID)
-}
-
 func userOwnsExternalChannelIdentity(r *http.Request, exec interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }, userID pgtype.UUID, provider, externalUserID string) bool {
@@ -355,6 +356,25 @@ func (h *Handler) DeleteChannelBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Prevent deleting the only primary binding for a workspace/provider
+	if binding.IsPrimary {
+		bindings, err := h.Queries.ListChannelChatBindings(r.Context(), binding.WorkspaceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to check primary bindings")
+			return
+		}
+		primaryCount := 0
+		for _, b := range bindings {
+			if b.Provider == binding.Provider && b.IsPrimary {
+				primaryCount++
+			}
+		}
+		if primaryCount <= 1 {
+			writeError(w, http.StatusBadRequest, "cannot delete the only primary binding for this workspace")
+			return
+		}
+	}
+
 	if err := h.Queries.DeleteChannelChatBinding(r.Context(), bindingUUID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete binding")
 		return
@@ -405,6 +425,25 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 	if !canManageBinding(binding, member) {
 		writeError(w, http.StatusForbidden, "insufficient permissions")
 		return
+	}
+
+	// Prevent unsetting the only primary binding for a workspace/provider
+	if !req.IsPrimary && binding.IsPrimary {
+		bindings, err := h.Queries.ListChannelChatBindings(r.Context(), binding.WorkspaceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to check primary bindings")
+			return
+		}
+		primaryCount := 0
+		for _, b := range bindings {
+			if b.Provider == binding.Provider && b.IsPrimary {
+				primaryCount++
+			}
+		}
+		if primaryCount <= 1 {
+			writeError(w, http.StatusBadRequest, "cannot unset primary: workspace would have no primary binding")
+			return
+		}
 	}
 
 	tx, err := h.TxStarter.Begin(r.Context())

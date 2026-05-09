@@ -104,7 +104,30 @@ WHERE id IN (
 RETURNING id, provider, event_kind, target_user_id, target_external_user_id,
           title, body, attempts, max_attempts
 `
-	rows, err := s.db.Query(ctx, q, limit)
+	return s.queryNotifications(ctx, q, limit)
+}
+
+func (s *DBNotificationStore) ReclaimStaleProcessing(ctx context.Context, limit int32, staleAfter time.Duration) ([]OutboxNotification, error) {
+	const q = `
+UPDATE channel_outbound_notification SET
+    status = 'pending',
+    updated_at = now()
+WHERE id IN (
+    SELECT id FROM channel_outbound_notification
+    WHERE status = 'processing'
+      AND updated_at < now() - $2::interval
+    ORDER BY updated_at ASC
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, provider, event_kind, target_user_id, target_external_user_id,
+          title, body, attempts, max_attempts
+`
+	return s.queryNotifications(ctx, q, limit)
+}
+
+func (s *DBNotificationStore) queryNotifications(ctx context.Context, q string, limit int32, args ...any) ([]OutboxNotification, error) {
+	rows, err := s.db.Query(ctx, q, append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}
@@ -199,6 +222,7 @@ type OutboxWorker struct {
 
 type NotificationStore interface {
 	ClaimDue(ctx context.Context, limit int32) ([]OutboxNotification, error)
+	ReclaimStaleProcessing(ctx context.Context, limit int32, staleAfter time.Duration) ([]OutboxNotification, error)
 	MarkSent(ctx context.Context, ids []pgtype.UUID) error
 	ScheduleRetry(ctx context.Context, ids []pgtype.UUID, lastError string, backoff time.Duration) error
 	MarkDead(ctx context.Context, ids []pgtype.UUID, lastError string) error
@@ -239,13 +263,19 @@ func (w *OutboxWorker) Run(ctx context.Context) {
 }
 
 func (w *OutboxWorker) processBatch(ctx context.Context) {
+	reclaimed, err := w.store.ReclaimStaleProcessing(ctx, OutboxBatchSize, 5*time.Minute)
+	if err != nil {
+		channelmetrics.M.RecordOutboundOutbox("unknown", "reclaim_error", 1)
+		slog.Error("outbox worker: reclaim stale processing failed", "error", err)
+	}
+
 	rows, err := w.store.ClaimDue(ctx, OutboxBatchSize)
 	if err != nil {
 		channelmetrics.M.RecordOutboundOutbox("unknown", "claim_error", 1)
 		slog.Error("outbox worker: claim failed", "error", err)
 		return
 	}
-	groups := groupNotifications(rows)
+	groups := groupNotifications(append(reclaimed, rows...))
 	for _, g := range groups {
 		w.processGroup(ctx, g)
 	}
@@ -287,16 +317,8 @@ func (w *OutboxWorker) processGroup(ctx context.Context, g notificationGroup) {
 		return
 	}
 	ids := make([]pgtype.UUID, 0, len(g.items))
-	maxAttempts := int32(3)
-	attempts := int32(0)
 	for _, item := range g.items {
 		ids = append(ids, item.ID)
-		if item.MaxAttempts > maxAttempts {
-			maxAttempts = item.MaxAttempts
-		}
-		if item.Attempts > attempts {
-			attempts = item.Attempts
-		}
 	}
 	payload := RetryPayload{
 		Title: fmt.Sprintf("你有 %d 条新通知", len(g.items)),
@@ -314,18 +336,40 @@ func (w *OutboxWorker) processGroup(ctx context.Context, g notificationGroup) {
 		}
 		return
 	}
-	if IsRetryable(err) && attempts < maxAttempts {
-		backoff := backoffForAttempt(int(attempts))
-		channelmetrics.M.RecordOutboundOutbox(g.provider, "scheduled", len(g.items))
-		if retryErr := w.store.ScheduleRetry(ctx, ids, err.Error(), backoff); retryErr != nil {
-			slog.Error("outbox worker: schedule retry failed", "error", retryErr)
+
+	var retryIDs, deadIDs []pgtype.UUID
+	for _, item := range g.items {
+		if !IsRetryable(err) || item.Attempts >= item.MaxAttempts {
+			deadIDs = append(deadIDs, item.ID)
+		} else {
+			retryIDs = append(retryIDs, item.ID)
 		}
-		return
 	}
-	channelmetrics.M.RecordOutboundOutbox(g.provider, "dead", len(g.items))
-	if deadErr := w.store.MarkDead(ctx, ids, err.Error()); deadErr != nil {
-		slog.Error("outbox worker: mark dead failed", "error", deadErr)
+
+	if len(retryIDs) > 0 {
+		for _, id := range retryIDs {
+			backoff := backoffForAttempt(int(itemAttemptsByID(g.items, id)))
+			if retryErr := w.store.ScheduleRetry(ctx, []pgtype.UUID{id}, err.Error(), backoff); retryErr != nil {
+				slog.Error("outbox worker: schedule retry failed", "error", retryErr)
+			}
+		}
+		channelmetrics.M.RecordOutboundOutbox(g.provider, "scheduled", len(retryIDs))
 	}
+	if len(deadIDs) > 0 {
+		if deadErr := w.store.MarkDead(ctx, deadIDs, err.Error()); deadErr != nil {
+			slog.Error("outbox worker: mark dead failed", "error", deadErr)
+		}
+		channelmetrics.M.RecordOutboundOutbox(g.provider, "dead", len(deadIDs))
+	}
+}
+
+func itemAttemptsByID(items []OutboxNotification, id pgtype.UUID) int32 {
+	for _, item := range items {
+		if item.ID == id {
+			return item.Attempts
+		}
+	}
+	return 0
 }
 
 func buildOutboxBody(items []OutboxNotification) string {

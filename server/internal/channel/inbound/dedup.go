@@ -62,7 +62,7 @@ func (s *dedupStep) Name() string { return "dedup" }
 // replayed event.
 func (s *dedupStep) Run(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
 	if evt.ChannelName == "" || evt.EventID == "" {
-		return evt, DecisionContinue, nil
+		return evt, DecisionContinue, errors.New("dedup: missing channel_name or event_id")
 	}
 	inserted, err := s.store.TryRecordInboundEvent(ctx, evt.ChannelName, evt.EventID)
 	if err != nil {

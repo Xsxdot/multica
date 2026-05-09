@@ -11,14 +11,19 @@ import (
 )
 
 type fakeNotificationStore struct {
-	claimed []OutboxNotification
-	sent    []pgtype.UUID
-	retried []pgtype.UUID
-	dead    []pgtype.UUID
+	claimed   []OutboxNotification
+	reclaimed []OutboxNotification
+	sent      []pgtype.UUID
+	retried   []pgtype.UUID
+	dead      []pgtype.UUID
 }
 
 func (f *fakeNotificationStore) ClaimDue(context.Context, int32) ([]OutboxNotification, error) {
 	return f.claimed, nil
+}
+
+func (f *fakeNotificationStore) ReclaimStaleProcessing(context.Context, int32, time.Duration) ([]OutboxNotification, error) {
+	return f.reclaimed, nil
 }
 
 func (f *fakeNotificationStore) MarkSent(_ context.Context, ids []pgtype.UUID) error {
@@ -101,5 +106,47 @@ func TestOutboxWorker_NonRetryableFailureMarksDead(t *testing.T) {
 	}
 	if len(store.retried) != 0 {
 		t.Fatalf("retried ids = %d, want 0", len(store.retried))
+	}
+}
+
+func TestOutboxWorker_ReclaimStaleProcessing(t *testing.T) {
+	t.Parallel()
+
+	userID := pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}
+	reclaimed := []OutboxNotification{
+		{ID: pgtype.UUID{Bytes: [16]byte{0x41}, Valid: true}, Provider: "feishu", EventKind: "issue_assigned", TargetUserID: userID, TargetExternalUserID: "ou_1", Title: "R", MaxAttempts: 3},
+	}
+	store := &fakeNotificationStore{reclaimed: reclaimed}
+	sender := &mockRetrySender{}
+	worker := NewOutboxWorker(store, sender)
+
+	worker.processBatch(context.Background())
+
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(sender.calls))
+	}
+	if len(store.sent) != 1 {
+		t.Fatalf("sent ids = %d, want 1", len(store.sent))
+	}
+}
+
+func TestOutboxWorker_MixedAttemptsGroup_SplitsRetryAndDead(t *testing.T) {
+	t.Parallel()
+
+	userID := pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}
+	store := &fakeNotificationStore{claimed: []OutboxNotification{
+		{ID: pgtype.UUID{Bytes: [16]byte{0x51}, Valid: true}, Provider: "feishu", EventKind: "issue_assigned", TargetUserID: userID, TargetExternalUserID: "ou_1", Title: "Old", Attempts: 3, MaxAttempts: 3},
+		{ID: pgtype.UUID{Bytes: [16]byte{0x52}, Valid: true}, Provider: "feishu", EventKind: "issue_assigned", TargetUserID: userID, TargetExternalUserID: "ou_1", Title: "New", Attempts: 0, MaxAttempts: 3},
+	}}
+	sender := &mockRetrySender{err: WrapRetryable(errors.New("temporary"))}
+	worker := NewOutboxWorker(store, sender)
+
+	worker.processBatch(context.Background())
+
+	if len(store.dead) != 1 || store.dead[0].Bytes != [16]byte{0x51} {
+		t.Fatalf("dead ids = %v, want [0x51]", store.dead)
+	}
+	if len(store.retried) != 1 || store.retried[0].Bytes != [16]byte{0x52} {
+		t.Fatalf("retried ids = %v, want [0x52]", store.retried)
 	}
 }
