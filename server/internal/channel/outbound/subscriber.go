@@ -108,6 +108,7 @@ type Subscriber struct {
 	workspaceID string
 	aggregator  *Aggregator
 	failures    FailureRecorder
+	outbox      NotificationEnqueuer
 	activeFunc  func() bool
 }
 
@@ -148,6 +149,10 @@ func (s *Subscriber) SetAggregator(aggregator *Aggregator) {
 
 func (s *Subscriber) SetFailureRecorder(failures FailureRecorder) {
 	s.failures = failures
+}
+
+func (s *Subscriber) SetNotificationEnqueuer(outbox NotificationEnqueuer) {
+	s.outbox = outbox
 }
 
 // SetActiveFunc gates outbound handling. Production uses this to ensure only
@@ -380,6 +385,24 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 		ChatID: externalUserID,
 		Title:  title,
 		Body:   body,
+	}
+
+	if s.outbox != nil {
+		if err := s.outbox.EnqueueNotification(ctx, NotificationEnqueueRequest{
+			Provider:             s.channel.Name(),
+			EventKind:            eventKind,
+			TargetUserID:         userUUID,
+			TargetExternalUserID: externalUserID,
+			Title:                title,
+			Body:                 body,
+		}); err != nil {
+			channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "outbox_enqueue", true)
+			slog.Error("outbound: enqueue notification", "user_id", userID, "error", err)
+			return
+		}
+		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "queued")
+		channelmetrics.M.RecordOutboundOutbox(s.channel.Name(), "queued", 1)
+		return
 	}
 
 	if s.aggregator != nil {

@@ -62,6 +62,7 @@ func freshBindToken(t *testing.T, externalUserID string, ttl time.Duration) (pla
 	expires := pgtype.Timestamptz{Time: time.Now().Add(ttl), Valid: true}
 	if _, err := queries.CreateChannelBindToken(ctx, db.CreateChannelBindTokenParams{
 		TokenHash:      hash,
+		Purpose:        binding.PurposeUserIdentity,
 		Provider:       channelBindingTestProvider,
 		ExternalUserID: externalUserID,
 		ExpiresAt:      expires,

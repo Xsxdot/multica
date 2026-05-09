@@ -430,10 +430,10 @@ func main() {
 	registerNotificationListeners(bus, queries)
 
 	var channelOutboundSubscriber *outbound.Subscriber
+	var channelOutboxCancel context.CancelFunc
 	if feishuEnabled {
 		outboundChannel := newRegistryChannel(channelRegistry, "feishu")
-		cardSender := outbound.NewFailureRecordingCardSender(outboundChannel, queries)
-		cardSender.SetActiveFunc(channelAdapterReady.Load)
+		notificationStore := outbound.NewDBNotificationStore(pool)
 		channelOutboundSubscriber = outbound.NewSubscriber(
 			bus,
 			outboundChannel,
@@ -443,11 +443,13 @@ func main() {
 		)
 		channelOutboundSubscriber.SetActiveFunc(channelAdapterReady.Load)
 		channelOutboundSubscriber.SetFailureRecorder(queries)
-		channelOutboundSubscriber.SetAggregator(outbound.NewAggregator(
-			cardSender,
-			outbound.DefaultFlushInterval,
-		))
+		channelOutboundSubscriber.SetNotificationEnqueuer(notificationStore)
 		channelOutboundSubscriber.Start()
+		outboxCtx, cancel := context.WithCancel(context.Background())
+		channelOutboxCancel = cancel
+		outboxWorker := outbound.NewOutboxWorker(notificationStore, newRegistryRetrySender(channelRegistry))
+		outboxWorker.SetActiveFunc(channelAdapterReady.Load)
+		go outboxWorker.Run(outboxCtx)
 		slog.Info("channel outbound subscriber started", "provider", "feishu")
 	} else {
 		slog.Info("channel outbound subscriber disabled: Feishu credentials are not configured")
@@ -548,6 +550,9 @@ func main() {
 	}
 	if channelOutboundSubscriber != nil {
 		channelOutboundSubscriber.Stop()
+	}
+	if channelOutboxCancel != nil {
+		channelOutboxCancel()
 	}
 	cleanupCancel()
 	// Stop the channel leader before HTTP shutdown: OnRelease may want

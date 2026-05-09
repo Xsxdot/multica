@@ -3,12 +3,12 @@ package inbound
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/multica-ai/multica/server/internal/channel/port"
-	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // DedupStore is the narrow persistence contract the dedup Step depends
@@ -28,6 +28,11 @@ import (
 // this row?".
 type DedupStore interface {
 	TryRecordInboundEvent(ctx context.Context, provider, eventID string) (bool, error)
+}
+
+type DedupOutcomeStore interface {
+	MarkInboundEventProcessed(ctx context.Context, provider, eventID string) error
+	MarkInboundEventFailed(ctx context.Context, provider, eventID, lastError string) error
 }
 
 // dedupStep is the Step implementation that consults DedupStore on every
@@ -56,6 +61,9 @@ func (s *dedupStep) Name() string { return "dedup" }
 // (identity-bind, intent-recog, dispatch, reply) do not re-process a
 // replayed event.
 func (s *dedupStep) Run(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
+	if evt.ChannelName == "" || evt.EventID == "" {
+		return evt, DecisionContinue, nil
+	}
 	inserted, err := s.store.TryRecordInboundEvent(ctx, evt.ChannelName, evt.EventID)
 	if err != nil {
 		return evt, DecisionContinue, err
@@ -66,60 +74,50 @@ func (s *dedupStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 	return evt, DecisionContinue, nil
 }
 
-// dbQueriesTryRecorder is the slice of *db.Queries the production
-// adapter actually consumes. Defining the seam as an interface lets
-// the adapter be wired against either the real *db.Queries or a
-// tx-bound *db.Queries (e.g. db.New(tx)) without dragging the whole
-// Queries surface in.
-type dbQueriesTryRecorder interface {
-	TryRecordInboundEvent(ctx context.Context, arg db.TryRecordInboundEventParams) (pgtype.Timestamptz, error)
+func (s *dedupStep) Finalize(ctx context.Context, evt port.InboundEvent, _ Outcome, runErr error) error {
+	outcomes, ok := s.store.(DedupOutcomeStore)
+	if !ok || evt.ChannelName == "" || evt.EventID == "" {
+		return nil
+	}
+	if runErr != nil {
+		return outcomes.MarkInboundEventFailed(ctx, evt.ChannelName, evt.EventID, runErr.Error())
+	}
+	return outcomes.MarkInboundEventProcessed(ctx, evt.ChannelName, evt.EventID)
 }
 
-// dbDedupStore adapts the sqlc-generated *db.Queries shape (params
-// struct in, timestamptz out, pgx.ErrNoRows on conflict) to the narrow
-// DedupStore contract the Step expects. The translation lives at the
-// dao boundary so the rest of the inbound package can stay free of
-// pgx imports.
+type dedupDB interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 type dbDedupStore struct {
-	q dbQueriesTryRecorder
+	db dedupDB
 }
 
 // NewDBDedupStore wires the production DedupStore against the
-// sqlc-generated Queries. Callers in cmd/server/main.go (or the T7+
-// wiring code) pass *db.Queries; tests pass a fake satisfying
-// DedupStore directly without going through this adapter.
-func NewDBDedupStore(q dbQueriesTryRecorder) DedupStore {
-	return &dbDedupStore{q: q}
+// database. Callers pass *pgxpool.Pool or a transaction.
+func NewDBDedupStore(db dedupDB) DedupStore {
+	return &dbDedupStore{db: db}
 }
 
-// TryRecordInboundEvent translates between the sqlc :one return shape
-// and the bool the Step contract uses. There are exactly three branches
-// the underlying query can take, mapped here as follows:
-//
-//   - Insert succeeded (the row was new). sqlc returns the
-//     processed_at timestamptz from RETURNING + a nil error. We
-//     translate to (true, nil).
-//
-//   - ON CONFLICT DO NOTHING fired (the row already existed, i.e. the
-//     platform replayed an event we have processed before). sqlc's
-//     :one wrapper sees zero rows from RETURNING and surfaces it as
-//     pgx.ErrNoRows. We translate to (false, nil) — the caller's
-//     "duplicate, skip the rest of the pipeline" path.
-//
-//   - Anything else (driver / network / constraint failures). We
-//     surface the underlying error so the dedup Step can propagate
-//     it and the pipeline can abort, rather than silently dropping
-//     the event.
-//
-// The pgx.ErrNoRows handling is the entire reason this adapter
-// exists: keeping it confined here means the dedup Step itself
-// (and every other file in the inbound package) stays free of pgx
-// imports.
 func (s *dbDedupStore) TryRecordInboundEvent(ctx context.Context, provider, eventID string) (bool, error) {
-	_, err := s.q.TryRecordInboundEvent(ctx, db.TryRecordInboundEventParams{
-		Provider: provider,
-		EventID:  eventID,
-	})
+	const q = `
+INSERT INTO channel_inbound_event_dedup (provider, event_id, status, attempts, processed_at, updated_at)
+VALUES ($1, $2, 'processing', 1, now(), now())
+ON CONFLICT (provider, event_id) DO UPDATE SET
+    status = 'processing',
+    attempts = channel_inbound_event_dedup.attempts + 1,
+    last_error = NULL,
+    updated_at = now()
+WHERE channel_inbound_event_dedup.status = 'failed'
+   OR (
+        channel_inbound_event_dedup.status = 'processing'
+        AND channel_inbound_event_dedup.updated_at < now() - interval '5 minutes'
+   )
+RETURNING status
+`
+	var status string
+	err := s.db.QueryRow(ctx, q, provider, eventID).Scan(&status)
 	if err == nil {
 		return true, nil
 	}
@@ -129,10 +127,46 @@ func (s *dbDedupStore) TryRecordInboundEvent(ctx context.Context, provider, even
 	return false, err
 }
 
+func (s *dbDedupStore) MarkInboundEventProcessed(ctx context.Context, provider, eventID string) error {
+	const q = `
+UPDATE channel_inbound_event_dedup SET
+    status = 'processed',
+    processed_at = now(),
+    updated_at = now(),
+    last_error = NULL
+WHERE provider = $1
+  AND event_id = $2
+  AND status = 'processing'
+`
+	_, err := s.db.Exec(ctx, q, provider, eventID)
+	return err
+}
+
+func (s *dbDedupStore) MarkInboundEventFailed(ctx context.Context, provider, eventID, lastError string) error {
+	const q = `
+UPDATE channel_inbound_event_dedup SET
+    status = 'failed',
+    last_error = $3,
+    updated_at = now()
+WHERE provider = $1
+  AND event_id = $2
+  AND status = 'processing'
+`
+	if len(lastError) > 2000 {
+		lastError = lastError[:2000]
+	}
+	_, err := s.db.Exec(ctx, q, provider, eventID, lastError)
+	if err != nil {
+		return fmt.Errorf("dedup: mark failed: %w", err)
+	}
+	return nil
+}
+
 // Compile-time interface conformance: a clear compile-time error here
 // is friendlier than a confusing one at every call site if a method
 // signature drifts.
 var (
 	_ Step       = (*dedupStep)(nil)
+	_ Finalizer  = (*dedupStep)(nil)
 	_ DedupStore = (*dbDedupStore)(nil)
 )

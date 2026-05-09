@@ -28,7 +28,12 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeDedupStore struct {
-	calls []dedupCall
+	calls     []dedupCall
+	processed []dedupCall
+	failed    []struct {
+		dedupCall
+		LastError string
+	}
 
 	// responses is consumed in order. If the dedup step calls the store
 	// more times than there are responses, the test fails with a clear
@@ -54,6 +59,19 @@ func (f *fakeDedupStore) TryRecordInboundEvent(_ context.Context, provider, even
 	r := f.responses[0]
 	f.responses = f.responses[1:]
 	return r.Inserted, r.Err
+}
+
+func (f *fakeDedupStore) MarkInboundEventProcessed(_ context.Context, provider, eventID string) error {
+	f.processed = append(f.processed, dedupCall{Provider: provider, EventID: eventID})
+	return nil
+}
+
+func (f *fakeDedupStore) MarkInboundEventFailed(_ context.Context, provider, eventID, lastError string) error {
+	f.failed = append(f.failed, struct {
+		dedupCall
+		LastError string
+	}{dedupCall: dedupCall{Provider: provider, EventID: eventID}, LastError: lastError})
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -192,8 +210,55 @@ func TestDedupStep_StoreError_Propagates(t *testing.T) {
 	store := &fakeDedupStore{responses: []dedupResp{{Err: wantErr}}}
 	step := inbound.NewDedupStep(store)
 
-	_, _, err := step.Run(context.Background(), port.InboundEvent{EventID: "evt-err"})
+	_, _, err := step.Run(context.Background(), port.InboundEvent{ChannelName: "feishu", EventID: "evt-err"})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want errors.Is(%v) == true", err, wantErr)
+	}
+}
+
+func TestPipeline_DedupFinalizer_MarksProcessedOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeDedupStore{responses: []dedupResp{{Inserted: true}}}
+	p := inbound.NewPipeline(
+		inbound.NewDedupStep(store),
+		newSpy("dispatch", inbound.DecisionContinue, &[]string{}),
+	)
+
+	_, err := p.Run(context.Background(), port.InboundEvent{ChannelName: "feishu", EventID: "evt-ok"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(store.processed) != 1 {
+		t.Fatalf("processed marks = %d, want 1", len(store.processed))
+	}
+	if store.processed[0] != (dedupCall{Provider: "feishu", EventID: "evt-ok"}) {
+		t.Fatalf("processed mark = %+v", store.processed[0])
+	}
+}
+
+func TestPipeline_DedupFinalizer_MarksFailedOnError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("dispatch failed")
+	store := &fakeDedupStore{responses: []dedupResp{{Inserted: true}}}
+	var log []string
+	p := inbound.NewPipeline(
+		inbound.NewDedupStep(store),
+		&spyStep{name: "dispatch", decision: inbound.DecisionContinue, err: wantErr, log: &log},
+	)
+
+	_, err := p.Run(context.Background(), port.InboundEvent{ChannelName: "feishu", EventID: "evt-fail"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Run err = %v, want %v", err, wantErr)
+	}
+	if len(store.failed) != 1 {
+		t.Fatalf("failed marks = %d, want 1", len(store.failed))
+	}
+	if store.failed[0].Provider != "feishu" || store.failed[0].EventID != "evt-fail" {
+		t.Fatalf("failed mark = %+v", store.failed[0])
+	}
+	if store.failed[0].LastError == "" {
+		t.Fatal("failed mark should keep last error")
 	}
 }

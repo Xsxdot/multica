@@ -28,6 +28,7 @@ vi.mock("@multica/ui/components/ui/alert-dialog", () => ({
 }));
 
 vi.mock("@tanstack/react-query", () => ({
+  queryOptions: (options: unknown) => options,
   useQuery: vi.fn(),
   useQueryClient: vi.fn(() => ({ invalidateQueries: vi.fn() })),
   useMutation: vi.fn(),
@@ -73,7 +74,7 @@ describe("IntegrationsTab", () => {
 
   it("renders empty state when no bindings", () => {
     (useQuery as ReturnType<typeof vi.fn>).mockReturnValue({
-      data: [],
+      data: { bindings: [] },
       isLoading: false,
     });
     (useMutation as ReturnType<typeof vi.fn>).mockReturnValue({
@@ -87,7 +88,7 @@ describe("IntegrationsTab", () => {
 
   it("renders binding list with primary badge", () => {
     (useQuery as ReturnType<typeof vi.fn>).mockReturnValue({
-      data: [
+      data: { bindings: [
         {
           id: "bind-1",
           provider: "feishu",
@@ -98,7 +99,7 @@ describe("IntegrationsTab", () => {
           bound_by_user_id: "user-1",
           created_at: "2026-05-06T00:00:00Z",
         },
-      ],
+      ] },
       isLoading: false,
     });
     (useMutation as ReturnType<typeof vi.fn>).mockReturnValue({
@@ -113,7 +114,7 @@ describe("IntegrationsTab", () => {
 
   it("shows 'Set as Primary' button for non-primary binding", () => {
     (useQuery as ReturnType<typeof vi.fn>).mockReturnValue({
-      data: [
+      data: { bindings: [
         {
           id: "bind-1",
           provider: "feishu",
@@ -134,7 +135,7 @@ describe("IntegrationsTab", () => {
           bound_by_user_id: "user-1",
           created_at: "2026-05-06T00:00:00Z",
         },
-      ],
+      ] },
       isLoading: false,
     });
     (useMutation as ReturnType<typeof vi.fn>).mockReturnValue({
@@ -150,7 +151,7 @@ describe("IntegrationsTab", () => {
   it("calls setPrimary when 'Set as Primary' is clicked", async () => {
     const setPrimaryMock = vi.fn().mockResolvedValue({});
     (useQuery as ReturnType<typeof vi.fn>).mockReturnValue({
-      data: [
+      data: { bindings: [
         {
           id: "bind-1",
           provider: "feishu",
@@ -171,10 +172,13 @@ describe("IntegrationsTab", () => {
           bound_by_user_id: "user-1",
           created_at: "2026-05-06T00:00:00Z",
         },
-      ],
+      ] },
       isLoading: false,
     });
     (useMutation as ReturnType<typeof vi.fn>).mockImplementation((opts: { mutationFn?: (vars: unknown) => Promise<unknown> }) => ({
+      mutate: (vars: unknown, callbacks?: { onSettled?: () => void }) => {
+        void opts?.mutationFn?.(vars).finally(() => callbacks?.onSettled?.());
+      },
       mutateAsync: opts?.mutationFn ?? vi.fn(),
       isPending: false,
     }));
@@ -187,14 +191,14 @@ describe("IntegrationsTab", () => {
     await user.click(btn);
 
     await waitFor(() => {
-      expect(setPrimaryMock).toHaveBeenCalledWith({ workspaceId: "ws-1", bindingId: "bind-2" });
+      expect(setPrimaryMock).toHaveBeenCalledWith("ws-1", "bind-2", { is_primary: true });
     });
   });
 
   it("shows unbind confirmation dialog when unbind is clicked", async () => {
     const deleteMock = vi.fn().mockResolvedValue({});
     (useQuery as ReturnType<typeof vi.fn>).mockReturnValue({
-      data: [
+      data: { bindings: [
         {
           id: "bind-1",
           provider: "feishu",
@@ -205,7 +209,7 @@ describe("IntegrationsTab", () => {
           bound_by_user_id: "user-1",
           created_at: "2026-05-06T00:00:00Z",
         },
-      ],
+      ] },
       isLoading: false,
     });
     (useMutation as ReturnType<typeof vi.fn>).mockImplementation((opts: { mutationFn?: (vars: unknown) => Promise<unknown> }) => ({
@@ -226,7 +230,7 @@ describe("IntegrationsTab", () => {
     await user.click(confirmBtn);
 
     await waitFor(() => {
-      expect(deleteMock).toHaveBeenCalledWith({ workspaceId: "ws-1", bindingId: "bind-1" });
+      expect(deleteMock).toHaveBeenCalledWith("ws-1", "bind-1");
     });
   });
 });

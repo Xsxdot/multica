@@ -1,9 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Link2, Plus, Star, Trash2, MessageCircle } from "lucide-react";
+import { Link2, Star, Trash2, MessageCircle } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
-import { Card, CardContent } from "@multica/ui/components/ui/card";
 import { Badge } from "@multica/ui/components/ui/badge";
 import {
   AlertDialog,
@@ -17,7 +16,6 @@ import {
 } from "@multica/ui/components/ui/alert-dialog";
 import { toast } from "sonner";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
-import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useCurrentWorkspace } from "@multica/core/paths";
 import { useCurrentMember } from "@multica/core/permissions";
@@ -88,7 +86,6 @@ function BindingCard({
 }
 
 export function IntegrationsTab() {
-  const user = useAuthStore((s) => s.user);
   const workspace = useCurrentWorkspace();
   const qc = useQueryClient();
   const wsId = useWorkspaceId();
@@ -116,18 +113,6 @@ export function IntegrationsTab() {
     },
     onError: (e: Error) => {
       toast.error(e.message || "Failed to update primary binding");
-    },
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: ({ bindingId }: { bindingId: string }) =>
-      api.deleteChannelBinding(wsId, bindingId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: workspaceKeys.channelBindings(wsId) });
-      toast.success("Binding removed");
-    },
-    onError: (e: Error) => {
-      toast.error(e.message || "Failed to remove binding");
     },
   });
 

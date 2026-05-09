@@ -29,7 +29,6 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	"github.com/multica-ai/multica/server/internal/channel/outbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
-	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // ---------------------------------------------------------------------------
@@ -285,9 +284,8 @@ func newM2Pipeline(
 	intent port.InboundIntent,
 	dispatch inbound.Step,
 ) *inbound.Pipeline {
-	queries := db.New(pool)
 	return inbound.NewPipeline(
-		inbound.NewDedupStep(inbound.NewDBDedupStore(queries)),
+		inbound.NewDedupStep(inbound.NewDBDedupStore(pool)),
 		newStaticIntentStep(intent),
 		dispatch,
 	)

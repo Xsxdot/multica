@@ -23,6 +23,8 @@ type Recorder struct {
 	outboundRetries     *prometheus.CounterVec
 	outboundDead        *prometheus.CounterVec
 	outboundAggregates  *prometheus.CounterVec
+	outboundOutbox      *prometheus.CounterVec
+	adapterDrops        *prometheus.CounterVec
 	leaderState         *prometheus.GaugeVec
 	adapterConnected    *prometheus.GaugeVec
 }
@@ -80,6 +82,18 @@ func NewRecorder() *Recorder {
 			Name:      "outbound_aggregated_notifications_total",
 			Help:      "Total notifications handled by outbound aggregation.",
 		}, []string{"provider", "event_kind", "result"}),
+		outboundOutbox: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "multica",
+			Subsystem: "channel",
+			Name:      "outbound_outbox_notifications_total",
+			Help:      "Total notifications handled by the durable outbound outbox.",
+		}, []string{"provider", "result"}),
+		adapterDrops: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "multica",
+			Subsystem: "channel",
+			Name:      "adapter_dropped_events_total",
+			Help:      "Total channel adapter events dropped before the inbound pipeline.",
+		}, []string{"provider", "reason"}),
 		leaderState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "multica",
 			Subsystem: "channel",
@@ -108,6 +122,8 @@ func (r *Recorder) Collectors() []prometheus.Collector {
 		r.outboundRetries,
 		r.outboundDead,
 		r.outboundAggregates,
+		r.outboundOutbox,
+		r.adapterDrops,
 		r.leaderState,
 		r.adapterConnected,
 	}
@@ -169,6 +185,20 @@ func (r *Recorder) RecordOutboundAggregate(provider, eventKind, result string, c
 		return
 	}
 	r.outboundAggregates.WithLabelValues(label(provider), label(eventKind), label(result)).Add(float64(count))
+}
+
+func (r *Recorder) RecordOutboundOutbox(provider, result string, count int) {
+	if r == nil || count <= 0 {
+		return
+	}
+	r.outboundOutbox.WithLabelValues(label(provider), label(result)).Add(float64(count))
+}
+
+func (r *Recorder) RecordAdapterDrop(provider, reason string) {
+	if r == nil {
+		return
+	}
+	r.adapterDrops.WithLabelValues(label(provider), label(reason)).Inc()
 }
 
 func (r *Recorder) SetLeaderState(provider string, active bool) {

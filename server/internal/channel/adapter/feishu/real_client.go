@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
+	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
 )
 
 // RealClient implements Client using the official Feishu/Lark SDK
@@ -36,6 +38,10 @@ type RealClient struct {
 	started   bool
 	startErr  error
 	startDone chan struct{} // closed once Start completes
+	runCancel context.CancelFunc
+	runDone   chan struct{}
+	eventMu   sync.RWMutex
+	closed    bool
 }
 
 // NewRealClient constructs a RealClient. Call Start to open the WebSocket
@@ -47,6 +53,7 @@ func NewRealClient(appID, appSecret, encryptKey, verifyToken string) *RealClient
 		events:    make(chan RawEvent, 64),
 		botReady:  make(chan struct{}),
 		startDone: make(chan struct{}),
+		runDone:   make(chan struct{}),
 	}
 
 	// Build the event dispatcher. We register a handler for the
@@ -95,9 +102,12 @@ func (rc *RealClient) Start(ctx context.Context) error {
 
 		// Start the WebSocket client in a background goroutine.
 		// The SDK handles reconnection internally.
+		runCtx, cancel := context.WithCancel(ctx)
+		rc.runCancel = cancel
 		go func() {
+			defer close(rc.runDone)
 			slog.Info("feishu: ws client starting")
-			if err := rc.wsClient.Start(ctx); err != nil {
+			if err := rc.wsClient.Start(runCtx); err != nil {
 				slog.Error("feishu: ws client stopped", "error", err)
 			}
 		}()
@@ -110,11 +120,27 @@ func (rc *RealClient) Start(ctx context.Context) error {
 	return rc.startErr
 }
 
-// Stop tears down the WebSocket connection. After Stop returns, the
-// events channel is closed.
-func (rc *RealClient) Stop(_ context.Context) error {
+// Stop tears down the WebSocket receive path. The upstream SDK does not expose
+// an explicit Stop method, so we cancel the context supplied to Start and wait
+// briefly for its goroutine to return. Regardless of SDK behaviour, the local
+// event channel is closed exactly once and late SDK callbacks are dropped.
+func (rc *RealClient) Stop(ctx context.Context) error {
 	rc.stopOnce.Do(func() {
+		if rc.runCancel != nil {
+			rc.runCancel()
+		}
+		if rc.started {
+			select {
+			case <-rc.runDone:
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+				slog.Warn("feishu: ws client did not stop before timeout")
+			}
+		}
+		rc.eventMu.Lock()
+		rc.closed = true
 		close(rc.events)
+		rc.eventMu.Unlock()
 	})
 	return nil
 }
@@ -260,9 +286,17 @@ func (rc *RealClient) handleMessageReceive(ctx context.Context, ev *larkim.P2Mes
 		Payload:   payload,
 	}
 
+	rc.eventMu.RLock()
+	defer rc.eventMu.RUnlock()
+	if rc.closed {
+		channelmetrics.M.RecordAdapterDrop("feishu", "closed")
+		slog.Warn("feishu: events channel closed, dropping event", "event_id", eventID)
+		return
+	}
 	select {
 	case rc.events <- raw:
 	default:
+		channelmetrics.M.RecordAdapterDrop("feishu", "buffer_full")
 		slog.Warn("feishu: events channel full, dropping event", "event_id", eventID)
 	}
 }

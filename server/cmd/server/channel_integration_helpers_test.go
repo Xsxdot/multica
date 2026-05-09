@@ -253,7 +253,7 @@ func (s *createIssueDispatchStep) Run(ctx context.Context, evt port.InboundEvent
 	// re-read the identifier from the DB via the workspace prefix +
 	// number columns.
 	var (
-		number int32
+		number  int32
 		prefix2 string
 	)
 	if err := s.pool.QueryRow(ctx, `
@@ -333,10 +333,10 @@ func (s *directIssueService) CreateIssue(ctx context.Context, req facade.CreateI
 
 func (s *directIssueService) GetIssue(ctx context.Context, id pgtype.UUID) (facade.Issue, error) {
 	var (
-		out      facade.Issue
-		status   string
-		title    string
-		wsID     pgtype.UUID
+		out    facade.Issue
+		status string
+		title  string
+		wsID   pgtype.UUID
 	)
 	if err := s.pool.QueryRow(ctx, `
 		SELECT workspace_id, title, status FROM issue WHERE id = $1
@@ -564,7 +564,7 @@ func freshEventID(t *testing.T, provider, prefix string) string {
 func newChannelTestPipeline(pool *pgxpool.Pool, registry *channel.Registry, dispatch inbound.Step) *inbound.Pipeline {
 	queries := db.New(pool)
 	return inbound.NewPipeline(
-		inbound.NewDedupStep(inbound.NewDBDedupStore(queries)),
+		inbound.NewDedupStep(inbound.NewDBDedupStore(pool)),
 		newIdentityBindStep(pool, registry, binding.NewTokenIssuer(queries)),
 		dispatch,
 	)

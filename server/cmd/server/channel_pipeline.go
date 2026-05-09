@@ -48,8 +48,8 @@ func newChannelInboundPipeline(pool *pgxpool.Pool, registry *channel.Registry, o
 	}
 
 	steps := []inbound.Step{
+		inbound.NewDedupStep(inbound.NewDBDedupStore(pool)),
 		inbound.NewNormalizeStep(),
-		inbound.NewDedupStep(inbound.NewDBDedupStore(queries)),
 		inbound.NewUserIdentityBindStep(pool, registry, issuer),
 		inbound.NewChatBindCommandStep(registry, issuer),
 		inbound.NewSlashStep(inbound.SlashConfig{Registry: registry}),

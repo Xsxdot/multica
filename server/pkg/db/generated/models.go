@@ -185,6 +185,10 @@ type ChannelInboundEventDedup struct {
 	Provider    string             `json:"provider"`
 	EventID     string             `json:"event_id"`
 	ProcessedAt pgtype.Timestamptz `json:"processed_at"`
+	Status      string             `json:"status"`
+	Attempts    int32              `json:"attempts"`
+	LastError   pgtype.Text        `json:"last_error"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
 type ChannelOutboundFailure struct {
@@ -200,6 +204,24 @@ type ChannelOutboundFailure struct {
 	NextRetryAt          pgtype.Timestamptz `json:"next_retry_at"`
 	LastError            pgtype.Text        `json:"last_error"`
 	LastAttemptedAt      pgtype.Timestamptz `json:"last_attempted_at"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ChannelOutboundNotification struct {
+	ID                   pgtype.UUID        `json:"id"`
+	Provider             string             `json:"provider"`
+	EventKind            string             `json:"event_kind"`
+	TargetUserID         pgtype.UUID        `json:"target_user_id"`
+	TargetExternalUserID string             `json:"target_external_user_id"`
+	Title                string             `json:"title"`
+	Body                 string             `json:"body"`
+	Status               string             `json:"status"`
+	Attempts             int32              `json:"attempts"`
+	MaxAttempts          int32              `json:"max_attempts"`
+	AggregationDueAt     pgtype.Timestamptz `json:"aggregation_due_at"`
+	NextAttemptAt        pgtype.Timestamptz `json:"next_attempt_at"`
+	LastError            pgtype.Text        `json:"last_error"`
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
 }

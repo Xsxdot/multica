@@ -50,6 +50,10 @@ type Step interface {
 	Run(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error)
 }
 
+type Finalizer interface {
+	Finalize(ctx context.Context, evt port.InboundEvent, outcome Outcome, runErr error) error
+}
+
 // Outcome captures how a Pipeline.Run invocation finished. It is only
 // meaningful when Run returned a nil error; on error the caller MUST
 // ignore Outcome (zero value).
@@ -131,24 +135,46 @@ func (p *Pipeline) Run(ctx context.Context, evt port.InboundEvent) (Outcome, err
 		d       Decision
 	)
 	started := time.Now()
-	for _, s := range p.steps {
+	for i, s := range p.steps {
 		stepStarted := time.Now()
 		evt, d, err = s.Run(ctx, evt)
 		if err != nil {
 			failed := Outcome{Terminal: s.Name(), Decision: d}
 			p.observeStep(evt, s.Name(), d, time.Since(stepStarted), err)
+			finalizeErr := p.finalize(ctx, evt, failed, err, i)
+			if finalizeErr != nil {
+				err = finalizeErr
+			}
 			p.observePipeline(evt, failed, time.Since(started), err)
 			return Outcome{}, err
 		}
 		outcome = Outcome{Terminal: s.Name(), Decision: d}
 		p.observeStep(evt, s.Name(), d, time.Since(stepStarted), nil)
 		if d == DecisionSkip {
-			p.observePipeline(evt, outcome, time.Since(started), nil)
-			return outcome, nil
+			err = p.finalize(ctx, evt, outcome, nil, i)
+			p.observePipeline(evt, outcome, time.Since(started), err)
+			return outcome, err
 		}
 	}
-	p.observePipeline(evt, outcome, time.Since(started), nil)
-	return outcome, nil
+	err = p.finalize(ctx, evt, outcome, nil, len(p.steps)-1)
+	p.observePipeline(evt, outcome, time.Since(started), err)
+	return outcome, err
+}
+
+func (p *Pipeline) finalize(ctx context.Context, evt port.InboundEvent, outcome Outcome, runErr error, lastIdx int) error {
+	if lastIdx < 0 {
+		return runErr
+	}
+	for i := lastIdx; i >= 0; i-- {
+		f, ok := p.steps[i].(Finalizer)
+		if !ok {
+			continue
+		}
+		if err := f.Finalize(ctx, evt, outcome, runErr); err != nil && runErr == nil {
+			return err
+		}
+	}
+	return runErr
 }
 
 func (p *Pipeline) observeStep(evt port.InboundEvent, step string, decision Decision, duration time.Duration, err error) {
