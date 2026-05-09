@@ -155,8 +155,9 @@ func (s *Subscriber) SetNotificationEnqueuer(outbox NotificationEnqueuer) {
 	s.outbox = outbox
 }
 
-// SetActiveFunc gates outbound handling. Production uses this to ensure only
-// the process that owns the channel adapter handles business events.
+// SetActiveFunc gates direct outbound delivery. Durable outbox enqueue is not
+// gated so every API node can persist notifications; workers/senders decide
+// which process is allowed to talk to the external channel.
 func (s *Subscriber) SetActiveFunc(activeFunc func() bool) {
 	s.activeFunc = activeFunc
 }
@@ -171,11 +172,15 @@ func (s *Subscriber) isActive() bool {
 	return s.activeFunc == nil || s.activeFunc()
 }
 
+func (s *Subscriber) shouldHandleEvent() bool {
+	return s.outbox != nil || s.isActive()
+}
+
 // handleCommentCreated processes comment:created events.
 // Extracts subscriber user_ids from the payload and sends cards to
 // bound, unmuted users.
 func (s *Subscriber) handleCommentCreated(e events.Event) {
-	if !s.isActive() {
+	if !s.shouldHandleEvent() {
 		return
 	}
 	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
@@ -211,7 +216,7 @@ func (s *Subscriber) handleCommentCreated(e events.Event) {
 // handleInboxNew processes inbox:new events.
 // Sends a card to the target user.
 func (s *Subscriber) handleInboxNew(e events.Event) {
-	if !s.isActive() {
+	if !s.shouldHandleEvent() {
 		return
 	}
 	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
@@ -238,7 +243,7 @@ func (s *Subscriber) handleInboxNew(e events.Event) {
 
 // handleSubscriberAdded processes subscriber:added events.
 func (s *Subscriber) handleSubscriberAdded(e events.Event) {
-	if !s.isActive() {
+	if !s.shouldHandleEvent() {
 		return
 	}
 	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
@@ -265,7 +270,7 @@ func (s *Subscriber) handleSubscriberAdded(e events.Event) {
 // (in_review, done, blocked), a card is sent to the issue's assignee
 // so the relevant party is notified of the transition.
 func (s *Subscriber) handleIssueUpdated(e events.Event) {
-	if !s.isActive() {
+	if !s.shouldHandleEvent() {
 		return
 	}
 	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
@@ -336,11 +341,6 @@ func statusLabel(status string) string {
 // sendToUser resolves the user's binding, checks preferences, and
 // sends a card message.
 func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body string) {
-	if !s.isActive() {
-		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "inactive")
-		return
-	}
-
 	ctx := context.Background()
 
 	// R4: parseUUID returns error; log+drop on invalid UUID.
@@ -402,6 +402,11 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 		}
 		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "queued")
 		channelmetrics.M.RecordOutboundOutbox(s.channel.Name(), "queued", 1)
+		return
+	}
+
+	if !s.isActive() {
+		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "inactive")
 		return
 	}
 

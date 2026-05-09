@@ -74,9 +74,12 @@ func (s *dedupStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 	return evt, DecisionContinue, nil
 }
 
-func (s *dedupStep) Finalize(ctx context.Context, evt port.InboundEvent, _ Outcome, runErr error) error {
+func (s *dedupStep) Finalize(ctx context.Context, evt port.InboundEvent, outcome Outcome, runErr error) error {
 	outcomes, ok := s.store.(DedupOutcomeStore)
 	if !ok || evt.ChannelName == "" || evt.EventID == "" {
+		return nil
+	}
+	if outcome.Terminal == s.Name() && outcome.Decision == DecisionSkip {
 		return nil
 	}
 	if runErr != nil {

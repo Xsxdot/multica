@@ -100,15 +100,36 @@ func (rc *RealClient) Start(ctx context.Context) error {
 		rc.botUserID = botUserID
 		close(rc.botReady)
 
-		// Start the WebSocket client in a background goroutine.
-		// The SDK handles reconnection internally.
+		// Start the WebSocket client in a background goroutine. The SDK
+		// handles normal reconnects internally; this loop restarts the
+		// client if the SDK receive loop exits anyway.
 		runCtx, cancel := context.WithCancel(ctx)
 		rc.runCancel = cancel
 		go func() {
 			defer close(rc.runDone)
-			slog.Info("feishu: ws client starting")
-			if err := rc.wsClient.Start(runCtx); err != nil {
-				slog.Error("feishu: ws client stopped", "error", err)
+			backoff := time.Second
+			for {
+				if runCtx.Err() != nil {
+					return
+				}
+				slog.Info("feishu: ws client starting")
+				err := rc.wsClient.Start(runCtx)
+				if runCtx.Err() != nil {
+					return
+				}
+				if err != nil {
+					slog.Error("feishu: ws client stopped; restarting", "error", err)
+				} else {
+					slog.Warn("feishu: ws client stopped without error; restarting")
+				}
+				select {
+				case <-runCtx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < 30*time.Second {
+					backoff *= 2
+				}
 			}
 		}()
 

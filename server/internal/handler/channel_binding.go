@@ -49,6 +49,13 @@ func bindingToResponse(b db.ChannelChatBinding) ChannelBindingResponse {
 	}
 }
 
+func lockChannelBindingProvider(ctx context.Context, tx pgx.Tx, workspaceID pgtype.UUID, provider string) error {
+	_, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2))
+	`, workspaceID, provider)
+	return err
+}
+
 type CreateChannelBindingRequest struct {
 	Token    string `json:"token"`
 	Provider string `json:"provider"`
@@ -265,6 +272,32 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := lockChannelBindingProvider(r.Context(), tx, member.WorkspaceID, req.Provider); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
+		return
+	}
+
+	existing, err = qtx.GetChannelChatBindingByProviderAndChatID(r.Context(), db.GetChannelChatBindingByProviderAndChatIDParams{
+		Provider:       peeked.Provider,
+		ExternalChatID: peeked.ExternalChatID.String,
+	})
+	if err == nil {
+		if existing.WorkspaceID == member.WorkspaceID {
+			if err := tx.Commit(r.Context()); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to commit binding transaction")
+				return
+			}
+			writeJSON(w, http.StatusOK, bindingToResponse(existing))
+			return
+		}
+		writeError(w, http.StatusConflict, "this chat is already bound to another workspace")
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to check existing chat binding")
+		return
+	}
+
 	// Lock and check existing bindings for this workspace/provider
 	// to determine is_primary
 	if _, err := tx.Exec(r.Context(), `
@@ -379,19 +412,41 @@ func (h *Handler) DeleteChannelBinding(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = tx.Rollback(r.Context()) }()
 	qtx := db.New(tx)
 
+	if err := lockChannelBindingProvider(r.Context(), tx, binding.WorkspaceID, binding.Provider); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
+		return
+	}
+	if _, err := tx.Exec(r.Context(), `
+		SELECT id FROM channel_chat_binding
+		WHERE workspace_id = $1 AND provider = $2
+		FOR UPDATE
+	`, binding.WorkspaceID, binding.Provider); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
+		return
+	}
+
+	binding, err = qtx.GetChannelChatBinding(r.Context(), bindingUUID)
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "binding not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to reload binding")
+		return
+	}
+	if uuidToString(binding.WorkspaceID) != workspaceID {
+		writeError(w, http.StatusNotFound, "binding not found")
+		return
+	}
+	if !canManageBinding(binding, member) {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return
+	}
+
 	// Prevent deleting the primary binding while other bindings for the
 	// same provider still exist — zero bindings is a valid state, but
 	// orphaned non-primary bindings are not.
 	if binding.IsPrimary {
-		if _, err := tx.Exec(r.Context(), `
-			SELECT id FROM channel_chat_binding
-			WHERE workspace_id = $1 AND provider = $2
-			FOR UPDATE
-		`, binding.WorkspaceID, binding.Provider); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
-			return
-		}
-
 		bindings, err := qtx.ListChannelChatBindings(r.Context(), binding.WorkspaceID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to check primary bindings")

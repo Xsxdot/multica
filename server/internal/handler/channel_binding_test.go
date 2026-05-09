@@ -493,3 +493,56 @@ func TestDeleteChannelBinding_LocksWorkspaceProvider(t *testing.T) {
 		t.Fatal("tx2 did not unblock after tx1 rollback")
 	}
 }
+
+func TestCreateChannelBinding_LocksEmptyWorkspaceProvider(t *testing.T) {
+	var wsID string
+	if err := testPool.QueryRow(t.Context(), `
+		INSERT INTO workspace (name, slug, description, issue_prefix)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id
+	`, "Empty Lock Test", "empty-lock-test", "Temporary workspace", "EL").Scan(&wsID); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(t.Context(), `DELETE FROM workspace WHERE id = $1`, wsID)
+	})
+
+	tx1, err := testPool.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin tx1: %v", err)
+	}
+	defer tx1.Rollback(t.Context())
+
+	if err := lockChannelBindingProvider(t.Context(), tx1, parseUUID(wsID), "feishu"); err != nil {
+		t.Fatalf("lock provider: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		tx2, err := testPool.Begin(t.Context())
+		if err != nil {
+			done <- err
+			return
+		}
+		defer tx2.Rollback(t.Context())
+
+		done <- lockChannelBindingProvider(t.Context(), tx2, parseUUID(wsID), "feishu")
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("expected tx2 to block on empty provider lock, but returned: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	tx1.Rollback(t.Context())
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("tx2 failed after unblock: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tx2 did not unblock after tx1 rollback")
+	}
+}

@@ -100,6 +100,26 @@ func (m *mockPrefStore) GetChannelPref(_ context.Context, _, userID pgtype.UUID,
 	return true, nil
 }
 
+type mockOutbox struct {
+	mu       sync.Mutex
+	requests []NotificationEnqueueRequest
+}
+
+func (m *mockOutbox) EnqueueNotification(_ context.Context, req NotificationEnqueueRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.requests = append(m.requests, req)
+	return nil
+}
+
+func (m *mockOutbox) Requests() []NotificationEnqueueRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]NotificationEnqueueRequest, len(m.requests))
+	copy(cp, m.requests)
+	return cp
+}
+
 // --- Helpers ---
 
 func parseTestUUID(s string) pgtype.UUID {
@@ -147,6 +167,46 @@ func TestSubscriber_InactiveDoesNotHandleEvents(t *testing.T) {
 
 	if got := len(ch.Messages()); got != 0 {
 		t.Fatalf("messages = %d, want 0 when subscriber is inactive", got)
+	}
+}
+
+func TestSubscriber_OutboxEnqueuesWhenDirectDeliveryInactive(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	userID := "00000000-0000-0000-0000-000000000001"
+	bindingStore := &mockBindingStore{bindings: map[string]map[string]string{
+		"feishu": {
+			"ext-user-1": userID,
+		},
+	}}
+	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
+	outbox := &mockOutbox{}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.SetActiveFunc(func() bool { return false })
+	sub.SetNotificationEnqueuer(outbox)
+	sub.Start()
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventInboxNew,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     "00000000-0000-0000-0000-000000000099",
+		Payload: map[string]any{
+			"user_id":    userID,
+			"inbox_type": "issue_assigned",
+			"title":      "Test Issue",
+		},
+	})
+
+	if got := len(ch.Messages()); got != 0 {
+		t.Fatalf("messages = %d, want 0 when direct delivery is inactive", got)
+	}
+	requests := outbox.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("outbox requests = %d, want 1", len(requests))
+	}
+	if requests[0].TargetExternalUserID != "ext-user-1" {
+		t.Fatalf("target external user = %q, want ext-user-1", requests[0].TargetExternalUserID)
 	}
 }
 

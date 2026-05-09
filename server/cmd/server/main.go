@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -34,6 +33,8 @@ var (
 	commit  = "unknown"
 )
 
+const feishuReconnectDelay = 5 * time.Second
+
 func newNamedRedisClient(base *redis.Options, suffix string) *redis.Client {
 	opts := *base
 	opts.ClientName = redisClientName(opts.ClientName, suffix)
@@ -56,6 +57,13 @@ func closeRedisClient(label string, client *redis.Client) {
 	}
 	if err := client.Close(); err != nil {
 		slog.Warn("redis client close failed", "client", label, "error", err)
+	}
+}
+
+func waitFeishuReconnect(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(feishuReconnectDelay):
 	}
 }
 
@@ -300,88 +308,96 @@ func main() {
 		adapterCtx, cancel := context.WithCancel(context.Background())
 		adapterCancel = cancel
 
-		sdkClient := feishuadapter.NewRealClient(feishuAppID, feishuAppSecret, feishuEncryptKey, feishuVerifyToken)
-		adapter := feishuadapter.NewAdapter(sdkClient, feishuadapter.Config{
-			AppID:       feishuAppID,
-			AppSecret:   feishuAppSecret,
-			EncryptKey:  feishuEncryptKey,
-			VerifyToken: feishuVerifyToken,
-		})
-
-		if err := channelRegistry.Register(adapter); err != nil {
-			if err == channel.ErrDuplicateChannel {
-				// Already registered (e.g. from a previous acquire).
-				// Get the existing one and connect it.
-				existing, getErr := channelRegistry.Get("feishu")
-				if getErr != nil {
-					slog.Error("channel leader: failed to get existing feishu adapter", "error", getErr)
-					return fmt.Errorf("feishu: get existing adapter: %w", getErr)
-				}
-				if connErr := existing.Connect(adapterCtx); connErr != nil {
-					channelmetrics.M.SetAdapterConnected("feishu", false)
-					slog.Error("channel leader: failed to connect existing feishu adapter", "error", connErr)
-					return fmt.Errorf("feishu: connect existing: %w", connErr)
-				}
-				channelAdapterReady.Store(true)
-				channelmetrics.M.SetAdapterConnected("feishu", true)
-				slog.Info("channel leader: reconnected existing feishu adapter")
-				return nil
-			}
-			slog.Error("channel leader: failed to register feishu adapter", "error", err)
-			return fmt.Errorf("feishu: register adapter: %w", err)
-		}
-
-		if err := adapter.Connect(adapterCtx); err != nil {
-			channelmetrics.M.SetAdapterConnected("feishu", false)
-			slog.Error("channel leader: failed to connect feishu adapter", "error", err)
-			// Unregister on failure so the next acquire can try again.
-			_ = channelRegistry.Unregister("feishu")
-			return fmt.Errorf("feishu: connect: %w", err)
-		}
-		channelAdapterReady.Store(true)
-		channelmetrics.M.SetAdapterConnected("feishu", true)
-
-		pipelineOpt := channelPipelineOptions{Observer: channelmetrics.M, TaskService: taskSvc}
-		if channelStorage != nil {
-			pipelineOpt.Storage = channelStorage
-			pipelineOpt.FileDownloader = feishuadapter.NewRealFileDownloader(sdkClient.APIClient())
-		} else {
-			slog.Info("channel attachment step disabled: storage is not configured")
-		}
-		pipelineOpts := []channelPipelineOptions{pipelineOpt}
-		pipeline := newChannelInboundPipeline(pool, channelRegistry, pipelineOpts...)
 		go func() {
 			for {
-				select {
-				case <-adapterCtx.Done():
+				if adapterCtx.Err() != nil {
 					return
-				case evt, ok := <-adapter.Events():
-					if !ok {
+				}
+				channelAdapterReady.Store(false)
+				channelmetrics.M.SetAdapterConnected("feishu", false)
+
+				sdkClient := feishuadapter.NewRealClient(feishuAppID, feishuAppSecret, feishuEncryptKey, feishuVerifyToken)
+				adapter := feishuadapter.NewAdapter(sdkClient, feishuadapter.Config{
+					AppID:       feishuAppID,
+					AppSecret:   feishuAppSecret,
+					EncryptKey:  feishuEncryptKey,
+					VerifyToken: feishuVerifyToken,
+				})
+
+				_ = channelRegistry.Unregister("feishu")
+				if err := channelRegistry.Register(adapter); err != nil {
+					slog.Error("channel leader: failed to register feishu adapter", "error", err)
+					waitFeishuReconnect(adapterCtx)
+					continue
+				}
+
+				if err := adapter.Connect(adapterCtx); err != nil {
+					slog.Error("channel leader: failed to connect feishu adapter; will retry", "error", err)
+					_ = channelRegistry.Unregister("feishu")
+					waitFeishuReconnect(adapterCtx)
+					continue
+				}
+
+				channelAdapterReady.Store(true)
+				channelmetrics.M.SetAdapterConnected("feishu", true)
+
+				pipelineOpt := channelPipelineOptions{Observer: channelmetrics.M, TaskService: taskSvc}
+				if channelStorage != nil {
+					pipelineOpt.Storage = channelStorage
+					pipelineOpt.FileDownloader = feishuadapter.NewRealFileDownloader(sdkClient.APIClient())
+				} else {
+					slog.Info("channel attachment step disabled: storage is not configured")
+				}
+				pipeline := newChannelInboundPipeline(pool, channelRegistry, pipelineOpt)
+				slog.Info("channel leader: feishu adapter connected", "app_id", feishuAppID)
+
+				reconnect := false
+				for {
+					select {
+					case <-adapterCtx.Done():
 						return
-					}
-					outcome, err := pipeline.Run(adapterCtx, evt)
-					if err != nil {
-						slog.Error("channel inbound pipeline failed",
+					case evt, ok := <-adapter.Events():
+						if !ok {
+							slog.Warn("channel leader: feishu adapter event stream closed; reconnecting")
+							reconnect = true
+							goto reconnectFeishu
+						}
+						outcome, err := pipeline.Run(adapterCtx, evt)
+						if err != nil {
+							slog.Error("channel inbound pipeline failed",
+								"channel", evt.ChannelName,
+								"chat_id", evt.ChatID,
+								"event_id", evt.EventID,
+								"terminal", outcome.Terminal,
+								"error", err,
+							)
+							continue
+						}
+						slog.Debug("channel inbound pipeline completed",
 							"channel", evt.ChannelName,
 							"chat_id", evt.ChatID,
 							"event_id", evt.EventID,
 							"terminal", outcome.Terminal,
-							"error", err,
+							"decision", outcome.Decision,
 						)
-						continue
 					}
-					slog.Debug("channel inbound pipeline completed",
-						"channel", evt.ChannelName,
-						"chat_id", evt.ChatID,
-						"event_id", evt.EventID,
-						"terminal", outcome.Terminal,
-						"decision", outcome.Decision,
-					)
+				}
+
+			reconnectFeishu:
+				channelAdapterReady.Store(false)
+				channelmetrics.M.SetAdapterConnected("feishu", false)
+				disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := adapter.Disconnect(disconnectCtx); err != nil {
+					slog.Warn("channel leader: feishu adapter disconnect before reconnect failed", "error", err)
+				}
+				disconnectCancel()
+				_ = channelRegistry.Unregister("feishu")
+				if reconnect {
+					waitFeishuReconnect(adapterCtx)
 				}
 			}
 		}()
 
-		slog.Info("channel leader: feishu adapter connected", "app_id", feishuAppID)
 		return nil
 	})
 	channelLeader.OnRelease(func(ctx context.Context) error {
@@ -441,7 +457,6 @@ func main() {
 			outbound.NewDBPrefStore(queries),
 			"",
 		)
-		channelOutboundSubscriber.SetActiveFunc(channelAdapterReady.Load)
 		channelOutboundSubscriber.SetFailureRecorder(queries)
 		channelOutboundSubscriber.SetNotificationEnqueuer(notificationStore)
 		channelOutboundSubscriber.Start()

@@ -219,6 +219,9 @@ func TestPipeline_DedupSkipPreventsDownstreamSteps(t *testing.T) {
 		t.Errorf("after dedup-skip, downstream calls = (%d,%d,%d,%d), want all still 1 (no re-entry)",
 			identityBind.calls, intentRecog.calls, dispatch.calls, reply.calls)
 	}
+	if len(store.processed) != 1 {
+		t.Fatalf("processed marks = %d, want 1; duplicate skip must not mark processing events as processed", len(store.processed))
+	}
 }
 
 // ---------------------------------------------------------------------------
