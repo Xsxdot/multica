@@ -174,7 +174,7 @@ func newRecordingCardSender() *recordingCardSender {
 	return &recordingCardSender{}
 }
 
-func (s *recordingCardSender) SendCard(externalUserID string, card port.OutboundCardMessage) error {
+func (s *recordingCardSender) SendCard(externalUserID string, card port.OutboundCardMessage, _ outbound.AggregationMeta) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, recordedCard{ExternalUserID: externalUserID, Card: card})
@@ -203,7 +203,7 @@ type failingCardSender struct {
 
 func newFailingCardSender() *failingCardSender { return &failingCardSender{} }
 
-func (s *failingCardSender) SendCard(_ string, _ port.OutboundCardMessage) error {
+func (s *failingCardSender) SendCard(_ string, _ port.OutboundCardMessage, _ outbound.AggregationMeta) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -277,6 +278,7 @@ func main() {
 
 	// adapterCancel is cancelled on leader release to stop the WS client.
 	var adapterCancel context.CancelFunc
+	var channelAdapterReady atomic.Bool
 
 	channelLeader.OnAcquire(func(ctx context.Context) error {
 		slog.Info("channel leader: acquired", "lock_id", leader.ChannelFeishuLockID)
@@ -312,6 +314,7 @@ func main() {
 					slog.Error("channel leader: failed to connect existing feishu adapter", "error", connErr)
 					return fmt.Errorf("feishu: connect existing: %w", connErr)
 				}
+				channelAdapterReady.Store(true)
 				slog.Info("channel leader: reconnected existing feishu adapter")
 				return nil
 			}
@@ -325,6 +328,7 @@ func main() {
 			_ = channelRegistry.Unregister("feishu")
 			return fmt.Errorf("feishu: connect: %w", err)
 		}
+		channelAdapterReady.Store(true)
 
 		pipeline := newChannelInboundPipeline(pool, channelRegistry)
 		go func() {
@@ -382,6 +386,7 @@ func main() {
 	})
 	channelLeader.OnRelease(func(ctx context.Context) error {
 		slog.Info("channel leader: released", "lock_id", leader.ChannelFeishuLockID)
+		channelAdapterReady.Store(false)
 
 		// Cancel the adapter context to stop the WS client.
 		if adapterCancel != nil {
@@ -426,6 +431,8 @@ func main() {
 	var channelOutboundSubscriber *outbound.Subscriber
 	if feishuEnabled {
 		outboundChannel := newRegistryChannel(channelRegistry, "feishu")
+		cardSender := outbound.NewFailureRecordingCardSender(outboundChannel, queries)
+		cardSender.SetActiveFunc(channelAdapterReady.Load)
 		channelOutboundSubscriber = outbound.NewSubscriber(
 			bus,
 			outboundChannel,
@@ -433,9 +440,10 @@ func main() {
 			outbound.NewDBPrefStore(queries),
 			"",
 		)
+		channelOutboundSubscriber.SetActiveFunc(channelAdapterReady.Load)
 		channelOutboundSubscriber.SetFailureRecorder(queries)
 		channelOutboundSubscriber.SetAggregator(outbound.NewAggregator(
-			outbound.NewFailureRecordingCardSender(outboundChannel, queries),
+			cardSender,
 			outbound.DefaultFlushInterval,
 		))
 		channelOutboundSubscriber.Start()
@@ -494,7 +502,9 @@ func main() {
 	if outbound.RetryWorkerEnabled() {
 		retryCtx, cancel := context.WithCancel(context.Background())
 		retryCancel = cancel
-		go outbound.NewRetryWorker(pool, queries, newRegistryRetrySender(channelRegistry)).Run(retryCtx)
+		retryWorker := outbound.NewRetryWorker(pool, queries, newRegistryRetrySender(channelRegistry))
+		retryWorker.SetActiveFunc(channelAdapterReady.Load)
+		go retryWorker.Run(retryCtx)
 		slog.Info("channel outbound retry worker started")
 	}
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())

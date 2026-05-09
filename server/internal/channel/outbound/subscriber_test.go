@@ -21,9 +21,9 @@ type mockChannel struct {
 	mu       sync.Mutex
 }
 
-func (m *mockChannel) Name() string                                             { return m.name }
-func (m *mockChannel) Connect(_ context.Context) error                          { return nil }
-func (m *mockChannel) Disconnect(_ context.Context) error                       { return nil }
+func (m *mockChannel) Name() string                       { return m.name }
+func (m *mockChannel) Connect(_ context.Context) error    { return nil }
+func (m *mockChannel) Disconnect(_ context.Context) error { return nil }
 func (m *mockChannel) Send(_ context.Context, _ port.OutboundMessage) (port.SendResult, error) {
 	return port.SendResult{}, nil
 }
@@ -33,7 +33,7 @@ func (m *mockChannel) SendCard(_ context.Context, msg port.OutboundCardMessage) 
 	m.messages = append(m.messages, msg)
 	return port.SendResult{PlatformMessageID: "msg-123"}, nil
 }
-func (m *mockChannel) Events() <-chan port.InboundEvent                         { return nil }
+func (m *mockChannel) Events() <-chan port.InboundEvent { return nil }
 func (m *mockChannel) GetChatInfo(_ context.Context, _ string) (port.ChatInfo, error) {
 	return port.ChatInfo{}, nil
 }
@@ -119,6 +119,36 @@ func pgtypeUUIDToString(u pgtype.UUID) string {
 }
 
 // --- Tests ---
+
+func TestSubscriber_InactiveDoesNotHandleEvents(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	bindingStore := &mockBindingStore{bindings: map[string]map[string]string{
+		"feishu": {
+			"ext-user-1": "00000000-0000-0000-0000-000000000001",
+		},
+	}}
+	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.SetActiveFunc(func() bool { return false })
+	sub.Start()
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventInboxNew,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     "00000000-0000-0000-0000-000000000099",
+		Payload: map[string]any{
+			"user_id":    "00000000-0000-0000-0000-000000000001",
+			"inbox_type": "issue_assigned",
+			"title":      "Test Issue",
+		},
+	})
+
+	if got := len(ch.Messages()); got != 0 {
+		t.Fatalf("messages = %d, want 0 when subscriber is inactive", got)
+	}
+}
 
 // TC-out-2: Unbound user → drop, no message sent
 func TestSubscriber_UnboundUser_DropsEvent(t *testing.T) {
@@ -371,10 +401,10 @@ func TestSubscriber_StatusInReview_SendsCard(t *testing.T) {
 		Payload: map[string]any{
 			"status_changed": true,
 			"issue": map[string]any{
-				"id":         "issue-1",
-				"title":      "Test Issue",
-				"identifier": "MUL-1",
-				"status":     "in_review",
+				"id":          "issue-1",
+				"title":       "Test Issue",
+				"identifier":  "MUL-1",
+				"status":      "in_review",
 				"assignee_id": assigneeID,
 			},
 		},
@@ -418,10 +448,10 @@ func TestSubscriber_StatusDone_SendsCard(t *testing.T) {
 		Payload: map[string]any{
 			"status_changed": true,
 			"issue": map[string]any{
-				"id":         "issue-1",
-				"title":      "Test Issue",
-				"identifier": "MUL-1",
-				"status":     "done",
+				"id":          "issue-1",
+				"title":       "Test Issue",
+				"identifier":  "MUL-1",
+				"status":      "done",
 				"assignee_id": assigneeID,
 			},
 		},
@@ -462,10 +492,10 @@ func TestSubscriber_StatusBlocked_SendsCard(t *testing.T) {
 		Payload: map[string]any{
 			"status_changed": true,
 			"issue": map[string]any{
-				"id":         "issue-1",
-				"title":      "Test Issue",
-				"identifier": "MUL-1",
-				"status":     "blocked",
+				"id":          "issue-1",
+				"title":       "Test Issue",
+				"identifier":  "MUL-1",
+				"status":      "blocked",
 				"assignee_id": assigneeID,
 			},
 		},
@@ -512,10 +542,10 @@ func TestSubscriber_StatusInReview_PrefMuted_DropsEvent(t *testing.T) {
 		Payload: map[string]any{
 			"status_changed": true,
 			"issue": map[string]any{
-				"id":         "issue-1",
-				"title":      "Test Issue",
-				"identifier": "MUL-1",
-				"status":     "in_review",
+				"id":          "issue-1",
+				"title":       "Test Issue",
+				"identifier":  "MUL-1",
+				"status":      "in_review",
 				"assignee_id": assigneeID,
 			},
 		},
@@ -551,10 +581,10 @@ func TestSubscriber_StatusDone_NoAssignee_DropsEvent(t *testing.T) {
 		Payload: map[string]any{
 			"status_changed": true,
 			"issue": map[string]any{
-				"id":         "issue-1",
-				"title":      "Test Issue",
-				"identifier": "MUL-1",
-				"status":     "done",
+				"id":          "issue-1",
+				"title":       "Test Issue",
+				"identifier":  "MUL-1",
+				"status":      "done",
 				"assignee_id": nil,
 			},
 		},
@@ -590,10 +620,10 @@ func TestSubscriber_StatusBlocked_SelfNotification_DropsEvent(t *testing.T) {
 		Payload: map[string]any{
 			"status_changed": true,
 			"issue": map[string]any{
-				"id":         "issue-1",
-				"title":      "Test Issue",
-				"identifier": "MUL-1",
-				"status":     "blocked",
+				"id":          "issue-1",
+				"title":       "Test Issue",
+				"identifier":  "MUL-1",
+				"status":      "blocked",
 				"assignee_id": userID,
 			},
 		},
@@ -630,10 +660,10 @@ func TestSubscriber_StatusTodo_NotNotifyWorthy_DropsEvent(t *testing.T) {
 		Payload: map[string]any{
 			"status_changed": true,
 			"issue": map[string]any{
-				"id":         "issue-1",
-				"title":      "Test Issue",
-				"identifier": "MUL-1",
-				"status":     "todo",
+				"id":          "issue-1",
+				"title":       "Test Issue",
+				"identifier":  "MUL-1",
+				"status":      "todo",
 				"assignee_id": assigneeID,
 			},
 		},

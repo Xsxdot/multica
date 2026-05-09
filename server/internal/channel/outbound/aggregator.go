@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -42,25 +43,35 @@ func registerMetrics() {
 // implements this. SendCard returns an error on transient failures so
 // the aggregator can log and count dropped messages.
 type CardSender interface {
-	SendCard(externalUserID string, card port.OutboundCardMessage) error
+	SendCard(externalUserID string, card port.OutboundCardMessage, meta AggregationMeta) error
 }
 
 // pendingCard is a card ready to be sent outside the lock.
 type pendingCard struct {
 	externalUserID string
 	card           port.OutboundCardMessage
+	meta           AggregationMeta
+}
+
+// AggregationMeta preserves the per-user notification identity while cards
+// wait in the aggregation buffer.
+type AggregationMeta struct {
+	EventKind    string
+	TargetUserID pgtype.UUID
 }
 
 // notification is a single pending outbound notification for a user.
 type notification struct {
 	title string
 	body  string
+	meta  AggregationMeta
 }
 
 // userBuffer holds buffered notifications for a single external user.
 type userBuffer struct {
-	items []notification
-	timer *time.Timer
+	externalUserID string
+	items          []notification
+	timer          *time.Timer
 }
 
 // Aggregator implements user-level notification aggregation. Instead of
@@ -72,7 +83,7 @@ type Aggregator struct {
 	sender    CardSender
 	interval  time.Duration
 	mu        sync.Mutex
-	buffers   map[string]*userBuffer // keyed by externalUserID
+	buffers   map[string]*userBuffer // keyed by external user + failure metadata
 	closed    bool
 	closeOnce sync.Once
 }
@@ -91,10 +102,14 @@ func NewAggregator(sender CardSender, interval time.Duration) *Aggregator {
 	}
 }
 
+func aggregationKey(externalUserID string, meta AggregationMeta) string {
+	return externalUserID + "\x00" + uuidStr(meta.TargetUserID) + "\x00" + meta.EventKind
+}
+
 // sendCardSafe calls sender.SendCard with panic recovery and error
 // handling. On error or panic the notification is counted as dropped
 // and logged. (C1-new, R4-new)
-func sendCardSafe(sender CardSender, externalUserID string, card port.OutboundCardMessage) {
+func sendCardSafe(sender CardSender, externalUserID string, card port.OutboundCardMessage, meta AggregationMeta) {
 	var err error
 	func() {
 		defer func() {
@@ -109,7 +124,7 @@ func sendCardSafe(sender CardSender, externalUserID string, card port.OutboundCa
 				// decide whether to enqueue or permanently drop.
 			}
 		}()
-		err = sender.SendCard(externalUserID, card)
+		err = sender.SendCard(externalUserID, card, meta)
 	}()
 	if err != nil {
 		slog.Error("outbound aggregator: send card failed",
@@ -127,8 +142,13 @@ func sendCardSafe(sender CardSender, externalUserID string, card port.OutboundCa
 // urgent events). If the user's buffer exceeds MaxBufferSize the buffer
 // is flushed immediately and the new notification is sent directly.
 func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, bypass bool) {
+	a.AddWithMeta(externalUserID, card, AggregationMeta{}, bypass)
+}
+
+// AddWithMeta enqueues a notification with failure/audit metadata.
+func (a *Aggregator) AddWithMeta(externalUserID string, card port.OutboundCardMessage, meta AggregationMeta, bypass bool) {
 	if bypass {
-		sendCardSafe(a.sender, externalUserID, card)
+		sendCardSafe(a.sender, externalUserID, card, meta)
 		aggregatedTotal.Inc()
 		return
 	}
@@ -141,18 +161,20 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 		return
 	}
 
-	buf, exists := a.buffers[externalUserID]
+	key := aggregationKey(externalUserID, meta)
+	buf, exists := a.buffers[key]
 	if !exists {
-		buf = &userBuffer{}
-		a.buffers[externalUserID] = buf
+		buf = &userBuffer{externalUserID: externalUserID}
+		a.buffers[key] = buf
 		buf.timer = time.AfterFunc(a.interval, func() {
-			a.flushUser(externalUserID)
+			a.flushKey(key)
 		})
 	}
 
 	buf.items = append(buf.items, notification{
 		title: card.Title,
 		body:  card.Body,
+		meta:  meta,
 	})
 
 	// Buffer limit exceeded — prepare both cards, then unlock and send.
@@ -162,18 +184,19 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 		last := notification{
 			title: buf.items[lastIdx].title,
 			body:  buf.items[lastIdx].body,
+			meta:  buf.items[lastIdx].meta,
 		}
 		buf.items = buf.items[:lastIdx]
 
 		// Drain the buffer (now 50 items) into a merged card and remove
 		// the entry from the map so the next Add starts a fresh window.
-		merged := a.prepareMerge(externalUserID)
+		merged := a.prepareMerge(key)
 
 		a.mu.Unlock()
 
 		// Send merged card (50 items) then the 51st — both outside the lock.
 		if merged != nil {
-			sendCardSafe(a.sender, merged.externalUserID, merged.card)
+			sendCardSafe(a.sender, merged.externalUserID, merged.card, merged.meta)
 			aggregatedTotal.Inc()
 		}
 
@@ -182,7 +205,7 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 			ChatID: externalUserID,
 			Title:  last.title,
 			Body:   last.body,
-		})
+		}, last.meta)
 		aggregatedTotal.Inc()
 		return
 	}
@@ -190,30 +213,30 @@ func (a *Aggregator) Add(externalUserID string, card port.OutboundCardMessage, b
 	a.mu.Unlock()
 }
 
-// flushUser is called by the timer goroutine. It acquires the lock,
+// flushKey is called by the timer goroutine. It acquires the lock,
 // prepares the merged card, then sends it outside the lock.
-func (a *Aggregator) flushUser(externalUserID string) {
+func (a *Aggregator) flushKey(key string) {
 	a.mu.Lock()
-	pending := a.prepareMerge(externalUserID)
+	pending := a.prepareMerge(key)
 	a.mu.Unlock()
 
 	if pending == nil {
 		return
 	}
 
-	sendCardSafe(a.sender, pending.externalUserID, pending.card)
+	sendCardSafe(a.sender, pending.externalUserID, pending.card, pending.meta)
 	aggregatedTotal.Inc()
 }
 
-// prepareMerge drains the buffer for externalUserID into a merged card
+// prepareMerge drains the buffer for key into a merged card
 // and removes the entry from a.buffers, ensuring subsequent Adds for
 // the same user start a fresh aggregation window. Returns nil if the
 // buffer is missing or empty.
 //
 // Must be called with a.mu held. Does NOT send the card — the caller
 // sends it after releasing the lock. (R1-new, R2-new, C1-r3)
-func (a *Aggregator) prepareMerge(externalUserID string) *pendingCard {
-	buf, ok := a.buffers[externalUserID]
+func (a *Aggregator) prepareMerge(key string) *pendingCard {
+	buf, ok := a.buffers[key]
 	if !ok || buf == nil || len(buf.items) == 0 {
 		return nil
 	}
@@ -226,18 +249,20 @@ func (a *Aggregator) prepareMerge(externalUserID string) *pendingCard {
 
 	count := len(buf.items)
 	mergedBody := buildMergedBody(buf.items)
+	meta := buf.items[0].meta
 
 	// Clear buffer state in a single place — see TestAggregator_AddAfter*.
-	delete(a.buffers, externalUserID)
+	delete(a.buffers, key)
 
 	return &pendingCard{
-		externalUserID: externalUserID,
+		externalUserID: buf.externalUserID,
 		card: port.OutboundCardMessage{
-			Target: port.TargetUser(externalUserID),
-			ChatID: externalUserID,
+			Target: port.TargetUser(buf.externalUserID),
+			ChatID: buf.externalUserID,
 			Title:  fmt.Sprintf("你有 %d 条新通知", count),
 			Body:   mergedBody,
 		},
+		meta: meta,
 	}
 }
 

@@ -119,6 +119,7 @@ func (m *mockRetrySender) SendCard(_ context.Context, provider string, externalU
 type mockFailureStore struct {
 	claimed        []db.ChannelOutboundFailure
 	claimErr       error
+	claimCalls     int
 	incrementCalls []db.IncrementOutboundFailureAttemptsParams
 	markDeadCalls  []db.MarkOutboundFailureDeadParams
 	deleteCalls    []pgtype.UUID
@@ -128,6 +129,7 @@ type mockFailureStore struct {
 }
 
 func (m *mockFailureStore) ClaimPendingOutboundFailures(_ context.Context, _ int32) ([]db.ChannelOutboundFailure, error) {
+	m.claimCalls++
 	if m.claimErr != nil {
 		return nil, m.claimErr
 	}
@@ -170,6 +172,24 @@ func makeFailure(id [16]byte, attempts int32, maxAttempts int32, provider string
 }
 
 var testID1 = [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+
+func TestRetryWorker_InactiveDoesNotClaimFailures(t *testing.T) {
+	store := &mockFailureStore{
+		claimed: []db.ChannelOutboundFailure{makeFailure(testID1, 0, 3, "feishu", "ou_user1")},
+	}
+	sender := &mockRetrySender{}
+	worker := NewRetryWorkerWithStore(store, sender)
+	worker.SetActiveFunc(func() bool { return false })
+
+	worker.processBatch(context.Background())
+
+	if store.claimCalls != 0 {
+		t.Fatalf("claimCalls = %d, want 0 when worker is inactive", store.claimCalls)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("sender calls = %d, want 0 when worker is inactive", len(sender.calls))
+	}
+}
 
 // --- processOne tests (TC-out-4, TC-out-5, TC-risk-5) ---
 

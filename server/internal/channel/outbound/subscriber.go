@@ -107,6 +107,7 @@ type Subscriber struct {
 	workspaceID string
 	aggregator  *Aggregator
 	failures    FailureRecorder
+	activeFunc  func() bool
 }
 
 // NewSubscriber creates an outbound subscriber. Call Start() to begin
@@ -148,16 +149,29 @@ func (s *Subscriber) SetFailureRecorder(failures FailureRecorder) {
 	s.failures = failures
 }
 
+// SetActiveFunc gates outbound handling. Production uses this to ensure only
+// the process that owns the channel adapter handles business events.
+func (s *Subscriber) SetActiveFunc(activeFunc func() bool) {
+	s.activeFunc = activeFunc
+}
+
 func (s *Subscriber) Stop() {
 	if s.aggregator != nil {
 		s.aggregator.Stop()
 	}
 }
 
+func (s *Subscriber) isActive() bool {
+	return s.activeFunc == nil || s.activeFunc()
+}
+
 // handleCommentCreated processes comment:created events.
 // Extracts subscriber user_ids from the payload and sends cards to
 // bound, unmuted users.
 func (s *Subscriber) handleCommentCreated(e events.Event) {
+	if !s.isActive() {
+		return
+	}
 	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
 		return
 	}
@@ -191,6 +205,9 @@ func (s *Subscriber) handleCommentCreated(e events.Event) {
 // handleInboxNew processes inbox:new events.
 // Sends a card to the target user.
 func (s *Subscriber) handleInboxNew(e events.Event) {
+	if !s.isActive() {
+		return
+	}
 	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
 		return
 	}
@@ -215,6 +232,9 @@ func (s *Subscriber) handleInboxNew(e events.Event) {
 
 // handleSubscriberAdded processes subscriber:added events.
 func (s *Subscriber) handleSubscriberAdded(e events.Event) {
+	if !s.isActive() {
+		return
+	}
 	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
 		return
 	}
@@ -239,6 +259,9 @@ func (s *Subscriber) handleSubscriberAdded(e events.Event) {
 // (in_review, done, blocked), a card is sent to the issue's assignee
 // so the relevant party is notified of the transition.
 func (s *Subscriber) handleIssueUpdated(e events.Event) {
+	if !s.isActive() {
+		return
+	}
 	if s.workspaceID != "" && e.WorkspaceID != s.workspaceID {
 		return
 	}
@@ -307,6 +330,10 @@ func statusLabel(status string) string {
 // sendToUser resolves the user's binding, checks preferences, and
 // sends a card message.
 func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body string) {
+	if !s.isActive() {
+		return
+	}
+
 	ctx := context.Background()
 
 	// R4: parseUUID returns error; log+drop on invalid UUID.
@@ -348,7 +375,10 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 	}
 
 	if s.aggregator != nil {
-		s.aggregator.Add(externalUserID, card, false)
+		s.aggregator.AddWithMeta(externalUserID, card, AggregationMeta{
+			EventKind:    eventKind,
+			TargetUserID: userUUID,
+		}, false)
 		return
 	}
 

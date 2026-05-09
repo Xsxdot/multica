@@ -91,6 +91,7 @@ type FailureStore interface {
 type RetryWorker struct {
 	store  FailureStore
 	sender RetrySender
+	active func() bool
 }
 
 // NewRetryWorker creates a RetryWorker. Call Run to start it.
@@ -110,6 +111,16 @@ func NewRetryWorkerWithStore(store FailureStore, sender RetrySender) *RetryWorke
 	}
 }
 
+// SetActiveFunc gates claiming failure rows. Production uses this to ensure
+// only the process that owns the channel adapter retries outbound failures.
+func (w *RetryWorker) SetActiveFunc(active func() bool) {
+	w.active = active
+}
+
+func (w *RetryWorker) isActive() bool {
+	return w.active == nil || w.active()
+}
+
 // RetryWorkerEnabled reports whether the retry worker should start.
 // Controlled by CHANNEL_RETRY_WORKER_ENABLED env var (default: false).
 // Must be explicitly enabled after the real RetrySender is wired.
@@ -127,7 +138,9 @@ func (w *RetryWorker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.processBatch(ctx)
+			if w.isActive() {
+				w.processBatch(ctx)
+			}
 		}
 	}
 }
@@ -147,6 +160,10 @@ func (w *RetryWorker) Run(ctx context.Context) {
 // rows where status='dead' AND created_at < now()-7d, which we never
 // touch from this worker.
 func (w *RetryWorker) processBatch(ctx context.Context) {
+	if !w.isActive() {
+		return
+	}
+
 	failures, err := w.store.ClaimPendingOutboundFailures(ctx, RetryBatchSize)
 	if err != nil {
 		slog.Error("retry worker: claim failed", "error", err)

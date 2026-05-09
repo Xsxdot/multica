@@ -15,13 +15,25 @@ import (
 type FailureRecordingCardSender struct {
 	channel  port.Channel
 	failures FailureRecorder
+	active   func() bool
 }
 
 func NewFailureRecordingCardSender(ch port.Channel, failures FailureRecorder) *FailureRecordingCardSender {
 	return &FailureRecordingCardSender{channel: ch, failures: failures}
 }
 
-func (s *FailureRecordingCardSender) SendCard(externalUserID string, card port.OutboundCardMessage) error {
+func (s *FailureRecordingCardSender) SetActiveFunc(active func() bool) {
+	s.active = active
+}
+
+func (s *FailureRecordingCardSender) isActive() bool {
+	return s.active == nil || s.active()
+}
+
+func (s *FailureRecordingCardSender) SendCard(externalUserID string, card port.OutboundCardMessage, meta AggregationMeta) error {
+	if !s.isActive() {
+		return nil
+	}
 	if card.Target.ID == "" {
 		card.Target = port.TargetUser(externalUserID)
 	}
@@ -31,12 +43,12 @@ func (s *FailureRecordingCardSender) SendCard(externalUserID string, card port.O
 
 	result, err := s.channel.SendCard(context.Background(), card)
 	if err != nil && result.Retryable {
-		s.recordFailure(externalUserID, card, err)
+		s.recordFailure(externalUserID, card, meta, err)
 	}
 	return err
 }
 
-func (s *FailureRecordingCardSender) recordFailure(externalUserID string, card port.OutboundCardMessage, sendErr error) {
+func (s *FailureRecordingCardSender) recordFailure(externalUserID string, card port.OutboundCardMessage, meta AggregationMeta, sendErr error) {
 	if s.failures == nil {
 		return
 	}
@@ -48,10 +60,14 @@ func (s *FailureRecordingCardSender) recordFailure(externalUserID string, card p
 		slog.Error("outbound aggregator: marshal retry payload", "external_user_id", externalUserID, "error", err)
 		return
 	}
+	eventKind := meta.EventKind
+	if eventKind == "" {
+		eventKind = "aggregated"
+	}
 	if _, err := s.failures.InsertOutboundFailure(context.Background(), db.InsertOutboundFailureParams{
 		Provider:             s.channel.Name(),
-		EventKind:            "aggregated",
-		TargetUserID:         pgtype.UUID{},
+		EventKind:            eventKind,
+		TargetUserID:         meta.TargetUserID,
 		TargetExternalUserID: pgtype.Text{String: externalUserID, Valid: externalUserID != ""},
 		Payload:              payload,
 		MaxAttempts:          3,

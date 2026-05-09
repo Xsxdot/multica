@@ -25,7 +25,7 @@ type sendCall struct {
 	Card           port.OutboundCardMessage
 }
 
-func (m *mockSender) SendCard(externalUserID string, card port.OutboundCardMessage) error {
+func (m *mockSender) SendCard(externalUserID string, card port.OutboundCardMessage, _ AggregationMeta) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.callSeq++
