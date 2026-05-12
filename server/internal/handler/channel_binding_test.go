@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -39,6 +40,33 @@ func createTestBinding(t *testing.T, workspaceID, provider, externalChatID, chat
 	})
 
 	return uuidToString(binding.ID)
+}
+
+func createNonOwnerTestUser(t *testing.T, role string) string {
+	t.Helper()
+	userID := fmt.Sprintf("00000000-0000-0000-0000-%012d", time.Now().UnixNano()%1000000000000)
+	email := "channel-non-owner-" + userID + "@example.test"
+	_, err := testPool.Exec(t.Context(), `
+		INSERT INTO "user" (id, name, email)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (id) DO NOTHING
+	`, userID, "Channel Non Owner", email)
+	if err != nil {
+		t.Fatalf("failed to create non-owner user: %v", err)
+	}
+	_, err = testPool.Exec(t.Context(), `
+		INSERT INTO member (workspace_id, user_id, role)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role
+	`, testWorkspaceID, userID, role)
+	if err != nil {
+		t.Fatalf("failed to create non-owner member: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(t.Context(), `DELETE FROM member WHERE user_id = $1`, userID)
+		_, _ = testPool.Exec(t.Context(), `DELETE FROM "user" WHERE id = $1`, userID)
+	})
+	return userID
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +137,69 @@ func TestListChannelBindings_EmptyWorkspace(t *testing.T) {
 	}
 	if resp.Bindings == nil {
 		t.Error("expected empty array, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Channel connection management permissions
+// ---------------------------------------------------------------------------
+
+func TestListChannelConnections_RedactsForNonOwner(t *testing.T) {
+	suffix := time.Now().UnixNano()
+	enabledID := fmt.Sprintf("conn-enabled-%d", suffix)
+	disabledID := fmt.Sprintf("conn-disabled-%d", suffix)
+	_, err := testPool.Exec(t.Context(), `
+		INSERT INTO channel_connection (
+			id, provider, display_name, enabled, is_default, config, secret_config, status, last_error
+		) VALUES
+			($1, 'feishu', 'Enabled Conn', true, false, '{"app_id":"app"}', '{"app_secret":"secret"}', 'connected', 'secret failure'),
+			($2, 'feishu', 'Disabled Conn', false, false, '{"app_id":"disabled"}', '{}', 'configured', NULL)
+	`, enabledID, disabledID)
+	if err != nil {
+		t.Fatalf("failed to create channel connections: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(t.Context(), `DELETE FROM channel_connection WHERE id = $1 OR id = $2`, enabledID, disabledID)
+	})
+
+	nonOwnerID := createNonOwnerTestUser(t, "admin")
+	req := newRequest("GET", "/api/channel-connections", nil)
+	req.Header.Set("X-User-ID", nonOwnerID)
+	w := httptest.NewRecorder()
+	testHandler.ListChannelConnections(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp ListChannelConnectionsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.CanManage {
+		t.Fatal("expected non-owner can_manage=false")
+	}
+	if len(resp.Connections) != 1 || resp.Connections[0].ID != enabledID {
+		t.Fatalf("expected only enabled connection %q, got %#v", enabledID, resp.Connections)
+	}
+	if len(resp.Connections[0].Config) != 0 {
+		t.Fatalf("expected config to be redacted, got %#v", resp.Connections[0].Config)
+	}
+	if resp.Connections[0].LastError != nil {
+		t.Fatalf("expected last_error to be redacted, got %q", *resp.Connections[0].LastError)
+	}
+}
+
+func TestCreateChannelConnection_RequiresWorkspaceOwner(t *testing.T) {
+	nonOwnerID := createNonOwnerTestUser(t, "admin")
+	req := newRequest("POST", "/api/channel-connections", map[string]any{
+		"provider":     "feishu",
+		"display_name": "Should Not Create",
+	})
+	req.Header.Set("X-User-ID", nonOwnerID)
+	w := httptest.NewRecorder()
+	testHandler.CreateChannelConnection(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-owner create, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

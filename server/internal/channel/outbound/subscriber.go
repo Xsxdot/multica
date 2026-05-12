@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -110,6 +111,11 @@ type Subscriber struct {
 	failures    FailureRecorder
 	outbox      NotificationEnqueuer
 	activeFunc  func() bool
+
+	mu            sync.Mutex
+	started       bool
+	stopped       bool
+	unsubscribers []func()
 }
 
 type channelConnectionNamer interface {
@@ -159,10 +165,19 @@ func NewSubscriber(
 //   - subscriber:added
 //   - issue:updated (status change notifications, M3a)
 func (s *Subscriber) Start() {
-	s.bus.Subscribe(protocol.EventCommentCreated, s.handleCommentCreated)
-	s.bus.Subscribe(protocol.EventInboxNew, s.handleInboxNew)
-	s.bus.Subscribe(protocol.EventSubscriberAdded, s.handleSubscriberAdded)
-	s.bus.Subscribe(protocol.EventIssueUpdated, s.handleIssueUpdated)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.started {
+		return
+	}
+	s.started = true
+	s.stopped = false
+	s.unsubscribers = []func(){
+		s.bus.Subscribe(protocol.EventCommentCreated, s.handleCommentCreated),
+		s.bus.Subscribe(protocol.EventInboxNew, s.handleInboxNew),
+		s.bus.Subscribe(protocol.EventSubscriberAdded, s.handleSubscriberAdded),
+		s.bus.Subscribe(protocol.EventIssueUpdated, s.handleIssueUpdated),
+	}
 }
 
 func (s *Subscriber) SetAggregator(aggregator *Aggregator) {
@@ -185,9 +200,27 @@ func (s *Subscriber) SetActiveFunc(activeFunc func() bool) {
 }
 
 func (s *Subscriber) Stop() {
+	s.mu.Lock()
+	unsubscribers := s.unsubscribers
+	s.unsubscribers = nil
+	s.started = false
+	s.stopped = true
+	s.mu.Unlock()
+
+	for _, unsubscribe := range unsubscribers {
+		if unsubscribe != nil {
+			unsubscribe()
+		}
+	}
 	if s.aggregator != nil {
 		s.aggregator.Stop()
 	}
+}
+
+func (s *Subscriber) isStopped() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopped
 }
 
 func (s *Subscriber) isActive() bool {
@@ -195,6 +228,9 @@ func (s *Subscriber) isActive() bool {
 }
 
 func (s *Subscriber) shouldHandleEvent() bool {
+	if s.isStopped() {
+		return false
+	}
 	return s.outbox != nil || s.isActive()
 }
 
@@ -381,7 +417,7 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 		return
 	}
 
-	enabled, err := s.prefs.GetChannelPref(ctx, wsUUID, userUUID, providerName, eventKind)
+	enabled, err := s.prefs.GetChannelPref(ctx, wsUUID, userUUID, connectionID, eventKind)
 	if err != nil {
 		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "pref_lookup", false)
 		slog.Error("outbound: check pref", "user_id", userID, "error", err)

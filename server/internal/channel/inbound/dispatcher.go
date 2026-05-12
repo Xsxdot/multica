@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/channel/facade"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -55,7 +54,7 @@ type ResolvedUser struct {
 type DispatchConfig struct {
 	IssueFacade      facade.IssueFacade
 	CommentFacade    facade.CommentFacade
-	Registry         *channel.Registry
+	Gateway          port.ChannelGateway
 	ChatBinding      ChatBindingLookup
 	UserResolver     UserInfoResolver
 	ProjectValidator ProjectWorkspaceValidator
@@ -405,15 +404,10 @@ func (d *dispatchStep) resolveIssueAndUser(ctx context.Context, evt port.Inbound
 }
 
 func (d *dispatchStep) sendReply(ctx context.Context, evt port.InboundEvent, text string) error {
-	if d.cfg.Registry == nil {
+	if d.cfg.Gateway == nil {
 		return nil
 	}
-	ch, err := d.cfg.Registry.Get(evt.ConnectionID())
-	if err != nil {
-		return fmt.Errorf("channel connection %q not in registry: %w", evt.ConnectionID(), err)
-	}
-
-	_, err = ch.Send(ctx, port.OutboundMessage{
+	_, err := d.cfg.Gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
 		ChatID: evt.ChatID,
 		Text:   text,
 	})

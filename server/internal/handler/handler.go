@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
+	channelprovider "github.com/multica-ai/multica/server/internal/channel/provider"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -50,26 +51,27 @@ type Config struct {
 }
 
 type Handler struct {
-	Queries                *db.Queries
-	DB                     dbExecutor
-	TxStarter              txStarter
-	Hub                    *realtime.Hub
-	DaemonHub              *daemonws.Hub
-	Bus                    *events.Bus
-	TaskService            *service.TaskService
-	AutopilotService       *service.AutopilotService
-	EmailService           *service.EmailService
-	UpdateStore            *UpdateStore
-	ModelListStore         ModelListStore
-	LocalSkillListStore    LocalSkillListStore
-	LocalSkillImportStore  LocalSkillImportStore
-	Storage                storage.Storage
-	CFSigner               *auth.CloudFrontSigner
-	Analytics              analytics.Client
-	PATCache               *auth.PATCache
-	DaemonTokenCache       *auth.DaemonTokenCache
-	ChannelProviderSchemas map[string][]ChannelConfigFieldResponse
-	cfg                    Config
+	Queries                  *db.Queries
+	DB                       dbExecutor
+	TxStarter                txStarter
+	Hub                      *realtime.Hub
+	DaemonHub                *daemonws.Hub
+	Bus                      *events.Bus
+	TaskService              *service.TaskService
+	AutopilotService         *service.AutopilotService
+	EmailService             *service.EmailService
+	UpdateStore              *UpdateStore
+	ModelListStore           ModelListStore
+	LocalSkillListStore      LocalSkillListStore
+	LocalSkillImportStore    LocalSkillImportStore
+	Storage                  storage.Storage
+	CFSigner                 *auth.CloudFrontSigner
+	Analytics                analytics.Client
+	PATCache                 *auth.PATCache
+	DaemonTokenCache         *auth.DaemonTokenCache
+	ChannelProviderSchemas   map[string][]ChannelConfigFieldResponse
+	ChannelProviderFactories map[string]channelprovider.Factory
+	cfg                      Config
 }
 
 func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config, daemonHubs ...*daemonws.Hub) *Handler {

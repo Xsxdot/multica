@@ -13,11 +13,10 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/channel"
-	feishuadapter "github.com/multica-ai/multica/server/internal/channel/adapter/feishu"
-	"github.com/multica-ai/multica/server/internal/channel/inbound"
+	channelgateway "github.com/multica-ai/multica/server/internal/channel/gateway"
 	channelmanager "github.com/multica-ai/multica/server/internal/channel/manager"
 	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
-	channelprovider "github.com/multica-ai/multica/server/internal/channel/provider"
+	channelproviders "github.com/multica-ai/multica/server/internal/channel/providers"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -265,26 +264,23 @@ func main() {
 
 	// M1-T1: channel port registry — assembly point for external messaging adapters.
 	channelRegistry := channel.NewRegistry()
+	channelGateway := channelgateway.NewRegistryGateway(channelRegistry)
 	channelStorage := newStorageFromEnv()
-	channelProviders := []channelprovider.Factory{
-		feishuadapter.NewFactory(),
-	}
+	channelProviders := channelproviders.All()
 	channelCtx, channelCancel := context.WithCancel(context.Background())
 	channelManager := channelmanager.New(channelmanager.Config{
 		Pool:      pool,
 		Queries:   queries,
 		Bus:       bus,
 		Registry:  channelRegistry,
+		Gateway:   channelGateway,
 		Factories: channelProviders,
-		RuntimeBuilder: func(fileDownloader inbound.FileDownloader) channelmanager.RuntimeComponents {
-			pipelineOpt := channelPipelineOptions{Observer: channelmetrics.M, TaskService: taskSvc}
-			if channelStorage != nil && fileDownloader != nil {
+		RuntimeBuilder: func() channelmanager.RuntimeComponents {
+			pipelineOpt := channelPipelineOptions{Observer: channelmetrics.M, TaskService: taskSvc, Gateway: channelGateway}
+			if channelStorage != nil {
 				pipelineOpt.Storage = channelStorage
-				pipelineOpt.FileDownloader = fileDownloader
-			} else if channelStorage != nil {
-				slog.Info("channel attachment step disabled: provider file downloader is not configured")
 			}
-			components := newChannelInboundRuntimeComponents(pool, channelRegistry, pipelineOpt)
+			components := newChannelInboundRuntimeComponents(pool, pipelineOpt)
 			return channelmanager.RuntimeComponents{
 				PrePipeline:   components.PrePipeline,
 				PostPipeline:  components.PostPipeline,

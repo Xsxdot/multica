@@ -190,3 +190,17 @@ func (q *Queries) UpdateMemberRole(ctx context.Context, arg UpdateMemberRolePara
 	)
 	return i, err
 }
+
+const userHasWorkspaceOwnerRole = `-- name: UserHasWorkspaceOwnerRole :one
+SELECT EXISTS (
+    SELECT 1 FROM member
+    WHERE user_id = $1 AND role = 'owner'
+)::bool
+`
+
+func (q *Queries) UserHasWorkspaceOwnerRole(ctx context.Context, userID pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, userHasWorkspaceOwnerRole, userID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}

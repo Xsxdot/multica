@@ -99,6 +99,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
 	h.ChannelProviderSchemas = channelProviderSchemas(opts.ChannelProviders)
+	h.ChannelProviderFactories = channelProviderFactories(opts.ChannelProviders)
 	if opts.DaemonWakeup != nil {
 		h.TaskService.Wakeup = opts.DaemonWakeup
 	}
@@ -247,7 +248,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/api/cli-token", h.IssueCliToken)
 		r.Post("/api/upload-file", h.UploadFile)
 		r.Post("/api/feedback", h.CreateFeedback)
-		r.Get("/api/channel-connections", h.ListChannelConnections)
+		r.Get("/api/channel-providers", h.ListChannelProviders)
+		r.Get("/api/channel-bind-token", h.GetChannelBindTokenPreview)
+		r.Route("/api/channel-connections", func(r chi.Router) {
+			r.Get("/", h.ListChannelConnections)
+			r.Post("/", h.CreateChannelConnection)
+			r.Patch("/{connectionId}", h.UpdateChannelConnection)
+			r.Delete("/{connectionId}", h.DeleteChannelConnection)
+			r.Post("/{connectionId}/test", h.TestChannelConnection)
+		})
 		r.Post("/api/channel-user-bindings", h.CreateChannelUserBinding)
 
 		r.Route("/api/workspaces", func(r chi.Router) {
@@ -528,6 +537,14 @@ func channelProviderSchemas(factories []channelprovider.Factory) map[string][]ha
 		schemas[factory.Provider()] = resp
 	}
 	return schemas
+}
+
+func channelProviderFactories(factories []channelprovider.Factory) map[string]channelprovider.Factory {
+	out := make(map[string]channelprovider.Factory, len(factories))
+	for _, factory := range factories {
+		out[factory.Provider()] = factory
+	}
+	return out
 }
 
 // membershipChecker implements realtime.MembershipChecker using database queries.

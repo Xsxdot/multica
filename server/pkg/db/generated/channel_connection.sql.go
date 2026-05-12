@@ -7,10 +7,93 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const createChannelConnection = `-- name: CreateChannelConnection :one
+INSERT INTO channel_connection (
+    id, provider, display_name, enabled, is_default, config, secret_config, status
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7,
+    CASE WHEN $4 THEN 'configured' ELSE 'disabled' END
+)
+RETURNING id, provider, display_name, enabled, is_default, config, secret_config, status, last_error, created_at, updated_at
+`
+
+type CreateChannelConnectionParams struct {
+	ID           string `json:"id"`
+	Provider     string `json:"provider"`
+	DisplayName  string `json:"display_name"`
+	Enabled      bool   `json:"enabled"`
+	IsDefault    bool   `json:"is_default"`
+	Config       []byte `json:"config"`
+	SecretConfig []byte `json:"secret_config"`
+}
+
+func (q *Queries) CreateChannelConnection(ctx context.Context, arg CreateChannelConnectionParams) (ChannelConnection, error) {
+	row := q.db.QueryRow(ctx, createChannelConnection,
+		arg.ID,
+		arg.Provider,
+		arg.DisplayName,
+		arg.Enabled,
+		arg.IsDefault,
+		arg.Config,
+		arg.SecretConfig,
+	)
+	var i ChannelConnection
+	err := row.Scan(
+		&i.ID,
+		&i.Provider,
+		&i.DisplayName,
+		&i.Enabled,
+		&i.IsDefault,
+		&i.Config,
+		&i.SecretConfig,
+		&i.Status,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const deleteChannelConnection = `-- name: DeleteChannelConnection :exec
+DELETE FROM channel_connection
+WHERE id = $1
+`
+
+func (q *Queries) DeleteChannelConnection(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, deleteChannelConnection, id)
+	return err
+}
+
+const getChannelConnection = `-- name: GetChannelConnection :one
+SELECT id, provider, display_name, enabled, is_default, config, secret_config, status, last_error, created_at, updated_at FROM channel_connection
+WHERE id = $1
+`
+
+func (q *Queries) GetChannelConnection(ctx context.Context, id string) (ChannelConnection, error) {
+	row := q.db.QueryRow(ctx, getChannelConnection, id)
+	var i ChannelConnection
+	err := row.Scan(
+		&i.ID,
+		&i.Provider,
+		&i.DisplayName,
+		&i.Enabled,
+		&i.IsDefault,
+		&i.Config,
+		&i.SecretConfig,
+		&i.Status,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listChannelConnections = `-- name: ListChannelConnections :many
-SELECT id, provider, display_name, enabled, is_default, config, status, last_error, created_at, updated_at FROM channel_connection
+SELECT id, provider, display_name, enabled, is_default, config, secret_config, status, last_error, created_at, updated_at FROM channel_connection
 ORDER BY provider ASC, created_at ASC
 `
 
@@ -30,6 +113,7 @@ func (q *Queries) ListChannelConnections(ctx context.Context) ([]ChannelConnecti
 			&i.Enabled,
 			&i.IsDefault,
 			&i.Config,
+			&i.SecretConfig,
 			&i.Status,
 			&i.LastError,
 			&i.CreatedAt,
@@ -46,7 +130,7 @@ func (q *Queries) ListChannelConnections(ctx context.Context) ([]ChannelConnecti
 }
 
 const listEnabledChannelConnections = `-- name: ListEnabledChannelConnections :many
-SELECT id, provider, display_name, enabled, is_default, config, status, last_error, created_at, updated_at FROM channel_connection
+SELECT id, provider, display_name, enabled, is_default, config, secret_config, status, last_error, created_at, updated_at FROM channel_connection
 WHERE enabled = true
 ORDER BY provider ASC, created_at ASC
 `
@@ -67,6 +151,7 @@ func (q *Queries) ListEnabledChannelConnections(ctx context.Context) ([]ChannelC
 			&i.Enabled,
 			&i.IsDefault,
 			&i.Config,
+			&i.SecretConfig,
 			&i.Status,
 			&i.LastError,
 			&i.CreatedAt,
@@ -80,4 +165,72 @@ func (q *Queries) ListEnabledChannelConnections(ctx context.Context) ([]ChannelC
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateChannelConnection = `-- name: UpdateChannelConnection :one
+UPDATE channel_connection SET
+    display_name = $2,
+    enabled = $3,
+    is_default = $4,
+    config = $5,
+    secret_config = $6,
+    status = CASE WHEN $3 THEN 'configured' ELSE 'disabled' END,
+    last_error = NULL,
+    updated_at = now()
+WHERE id = $1
+RETURNING id, provider, display_name, enabled, is_default, config, secret_config, status, last_error, created_at, updated_at
+`
+
+type UpdateChannelConnectionParams struct {
+	ID           string `json:"id"`
+	DisplayName  string `json:"display_name"`
+	Enabled      bool   `json:"enabled"`
+	IsDefault    bool   `json:"is_default"`
+	Config       []byte `json:"config"`
+	SecretConfig []byte `json:"secret_config"`
+}
+
+func (q *Queries) UpdateChannelConnection(ctx context.Context, arg UpdateChannelConnectionParams) (ChannelConnection, error) {
+	row := q.db.QueryRow(ctx, updateChannelConnection,
+		arg.ID,
+		arg.DisplayName,
+		arg.Enabled,
+		arg.IsDefault,
+		arg.Config,
+		arg.SecretConfig,
+	)
+	var i ChannelConnection
+	err := row.Scan(
+		&i.ID,
+		&i.Provider,
+		&i.DisplayName,
+		&i.Enabled,
+		&i.IsDefault,
+		&i.Config,
+		&i.SecretConfig,
+		&i.Status,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateChannelConnectionStatus = `-- name: UpdateChannelConnectionStatus :exec
+UPDATE channel_connection SET
+    status = $2,
+    last_error = $3,
+    updated_at = now()
+WHERE id = $1
+`
+
+type UpdateChannelConnectionStatusParams struct {
+	ID        string      `json:"id"`
+	Status    string      `json:"status"`
+	LastError pgtype.Text `json:"last_error"`
+}
+
+func (q *Queries) UpdateChannelConnectionStatus(ctx context.Context, arg UpdateChannelConnectionStatusParams) error {
+	_, err := q.db.Exec(ctx, updateChannelConnectionStatus, arg.ID, arg.Status, arg.LastError)
+	return err
 }

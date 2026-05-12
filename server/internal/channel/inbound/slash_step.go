@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 )
 
@@ -24,7 +23,7 @@ var slashLabelValueRe = regexp.MustCompile(`^[\w-]+$`)
 
 // SlashConfig configures slash command expansion and optional direct replies.
 type SlashConfig struct {
-	Registry    *channel.Registry
+	Gateway     port.ChannelGateway
 	SendReplies bool
 	// Aliases maps slash subcommand (no leading /, case-insensitive) to an
 	// expansion template. Templates may be natural-language (applied after
@@ -277,20 +276,10 @@ func slashHelpText() string {
 }
 
 func (s *slashStep) maybeSendReply(ctx context.Context, evt port.InboundEvent, text string) {
-	if !s.cfg.SendReplies || s.cfg.Registry == nil {
+	if !s.cfg.SendReplies || s.cfg.Gateway == nil {
 		return
 	}
-	ch, err := s.cfg.Registry.Get(evt.ConnectionID())
-	if err != nil {
-		slog.Warn("slash_expand: channel not found for reply",
-			"event_id", evt.EventID,
-			"channel_name", evt.ChannelName,
-			"chat_id", evt.ChatID,
-			"error", err,
-		)
-		return
-	}
-	if _, err := ch.Send(ctx, port.OutboundMessage{
+	if _, err := s.cfg.Gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
 		ChatID: evt.ChatID,
 		Text:   text,
 	}); err != nil {

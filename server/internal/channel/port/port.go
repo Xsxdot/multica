@@ -137,6 +137,14 @@ type AttachmentInfo struct {
 	MessageID string // platform message_id (required by Feishu download API)
 }
 
+// FileDownloader abstracts platform-specific attachment download operations.
+// Adapters may expose one per configured connection; channel runtime code
+// resolves it through ChannelGateway by connection id.
+type FileDownloader interface {
+	DownloadImage(ctx context.Context, messageID, fileKey string) ([]byte, error)
+	DownloadFile(ctx context.Context, messageID, fileKey string) ([]byte, string, error)
+}
+
 // ChatInfo holds metadata about a chat room / channel / thread.
 type ChatInfo struct {
 	ID   string
@@ -246,4 +254,15 @@ type Channel interface {
 
 	// GetUserInfo fetches metadata for a user.
 	GetUserInfo(ctx context.Context, userID string) (UserInfo, error)
+}
+
+// ChannelGateway is the provider-neutral access point the channel runtime uses
+// after an adapter connection has been registered. Pipeline steps depend on
+// this interface rather than directly reaching into an adapter registry.
+type ChannelGateway interface {
+	SendText(ctx context.Context, connectionID string, msg OutboundMessage) (SendResult, error)
+	SendRich(ctx context.Context, connectionID string, msg OutboundRichMessage) (SendResult, error)
+	GetChatInfo(ctx context.Context, connectionID, chatID string) (ChatInfo, error)
+	GetUserInfo(ctx context.Context, connectionID, userID string) (UserInfo, error)
+	FileDownloader(connectionID string) (FileDownloader, bool)
 }

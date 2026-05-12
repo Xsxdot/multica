@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/channel/binding"
+	channelprovider "github.com/multica-ai/multica/server/internal/channel/provider"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -38,19 +43,75 @@ type ChannelConnectionResponse struct {
 	IsDefault    bool                         `json:"is_default"`
 	Status       string                       `json:"status"`
 	LastError    *string                      `json:"last_error"`
+	Config       map[string]string            `json:"config"`
 	CreatedAt    string                       `json:"created_at"`
 	UpdatedAt    string                       `json:"updated_at"`
 	ConfigSchema []ChannelConfigFieldResponse `json:"config_schema"`
 }
 
-type ChannelConfigFieldResponse struct {
-	Key      string `json:"key"`
-	Label    string `json:"label"`
-	Required bool   `json:"required"`
-	Secret   bool   `json:"secret"`
+type ListChannelConnectionsResponse struct {
+	Connections []ChannelConnectionResponse `json:"connections"`
+	CanManage   bool                        `json:"can_manage"`
 }
 
-func connectionToResponse(c db.ChannelConnection, schema []ChannelConfigFieldResponse) ChannelConnectionResponse {
+type ChannelConfigFieldResponse struct {
+	Key        string `json:"key"`
+	Label      string `json:"label"`
+	Required   bool   `json:"required"`
+	Secret     bool   `json:"secret"`
+	Configured bool   `json:"configured,omitempty"`
+}
+
+type ChannelProviderResponse struct {
+	Provider     string                       `json:"provider"`
+	DisplayName  string                       `json:"display_name"`
+	ConfigSchema []ChannelConfigFieldResponse `json:"config_schema"`
+}
+
+type ChannelBindTokenPreviewResponse struct {
+	Kind                  string  `json:"kind"`
+	Provider              string  `json:"provider"`
+	ConnectionID          string  `json:"connection_id"`
+	ConnectionDisplayName string  `json:"connection_display_name"`
+	ExternalChatID        *string `json:"external_chat_id"`
+	ExternalChatName      *string `json:"external_chat_name"`
+	ExpiresAt             string  `json:"expires_at"`
+}
+
+type channelConnectionWriteRequest struct {
+	Provider     string             `json:"provider"`
+	DisplayName  string             `json:"display_name"`
+	Enabled      *bool              `json:"enabled"`
+	IsDefault    *bool              `json:"is_default"`
+	Config       map[string]*string `json:"config"`
+	SecretConfig map[string]*string `json:"secret_config"`
+}
+
+func connectionToResponse(c db.ChannelConnection, schema []ChannelConfigFieldResponse, includeSensitive bool) ChannelConnectionResponse {
+	if !includeSensitive {
+		return ChannelConnectionResponse{
+			ID:           c.ID,
+			Provider:     c.Provider,
+			DisplayName:  c.DisplayName,
+			Enabled:      c.Enabled,
+			IsDefault:    c.IsDefault,
+			Status:       c.Status,
+			LastError:    nil,
+			Config:       map[string]string{},
+			CreatedAt:    timestampToString(c.CreatedAt),
+			UpdatedAt:    timestampToString(c.UpdatedAt),
+			ConfigSchema: nil,
+		}
+	}
+	config := jsonStringMap(c.Config)
+	secrets := jsonStringMap(c.SecretConfig)
+	schemaWithState := make([]ChannelConfigFieldResponse, 0, len(schema))
+	for _, field := range schema {
+		if field.Secret {
+			field.Configured = strings.TrimSpace(secrets[field.Key]) != ""
+		}
+		schemaWithState = append(schemaWithState, field)
+	}
 	return ChannelConnectionResponse{
 		ID:           c.ID,
 		Provider:     c.Provider,
@@ -59,10 +120,107 @@ func connectionToResponse(c db.ChannelConnection, schema []ChannelConfigFieldRes
 		IsDefault:    c.IsDefault,
 		Status:       c.Status,
 		LastError:    textToPtr(c.LastError),
+		Config:       config,
 		CreatedAt:    timestampToString(c.CreatedAt),
 		UpdatedAt:    timestampToString(c.UpdatedAt),
-		ConfigSchema: schema,
+		ConfigSchema: schemaWithState,
 	}
+}
+
+func boolValue(v *bool, def bool) bool {
+	if v == nil {
+		return def
+	}
+	return *v
+}
+
+func jsonStringMap(raw []byte) map[string]string {
+	out := map[string]string{}
+	if len(raw) == 0 {
+		return out
+	}
+	_ = json.Unmarshal(raw, &out)
+	return out
+}
+
+func mustMarshalJSON(v map[string]string) []byte {
+	if v == nil {
+		return []byte(`{}`)
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return []byte(`{}`)
+	}
+	return raw
+}
+
+func buildConnectionConfig(fields []channelprovider.ConfigField, existingConfig, existingSecrets map[string]string, configPatch, secretPatch map[string]*string, enabled bool) (map[string]string, map[string]string, error) {
+	config := copyStringMap(existingConfig)
+	secrets := copyStringMap(existingSecrets)
+	known := make(map[string]channelprovider.ConfigField, len(fields))
+	for _, field := range fields {
+		known[field.Key] = field
+	}
+	for key, value := range configPatch {
+		field, ok := known[key]
+		if !ok {
+			return nil, nil, fmt.Errorf("unknown config field: %s", key)
+		}
+		if field.Secret {
+			return nil, nil, fmt.Errorf("field %s must be sent in secret_config", key)
+		}
+		if value == nil {
+			delete(config, key)
+		} else {
+			config[key] = strings.TrimSpace(*value)
+		}
+	}
+	for key, value := range secretPatch {
+		field, ok := known[key]
+		if !ok {
+			return nil, nil, fmt.Errorf("unknown secret field: %s", key)
+		}
+		if !field.Secret {
+			return nil, nil, fmt.Errorf("field %s must be sent in config", key)
+		}
+		if value == nil {
+			delete(secrets, key)
+		} else {
+			secrets[key] = strings.TrimSpace(*value)
+		}
+	}
+	if enabled {
+		for _, field := range fields {
+			if !field.Required {
+				continue
+			}
+			if field.Secret {
+				if strings.TrimSpace(secrets[field.Key]) == "" {
+					return nil, nil, fmt.Errorf("missing required secret field: %s", field.Key)
+				}
+				continue
+			}
+			if strings.TrimSpace(config[field.Key]) == "" {
+				return nil, nil, fmt.Errorf("missing required config field: %s", field.Key)
+			}
+		}
+	}
+	return config, secrets, nil
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func bindTokenKind(purpose string) string {
+	if purpose == binding.PurposeChatWorkspace {
+		return "chat"
+	}
+	return "user"
 }
 
 // canManageBinding returns true if the member is allowed to manage (delete or
@@ -95,15 +253,38 @@ func lockChannelBindingProvider(ctx context.Context, tx pgx.Tx, workspaceID pgty
 	return err
 }
 
+func (h *Handler) canManageChannelConnections(ctx context.Context, userID string) (bool, error) {
+	return h.Queries.UserHasWorkspaceOwnerRole(ctx, parseUUID(userID))
+}
+
+func (h *Handler) requireChannelConnectionOwner(w http.ResponseWriter, r *http.Request) bool {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return false
+	}
+	canManage, err := h.canManageChannelConnections(r.Context(), userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check channel connection permissions")
+		return false
+	}
+	if !canManage {
+		writeError(w, http.StatusForbidden, "only workspace owners can manage channel connections")
+		return false
+	}
+	return true
+}
+
 type CreateChannelBindingRequest struct {
 	Token            string  `json:"token"`
 	Provider         string  `json:"provider"`
+	ConnectionID     string  `json:"connection_id"`
 	DefaultProjectID *string `json:"default_project_id"`
 }
 
 type CreateChannelUserBindingRequest struct {
-	Token    string `json:"token"`
-	Provider string `json:"provider"`
+	Token        string `json:"token"`
+	Provider     string `json:"provider"`
+	ConnectionID string `json:"connection_id"`
 }
 
 type SetPrimaryChannelBindingRequest struct {
@@ -149,6 +330,10 @@ func (h *Handler) CreateChannelUserBinding(w http.ResponseWriter, r *http.Reques
 	}
 	if req.Provider != "" && peeked.Provider != req.Provider {
 		writeError(w, http.StatusBadRequest, "provider mismatch")
+		return
+	}
+	if req.ConnectionID != "" && peeked.ConnectionID != req.ConnectionID {
+		writeError(w, http.StatusBadRequest, "connection mismatch")
 		return
 	}
 	if peeked.Purpose != binding.PurposeUserIdentity {
@@ -204,11 +389,66 @@ func (h *Handler) CreateChannelUserBinding(w http.ResponseWriter, r *http.Reques
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/channel-connections
+// GET /api/channel-providers
+// ---------------------------------------------------------------------------
+
+func (h *Handler) ListChannelProviders(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireUserID(w, r); !ok {
+		return
+	}
+	resp := make([]ChannelProviderResponse, 0, len(h.ChannelProviderFactories))
+	for providerKey, factory := range h.ChannelProviderFactories {
+		resp = append(resp, ChannelProviderResponse{
+			Provider:     providerKey,
+			DisplayName:  factory.DisplayName(),
+			ConfigSchema: h.ChannelProviderSchemas[providerKey],
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"providers": resp})
+}
+
+func (h *Handler) GetChannelBindTokenPreview(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireUserID(w, r); !ok {
+		return
+	}
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		writeError(w, http.StatusBadRequest, "token is required")
+		return
+	}
+	peeker := binding.NewTokenConsumer(h.Queries)
+	row, err := peeker.Peek(r.Context(), token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or expired token")
+		return
+	}
+	connectionName := row.ConnectionID
+	if conn, err := h.Queries.GetChannelConnection(r.Context(), row.ConnectionID); err == nil {
+		connectionName = conn.DisplayName
+	}
+	writeJSON(w, http.StatusOK, ChannelBindTokenPreviewResponse{
+		Kind:                  bindTokenKind(row.Purpose),
+		Provider:              row.Provider,
+		ConnectionID:          row.ConnectionID,
+		ConnectionDisplayName: connectionName,
+		ExternalChatID:        textToPtr(row.ExternalChatID),
+		ExternalChatName:      textToPtr(row.ExternalChatName),
+		ExpiresAt:             timestampToString(row.ExpiresAt),
+	})
+}
+
+// ---------------------------------------------------------------------------
+// /api/channel-connections
 // ---------------------------------------------------------------------------
 
 func (h *Handler) ListChannelConnections(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireUserID(w, r); !ok {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	canManage, err := h.canManageChannelConnections(r.Context(), userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check channel connection permissions")
 		return
 	}
 
@@ -220,9 +460,167 @@ func (h *Handler) ListChannelConnections(w http.ResponseWriter, r *http.Request)
 
 	resp := make([]ChannelConnectionResponse, 0, len(connections))
 	for _, connection := range connections {
-		resp = append(resp, connectionToResponse(connection, h.ChannelProviderSchemas[connection.Provider]))
+		if !canManage && !connection.Enabled {
+			continue
+		}
+		resp = append(resp, connectionToResponse(connection, h.ChannelProviderSchemas[connection.Provider], canManage))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"connections": resp})
+	writeJSON(w, http.StatusOK, ListChannelConnectionsResponse{
+		Connections: resp,
+		CanManage:   canManage,
+	})
+}
+
+func (h *Handler) CreateChannelConnection(w http.ResponseWriter, r *http.Request) {
+	if !h.requireChannelConnectionOwner(w, r) {
+		return
+	}
+	var req channelConnectionWriteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	factory := h.ChannelProviderFactories[req.Provider]
+	if factory == nil {
+		writeError(w, http.StatusBadRequest, "unknown channel provider")
+		return
+	}
+	enabled := boolValue(req.Enabled, false)
+	isDefault := boolValue(req.IsDefault, false)
+	displayName := strings.TrimSpace(req.DisplayName)
+	if displayName == "" {
+		displayName = factory.DisplayName()
+	}
+	config, secrets, err := buildConnectionConfig(factory.ConfigSchema(), nil, nil, req.Config, req.SecretConfig, enabled)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	row, err := h.Queries.CreateChannelConnection(r.Context(), db.CreateChannelConnectionParams{
+		ID:           uuid.NewString(),
+		Provider:     req.Provider,
+		DisplayName:  displayName,
+		Enabled:      enabled,
+		IsDefault:    isDefault,
+		Config:       mustMarshalJSON(config),
+		SecretConfig: mustMarshalJSON(secrets),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create channel connection")
+		return
+	}
+	writeJSON(w, http.StatusCreated, connectionToResponse(row, h.ChannelProviderSchemas[row.Provider], true))
+}
+
+func (h *Handler) UpdateChannelConnection(w http.ResponseWriter, r *http.Request) {
+	if !h.requireChannelConnectionOwner(w, r) {
+		return
+	}
+	connectionID := chi.URLParam(r, "connectionId")
+	existing, err := h.Queries.GetChannelConnection(r.Context(), connectionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "channel connection not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load channel connection")
+		return
+	}
+	var req channelConnectionWriteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	factory := h.ChannelProviderFactories[existing.Provider]
+	if factory == nil {
+		writeError(w, http.StatusBadRequest, "unknown channel provider")
+		return
+	}
+	enabled := existing.Enabled
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	isDefault := existing.IsDefault
+	if req.IsDefault != nil {
+		isDefault = *req.IsDefault
+	}
+	displayName := strings.TrimSpace(req.DisplayName)
+	if displayName == "" {
+		displayName = existing.DisplayName
+	}
+	config, secrets, err := buildConnectionConfig(factory.ConfigSchema(), jsonStringMap(existing.Config), jsonStringMap(existing.SecretConfig), req.Config, req.SecretConfig, enabled)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	row, err := h.Queries.UpdateChannelConnection(r.Context(), db.UpdateChannelConnectionParams{
+		ID:           existing.ID,
+		DisplayName:  displayName,
+		Enabled:      enabled,
+		IsDefault:    isDefault,
+		Config:       mustMarshalJSON(config),
+		SecretConfig: mustMarshalJSON(secrets),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update channel connection")
+		return
+	}
+	writeJSON(w, http.StatusOK, connectionToResponse(row, h.ChannelProviderSchemas[row.Provider], true))
+}
+
+func (h *Handler) DeleteChannelConnection(w http.ResponseWriter, r *http.Request) {
+	if !h.requireChannelConnectionOwner(w, r) {
+		return
+	}
+	if err := h.Queries.DeleteChannelConnection(r.Context(), chi.URLParam(r, "connectionId")); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete channel connection")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) TestChannelConnection(w http.ResponseWriter, r *http.Request) {
+	if !h.requireChannelConnectionOwner(w, r) {
+		return
+	}
+	row, err := h.Queries.GetChannelConnection(r.Context(), chi.URLParam(r, "connectionId"))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "channel connection not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load channel connection")
+		return
+	}
+	factory := h.ChannelProviderFactories[row.Provider]
+	if factory == nil {
+		writeError(w, http.StatusBadRequest, "unknown channel provider")
+		return
+	}
+	values := jsonStringMap(row.Config)
+	for key, value := range jsonStringMap(row.SecretConfig) {
+		values[key] = value
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	bundle, err := factory.Build(ctx, channelprovider.ConnectionConfig{
+		Provider:     row.Provider,
+		ConnectionID: row.ID,
+		DisplayName:  row.DisplayName,
+		Enabled:      row.Enabled,
+		Values:       values,
+	})
+	if err == nil && bundle.Channel != nil {
+		err = bundle.Channel.Connect(ctx)
+		if err == nil {
+			_ = bundle.Channel.Disconnect(ctx)
+		}
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("connection test failed: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +707,10 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 
 	if req.Provider != "" && peeked.Provider != req.Provider {
 		writeError(w, http.StatusBadRequest, "provider mismatch")
+		return
+	}
+	if req.ConnectionID != "" && peeked.ConnectionID != req.ConnectionID {
+		writeError(w, http.StatusBadRequest, "connection mismatch")
 		return
 	}
 	if peeked.Purpose != binding.PurposeChatWorkspace {

@@ -29,11 +29,11 @@ var validNotifValues = map[string]bool{
 	"muted": true,
 }
 
-var validNotifChannelKeyRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+var validNotifChannelKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
 // validNotifChannelEventKeys is the set of boolean keys under
-// preferences.channel.<provider>.*. Each key represents one event family that
-// can be muted for a channel provider.
+// preferences.channel.<connection_id>.*. Each key represents one event family
+// that can be muted for a concrete channel connection.
 //
 // Default semantics: a key absent from the map is treated as enabled
 // (`true`). This is the contract the API, the UI, and any downstream
@@ -52,12 +52,12 @@ var validNotifChannelEventKeys = map[string]bool{
 //
 // Centralising this rule prevents drift between the UI ("missing == on")
 // and any downstream worker that might otherwise treat missing as off.
-func IsChannelEventEnabled(prefs map[string]any, provider, key string) bool {
+func IsChannelEventEnabled(prefs map[string]any, connectionID, key string) bool {
 	channel, ok := prefs["channel"].(map[string]any)
 	if !ok {
 		return true
 	}
-	providerPrefs, ok := channel[provider].(map[string]any)
+	providerPrefs, ok := channel[connectionID].(map[string]any)
 	if !ok {
 		return true
 	}

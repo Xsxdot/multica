@@ -12,19 +12,18 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/channel/binding"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 )
 
 type userIdentityBindStep struct {
-	pool     *pgxpool.Pool
-	registry *channel.Registry
-	issuer   *binding.TokenIssuer
+	pool    *pgxpool.Pool
+	gateway port.ChannelGateway
+	issuer  *binding.TokenIssuer
 }
 
-func NewUserIdentityBindStep(pool *pgxpool.Pool, registry *channel.Registry, issuer *binding.TokenIssuer) Step {
-	return &userIdentityBindStep{pool: pool, registry: registry, issuer: issuer}
+func NewUserIdentityBindStep(pool *pgxpool.Pool, gateway port.ChannelGateway, issuer *binding.TokenIssuer) Step {
+	return &userIdentityBindStep{pool: pool, gateway: gateway, issuer: issuer}
 }
 
 func (*userIdentityBindStep) Name() string { return "identity-bind" }
@@ -46,18 +45,17 @@ func (s *userIdentityBindStep) Run(ctx context.Context, evt port.InboundEvent) (
 	if err != nil {
 		return evt, DecisionContinue, fmt.Errorf("identity-bind: issue token: %w", err)
 	}
-	ch, err := s.registry.Get(evt.ConnectionID())
-	if err != nil {
-		return evt, DecisionContinue, fmt.Errorf("identity-bind: get channel: %w", err)
+	if s.gateway == nil {
+		return evt, DecisionContinue, errors.New("identity-bind: channel gateway is not configured")
 	}
 	body := fmt.Sprintf("点击绑定 Multica 账号（10 分钟内有效）: %s", ChannelBindURL("user", token.Plaintext, evt.ChannelName, evt.ConnectionID()))
-	if _, err := ch.Send(ctx, port.OutboundMessage{
+	if _, err := s.gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
 		Target: port.TargetUser(evt.SenderID),
 		Text:   body,
 	}); err != nil {
 		if evt.ChatType == port.ChatTypeGroup {
 			notice := "请先和机器人私聊或开启机器人私聊权限后，在群聊里重新发送 /bind。"
-			if _, sendErr := ch.Send(ctx, port.OutboundMessage{
+			if _, sendErr := s.gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
 				Target: port.TargetChat(evt.ChatID),
 				Text:   notice,
 			}); sendErr != nil {
@@ -71,12 +69,12 @@ func (s *userIdentityBindStep) Run(ctx context.Context, evt port.InboundEvent) (
 }
 
 type chatBindCommandStep struct {
-	registry *channel.Registry
-	issuer   *binding.TokenIssuer
+	gateway port.ChannelGateway
+	issuer  *binding.TokenIssuer
 }
 
-func NewChatBindCommandStep(registry *channel.Registry, issuer *binding.TokenIssuer) Step {
-	return &chatBindCommandStep{registry: registry, issuer: issuer}
+func NewChatBindCommandStep(gateway port.ChannelGateway, issuer *binding.TokenIssuer) Step {
+	return &chatBindCommandStep{gateway: gateway, issuer: issuer}
 }
 
 func (*chatBindCommandStep) Name() string { return "chat-bind-command" }
@@ -86,13 +84,12 @@ func (s *chatBindCommandStep) Run(ctx context.Context, evt port.InboundEvent) (p
 		return evt, DecisionContinue, nil
 	}
 
-	ch, err := s.registry.Get(evt.ConnectionID())
-	if err != nil {
-		return evt, DecisionContinue, fmt.Errorf("chat-bind-command: get channel: %w", err)
+	if s.gateway == nil {
+		return evt, DecisionContinue, errors.New("chat-bind-command: channel gateway is not configured")
 	}
 
 	if evt.ChatType == port.ChatTypeDirect {
-		if _, err := ch.Send(ctx, port.OutboundMessage{
+		if _, err := s.gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
 			Target: port.TargetUser(evt.SenderID),
 			Text:   "请在群聊里发送 /bind 绑定当前会话。",
 		}); err != nil {
@@ -102,7 +99,7 @@ func (s *chatBindCommandStep) Run(ctx context.Context, evt port.InboundEvent) (p
 	}
 
 	chatInfo := port.ChatInfo{ID: evt.ChatID, Type: evt.ChatType}
-	if info, err := ch.GetChatInfo(ctx, evt.ChatID); err == nil {
+	if info, err := s.gateway.GetChatInfo(ctx, evt.ConnectionID(), evt.ChatID); err == nil {
 		chatInfo = info
 	}
 	if chatInfo.ID == "" {
@@ -125,14 +122,14 @@ func (s *chatBindCommandStep) Run(ctx context.Context, evt port.InboundEvent) (p
 	}
 
 	body := fmt.Sprintf("点击绑定当前会话到 Multica 工作区（10 分钟内有效）: %s", ChannelBindURL("chat", token.Plaintext, evt.ChannelName, evt.ConnectionID()))
-	if _, err := ch.Send(ctx, port.OutboundMessage{
+	if _, err := s.gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
 		Target: port.TargetUser(evt.SenderID),
 		Text:   body,
 	}); err == nil {
 		return evt, DecisionSkip, nil
 	}
 
-	if _, err := ch.Send(ctx, port.OutboundMessage{
+	if _, err := s.gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
 		Target: port.TargetChat(evt.ChatID),
 		Text:   body,
 	}); err != nil {

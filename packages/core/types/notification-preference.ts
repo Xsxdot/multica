@@ -8,8 +8,8 @@ export type NotificationGroupKey =
 export type NotificationGroupValue = "all" | "muted";
 
 /**
- * Provider channel preferences. Each key represents one event family a
- * channel provider integration can mute.
+ * Channel connection preferences. Each key represents one event family a
+ * concrete channel connection can mute.
  *
  * Default semantics: a key absent from this object is treated as
  * **enabled** (default-on). Only an explicit `false` mutes the family.
@@ -47,7 +47,7 @@ export interface NotificationPreferenceResponse {
 }
 
 /**
- * Returns true when a provider integration should deliver an event of
+ * Returns true when a concrete channel connection should deliver an event of
  * the given key for the given preferences. Missing keys mean
  * "enabled" (default-on); explicit false means muted.
  *
@@ -56,10 +56,10 @@ export interface NotificationPreferenceResponse {
  */
 export function isChannelEventEnabled(
   prefs: NotificationPreferences | undefined | null,
-  provider: string,
+  connectionId: string,
   key: ChannelEventKey,
 ): boolean {
-  const value = prefs?.channel?.[provider]?.[key];
+  const value = prefs?.channel?.[connectionId]?.[key];
   return value !== false;
 }
 

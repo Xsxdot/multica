@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 )
 
@@ -32,7 +31,7 @@ type ConfigField struct {
 
 type Bundle struct {
 	Channel        port.Channel
-	FileDownloader inbound.FileDownloader
+	FileDownloader port.FileDownloader
 }
 
 type Factory interface {

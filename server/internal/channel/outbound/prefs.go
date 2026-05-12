@@ -15,9 +15,9 @@ import (
 // can be tested without a real database.
 type PrefStore interface {
 	// GetChannelPref returns true if the given event kind is enabled for
-	// the user on the specified channel. Returns true (enabled) when no
+	// the user on the specified channel connection. Returns true when no
 	// preference record exists (default = enabled).
-	GetChannelPref(ctx context.Context, workspaceID, userID pgtype.UUID, channelName, eventKind string) (bool, error)
+	GetChannelPref(ctx context.Context, workspaceID, userID pgtype.UUID, connectionID, eventKind string) (bool, error)
 }
 
 // DBPrefStore implements PrefStore using the sqlc-generated Queries.
@@ -31,8 +31,8 @@ func NewDBPrefStore(q *db.Queries) *DBPrefStore {
 }
 
 // prefKeyMap maps outbound event kinds to the JSONB family key within
-// preferences -> channel -> <channel_name>. Missing keys default enabled;
-// only explicit boolean false mutes the family.
+// preferences -> channel -> <connection_id>. Missing keys default enabled; only
+// explicit boolean false mutes the family.
 var prefKeyMap = map[string]string{
 	"comment_mention":  "comments",
 	"issue_assigned":   "issues",
@@ -43,10 +43,10 @@ var prefKeyMap = map[string]string{
 }
 
 // GetChannelPref returns true if the given event kind is enabled for the user
-// on the specified channel.
+// on the specified channel connection.
 // R3: Distinguishes ErrNoRows (-> default enabled) from real DB errors (-> fail-closed).
 // json.Unmarshal failure returns error instead of swallowing.
-func (s *DBPrefStore) GetChannelPref(ctx context.Context, workspaceID, userID pgtype.UUID, channelName, eventKind string) (bool, error) {
+func (s *DBPrefStore) GetChannelPref(ctx context.Context, workspaceID, userID pgtype.UUID, connectionID, eventKind string) (bool, error) {
 	row, err := s.queries.GetNotificationPreference(ctx, db.GetNotificationPreferenceParams{
 		WorkspaceID: workspaceID,
 		UserID:      userID,
@@ -63,13 +63,13 @@ func (s *DBPrefStore) GetChannelPref(ctx context.Context, workspaceID, userID pg
 		return false, fmt.Errorf("unmarshal preferences: %w", err)
 	}
 
-	// Navigate: preferences -> channel -> <channelName> -> <eventKind>
+	// Navigate: preferences -> channel -> <connectionID> -> <eventKind>
 	channelObj, ok := prefs["channel"].(map[string]any)
 	if !ok {
 		return true, nil
 	}
 
-	chPrefs, ok := channelObj[channelName].(map[string]any)
+	chPrefs, ok := channelObj[connectionID].(map[string]any)
 	if !ok {
 		return true, nil
 	}

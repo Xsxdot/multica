@@ -2,10 +2,11 @@ package feishu
 
 import (
 	"context"
+	"fmt"
+	"hash/fnv"
 	"os"
 	"time"
 
-	"github.com/multica-ai/multica/server/internal/channel/leader"
 	"github.com/multica-ai/multica/server/internal/channel/provider"
 )
 
@@ -58,6 +59,9 @@ func (*Factory) Build(_ context.Context, cfg provider.ConnectionConfig) (provide
 	appSecret := cfg.Value("app_secret")
 	encryptKey := cfg.Value("encrypt_key")
 	verifyToken := cfg.Value("verify_token")
+	if appID == "" || appSecret == "" {
+		return provider.Bundle{}, fmt.Errorf("feishu: app_id and app_secret are required")
+	}
 
 	client := NewRealClient(appID, appSecret, encryptKey, verifyToken)
 	adapter := NewAdapter(client, Config{
@@ -72,8 +76,14 @@ func (*Factory) Build(_ context.Context, cfg provider.ConnectionConfig) (provide
 	}, nil
 }
 
-func (*Factory) LeaderLockID(provider.ConnectionConfig) (int64, bool) {
-	return leader.ChannelFeishuLockID, true
+func (*Factory) LeaderLockID(cfg provider.ConnectionConfig) (int64, bool) {
+	connectionID := cfg.ConnectionID
+	if connectionID == "" {
+		connectionID = channelName
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("channel:" + channelName + ":" + connectionID))
+	return int64(h.Sum64()), true
 }
 
 func (*Factory) ReconnectDelay(provider.ConnectionConfig) time.Duration {

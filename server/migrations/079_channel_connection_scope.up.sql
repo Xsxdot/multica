@@ -5,6 +5,7 @@ CREATE TABLE channel_connection (
     enabled       BOOLEAN     NOT NULL DEFAULT TRUE,
     is_default    BOOLEAN     NOT NULL DEFAULT FALSE,
     config        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    secret_config JSONB       NOT NULL DEFAULT '{}'::jsonb,
     status        TEXT        NOT NULL DEFAULT 'configured'
                                 CHECK (status IN ('configured', 'connected', 'disabled', 'error')),
     last_error    TEXT,
@@ -16,8 +17,16 @@ CREATE UNIQUE INDEX idx_channel_connection_provider_default
     ON channel_connection(provider)
     WHERE is_default;
 
-INSERT INTO channel_connection (id, provider, display_name, enabled, is_default)
-VALUES ('feishu', 'feishu', 'Feishu', TRUE, TRUE)
+INSERT INTO channel_connection (id, provider, display_name, enabled, is_default, status)
+SELECT 'feishu', 'feishu', 'Feishu', FALSE, TRUE, 'disabled'
+WHERE EXISTS (SELECT 1 FROM channel_user_binding WHERE provider = 'feishu')
+   OR EXISTS (SELECT 1 FROM channel_chat_binding WHERE provider = 'feishu')
+   OR EXISTS (SELECT 1 FROM channel_bind_token WHERE provider = 'feishu')
+   OR EXISTS (SELECT 1 FROM channel_inbound_event_dedup WHERE provider = 'feishu')
+   OR EXISTS (SELECT 1 FROM channel_outbound_failure WHERE provider = 'feishu')
+   OR EXISTS (SELECT 1 FROM channel_outbound_notification WHERE provider = 'feishu')
+   OR EXISTS (SELECT 1 FROM channel_conversation WHERE provider = 'feishu')
+   OR EXISTS (SELECT 1 FROM channel_inbound_event WHERE provider = 'feishu')
 ON CONFLICT (id) DO NOTHING;
 
 ALTER TABLE channel_user_binding

@@ -197,16 +197,17 @@ type ChannelChatBinding struct {
 }
 
 type ChannelConnection struct {
-	ID          string             `json:"id"`
-	Provider    string             `json:"provider"`
-	DisplayName string             `json:"display_name"`
-	Enabled     bool               `json:"enabled"`
-	IsDefault   bool               `json:"is_default"`
-	Config      []byte             `json:"config"`
-	Status      string             `json:"status"`
-	LastError   pgtype.Text        `json:"last_error"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	ID           string             `json:"id"`
+	Provider     string             `json:"provider"`
+	DisplayName  string             `json:"display_name"`
+	Enabled      bool               `json:"enabled"`
+	IsDefault    bool               `json:"is_default"`
+	Config       []byte             `json:"config"`
+	SecretConfig []byte             `json:"secret_config"`
+	Status       string             `json:"status"`
+	LastError    pgtype.Text        `json:"last_error"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
 type ChannelConversation struct {

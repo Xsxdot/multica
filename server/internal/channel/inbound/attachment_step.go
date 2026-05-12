@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/channel/facade"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/multica-ai/multica/server/internal/storage"
@@ -23,13 +22,6 @@ const (
 	replyAttachmentFail = "ATTACHMENT_FAIL"
 )
 
-// FileDownloader abstracts platform-specific file download operations.
-// The concrete implementation is provided by the Feishu adapter.
-type FileDownloader interface {
-	DownloadImage(ctx context.Context, messageID, fileKey string) ([]byte, error)
-	DownloadFile(ctx context.Context, messageID, fileKey string) ([]byte, string, error)
-}
-
 // AttachmentQuerier is the persistence contract for creating attachment records.
 type AttachmentQuerier interface {
 	UploadIssueAttachment(ctx context.Context, req facade.UploadIssueAttachmentReq) (facade.Attachment, error)
@@ -39,8 +31,8 @@ type AttachmentQuerier interface {
 type AttachmentConfig struct {
 	Storage           storage.Storage
 	AttachmentQuerier AttachmentQuerier
-	FileDownloader    FileDownloader
-	Registry          *channel.Registry
+	FileDownloader    port.FileDownloader
+	Gateway           port.ChannelGateway
 	ChatBinding       ChatBindingLookup
 	UserResolver      UserInfoResolver
 	IssueFacade       facade.IssueFacade
@@ -123,10 +115,14 @@ func (s *attachmentStep) processAttachment(ctx context.Context, evt port.Inbound
 	var data []byte
 	var filename string
 	var err error
+	downloader, err := s.fileDownloader(evt)
+	if err != nil {
+		return "", err
+	}
 
 	switch att.FileType {
 	case "image":
-		data, err = s.cfg.FileDownloader.DownloadImage(ctx, att.MessageID, att.FileKey)
+		data, err = downloader.DownloadImage(ctx, att.MessageID, att.FileKey)
 		if err != nil {
 			return "", fmt.Errorf("download image: %w", err)
 		}
@@ -135,7 +131,7 @@ func (s *attachmentStep) processAttachment(ctx context.Context, evt port.Inbound
 			filename = att.FileKey + ".png"
 		}
 	case "file":
-		data, filename, err = s.cfg.FileDownloader.DownloadFile(ctx, att.MessageID, att.FileKey)
+		data, filename, err = downloader.DownloadFile(ctx, att.MessageID, att.FileKey)
 		if err != nil {
 			return "", fmt.Errorf("download file: %w", err)
 		}
@@ -174,16 +170,25 @@ func (s *attachmentStep) processAttachment(ctx context.Context, evt port.Inbound
 	return filename, nil
 }
 
+func (s *attachmentStep) fileDownloader(evt port.InboundEvent) (port.FileDownloader, error) {
+	if s.cfg.FileDownloader != nil {
+		return s.cfg.FileDownloader, nil
+	}
+	if s.cfg.Gateway == nil {
+		return nil, fmt.Errorf("attachment: channel gateway is not configured")
+	}
+	downloader, ok := s.cfg.Gateway.FileDownloader(evt.ConnectionID())
+	if !ok || downloader == nil {
+		return nil, fmt.Errorf("attachment: file downloader is not configured for connection %s", evt.ConnectionID())
+	}
+	return downloader, nil
+}
+
 func (s *attachmentStep) sendReply(ctx context.Context, evt port.InboundEvent, text string) {
-	if s.cfg.Registry == nil {
+	if s.cfg.Gateway == nil {
 		return
 	}
-	ch, err := s.cfg.Registry.Get(evt.ConnectionID())
-	if err != nil {
-		slog.Error("attachment: channel not in registry", "channel", evt.ChannelName, "error", err)
-		return
-	}
-	if _, err := ch.Send(ctx, port.OutboundMessage{ChatID: evt.ChatID, Text: text}); err != nil {
+	if _, err := s.cfg.Gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{ChatID: evt.ChatID, Text: text}); err != nil {
 		slog.Error("attachment: send reply failed", "channel", evt.ChannelName, "chat_id", evt.ChatID, "error", err)
 	}
 }

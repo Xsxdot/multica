@@ -170,6 +170,39 @@ func TestSubscriber_InactiveDoesNotHandleEvents(t *testing.T) {
 	}
 }
 
+func TestSubscriber_StopUnsubscribesAndSuppressesOutbox(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	bindingStore := &mockBindingStore{bindings: map[string]map[string]string{
+		"feishu": {
+			"ext-user-1": "00000000-0000-0000-0000-000000000001",
+		},
+	}}
+	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
+	outbox := &mockOutbox{}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.SetNotificationEnqueuer(outbox)
+	sub.Start()
+	sub.Stop()
+	sub.Stop()
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventInboxNew,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     "00000000-0000-0000-0000-000000000099",
+		Payload: map[string]any{
+			"user_id":    "00000000-0000-0000-0000-000000000001",
+			"inbox_type": "issue_assigned",
+			"title":      "Test Issue",
+		},
+	})
+
+	if got := len(outbox.Requests()); got != 0 {
+		t.Fatalf("outbox requests = %d, want 0 after subscriber stop", got)
+	}
+}
+
 func TestSubscriber_OutboxEnqueuesWhenDirectDeliveryInactive(t *testing.T) {
 	bus := events.New()
 	ch := &mockChannel{name: "feishu"}

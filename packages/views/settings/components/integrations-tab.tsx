@@ -1,9 +1,21 @@
 "use client";
 
 import { useState } from "react";
-import { Link2, Star, Trash2, MessageCircle, Plug } from "lucide-react";
+import { Link2, Star, Trash2, MessageCircle, Plug, Plus, Settings, FlaskConical } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Badge } from "@multica/ui/components/ui/badge";
+import { Input } from "@multica/ui/components/ui/input";
+import { Label } from "@multica/ui/components/ui/label";
+import { Switch } from "@multica/ui/components/ui/switch";
+import { NativeSelect } from "@multica/ui/components/ui/native-select";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@multica/ui/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogContent,
@@ -23,9 +35,10 @@ import {
   workspaceKeys,
   channelBindingListOptions,
   channelConnectionListOptions,
+  channelProviderListOptions,
 } from "@multica/core/workspace/queries";
 import { api } from "@multica/core/api";
-import type { ChannelBinding, ChannelConnection } from "@multica/core/types";
+import type { ChannelBinding, ChannelConnection, ChannelProvider } from "@multica/core/types";
 
 function providerLabel(value: string) {
   if (!value) return "Channel";
@@ -39,6 +52,28 @@ function providerLabel(value: string) {
 function connectionLabel(binding: ChannelBinding, connections: Map<string, ChannelConnection>) {
   const connection = connections.get(binding.connection_id);
   return connection?.display_name || providerLabel(binding.provider);
+}
+
+type ConnectionDraft = {
+  id?: string;
+  provider: string;
+  display_name: string;
+  enabled: boolean;
+  is_default: boolean;
+  config: Record<string, string>;
+  secret_config: Record<string, string>;
+};
+
+function draftFromConnection(connection: ChannelConnection): ConnectionDraft {
+  return {
+    id: connection.id,
+    provider: connection.provider,
+    display_name: connection.display_name,
+    enabled: connection.enabled,
+    is_default: connection.is_default,
+    config: { ...(connection.config ?? {}) },
+    secret_config: {},
+  };
 }
 
 function BindingCard({
@@ -109,13 +144,18 @@ export function IntegrationsTab() {
   const workspace = useCurrentWorkspace();
   const qc = useQueryClient();
   const wsId = useWorkspaceId();
+  const { data: providersData } = useQuery(channelProviderListOptions());
   const { data: connectionsData } = useQuery(channelConnectionListOptions());
   const { data: bindingsData, isLoading } = useQuery(channelBindingListOptions(wsId));
   const connections = connectionsData?.connections ?? [];
+  const canManageConnections = connectionsData?.can_manage ?? false;
   const connectionByID = new Map(connections.map((connection) => [connection.id, connection]));
   const bindings = bindingsData?.bindings ?? [];
 
   const [actionBindingId, setActionBindingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<ConnectionDraft | null>(null);
+  const providers = providersData?.providers ?? [];
+  const providerByID = new Map(providers.map((provider) => [provider.provider, provider]));
   const [confirmAction, setConfirmAction] = useState<{
     title: string;
     description: string;
@@ -138,6 +178,58 @@ export function IntegrationsTab() {
       toast.error(e.message || "Failed to update primary binding");
     },
   });
+
+  const saveConnectionMutation = useMutation({
+    mutationFn: async (input: ConnectionDraft) => {
+      const provider = providerByID.get(input.provider);
+      const config: Record<string, string | null> = {};
+      const secret_config: Record<string, string | null> = {};
+      for (const field of provider?.config_schema ?? []) {
+        if (field.secret) {
+          const value = input.secret_config[field.key];
+          if (value !== undefined && value !== "") secret_config[field.key] = value;
+        } else {
+          config[field.key] = input.config[field.key] ?? "";
+        }
+      }
+      const payload = {
+        provider: input.provider,
+        display_name: input.display_name,
+        enabled: input.enabled,
+        is_default: input.is_default,
+        config,
+        secret_config,
+      };
+      if (input.id) return api.updateChannelConnection(input.id, payload);
+      return api.createChannelConnection(payload);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: workspaceKeys.channelConnections() });
+      setDraft(null);
+      toast.success("Channel connection saved");
+    },
+    onError: (e: Error) => toast.error(e.message || "Failed to save channel connection"),
+  });
+
+  const testConnectionMutation = useMutation({
+    mutationFn: (connectionId: string) => api.testChannelConnection(connectionId),
+    onSuccess: () => toast.success("Connection test succeeded"),
+    onError: (e: Error) => toast.error(e.message || "Connection test failed"),
+  });
+
+  const toggleConnection = async (connection: ChannelConnection, enabled: boolean) => {
+    try {
+      await api.updateChannelConnection(connection.id, {
+        display_name: connection.display_name,
+        enabled,
+        is_default: connection.is_default,
+        config: connection.config ?? {},
+      });
+      qc.invalidateQueries({ queryKey: workspaceKeys.channelConnections() });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to update connection");
+    }
+  };
 
   const handleSetPrimary = (binding: ChannelBinding) => {
     setActionBindingId(binding.id);
@@ -173,15 +265,68 @@ export function IntegrationsTab() {
   return (
     <div className="space-y-8">
       <section className="space-y-4">
-        <div className="flex items-center gap-2">
-          <Plug className="h-4 w-4 text-muted-foreground" />
-          <h2 className="text-sm font-semibold">Channel Connections ({connections.length})</h2>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Plug className="h-4 w-4 text-muted-foreground" />
+            <h2 className="text-sm font-semibold">Channel Connections ({connections.length})</h2>
+          </div>
+          {canManageConnections ? (
+            <Button
+              size="sm"
+              disabled={providers.length === 0}
+              onClick={() => {
+                const provider = providers[0];
+                if (!provider) return;
+                setDraft({
+                  provider: provider.provider,
+                  display_name: provider.display_name,
+                  enabled: false,
+                  is_default: false,
+                  config: {},
+                  secret_config: {},
+                });
+              }}
+            >
+              <Plus className="h-4 w-4" />
+              Add
+            </Button>
+          ) : null}
         </div>
+        {!canManageConnections ? (
+          <p className="text-sm text-muted-foreground">Only workspace owners can manage channel connections.</p>
+        ) : null}
 
         {connections.length > 0 ? (
           <div className="overflow-hidden rounded-xl ring-1 ring-foreground/10">
             {connections.map((connection, i) => (
-              <ConnectionRow key={connection.id} connection={connection} separated={i > 0} />
+              <ConnectionRow
+                key={connection.id}
+                connection={connection}
+                separated={i > 0}
+                canManage={canManageConnections}
+                onEdit={() => setDraft(draftFromConnection(connection))}
+                onToggle={(enabled) => toggleConnection(connection, enabled)}
+                onTest={() => testConnectionMutation.mutate(connection.id)}
+                onDelete={() => {
+                  setConfirmAction({
+                    title: `Delete ${connection.display_name}?`,
+                    description: "This removes the connection and its channel bindings.",
+                    variant: "destructive",
+                    onConfirm: async () => {
+                      try {
+                        await api.deleteChannelConnection(connection.id);
+                        qc.invalidateQueries({ queryKey: workspaceKeys.channelConnections() });
+                        qc.invalidateQueries({ queryKey: workspaceKeys.channelBindings(wsId) });
+                        toast.success("Channel connection deleted");
+                      } catch (e) {
+                        toast.error(e instanceof Error ? e.message : "Failed to delete channel connection");
+                      } finally {
+                        setConfirmAction(null);
+                      }
+                    },
+                  });
+                }}
+              />
             ))}
           </div>
         ) : (
@@ -217,6 +362,19 @@ export function IntegrationsTab() {
         )}
       </section>
 
+      {canManageConnections ? (
+        <ConnectionDialog
+          draft={draft}
+          providers={providers}
+          busy={saveConnectionMutation.isPending}
+          onChange={setDraft}
+          onClose={() => setDraft(null)}
+          onSave={() => {
+            if (draft) saveConnectionMutation.mutate(draft);
+          }}
+        />
+      ) : null}
+
       <AlertDialog open={!!confirmAction} onOpenChange={(v) => { if (!v) setConfirmAction(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -240,12 +398,110 @@ export function IntegrationsTab() {
   );
 }
 
+function ConnectionDialog({
+  draft,
+  providers,
+  busy,
+  onChange,
+  onClose,
+  onSave,
+}: {
+  draft: ConnectionDraft | null;
+  providers: ChannelProvider[];
+  busy: boolean;
+  onChange: (draft: ConnectionDraft | null) => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const provider = providers.find((item) => item.provider === draft?.provider);
+  return (
+    <Dialog open={!!draft} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{draft?.id ? "Edit Channel Connection" : "Add Channel Connection"}</DialogTitle>
+          <DialogDescription>Configure a channel connection for this Multica instance.</DialogDescription>
+        </DialogHeader>
+        {draft ? (
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <Label>Provider</Label>
+              <NativeSelect
+                value={draft.provider}
+                disabled={!!draft.id}
+                onChange={(event) => {
+                  const nextProvider = providers.find((item) => item.provider === event.target.value);
+                  if (!nextProvider) return;
+                  onChange({
+                    provider: nextProvider.provider,
+                    display_name: nextProvider.display_name,
+                    enabled: draft.enabled,
+                    is_default: draft.is_default,
+                    config: {},
+                    secret_config: {},
+                  });
+                }}
+              >
+                {providers.map((item) => (
+                  <option key={item.provider} value={item.provider}>{item.display_name}</option>
+                ))}
+              </NativeSelect>
+            </div>
+            <div className="grid gap-2">
+              <Label>Display name</Label>
+              <Input
+                value={draft.display_name}
+                onChange={(event) => onChange({ ...draft, display_name: event.target.value })}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2">
+              <Label>Enabled</Label>
+              <Switch checked={draft.enabled} onCheckedChange={(enabled) => onChange({ ...draft, enabled })} />
+            </div>
+            {(provider?.config_schema ?? []).map((field) => (
+              <div className="grid gap-2" key={field.key}>
+                <Label>{field.label || field.key}{field.required ? " *" : ""}</Label>
+                <Input
+                  type={field.secret ? "password" : "text"}
+                  placeholder={field.secret && field.configured ? "Configured; leave blank to keep" : undefined}
+                  value={field.secret ? draft.secret_config[field.key] ?? "" : draft.config[field.key] ?? ""}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (field.secret) {
+                      onChange({ ...draft, secret_config: { ...draft.secret_config, [field.key]: value } });
+                    } else {
+                      onChange({ ...draft, config: { ...draft.config, [field.key]: value } });
+                    }
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button disabled={!draft || busy} onClick={onSave}>Save</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function ConnectionRow({
   connection,
   separated,
+  canManage,
+  onEdit,
+  onToggle,
+  onTest,
+  onDelete,
 }: {
   connection: ChannelConnection;
   separated: boolean;
+  canManage: boolean;
+  onEdit: () => void;
+  onToggle: (enabled: boolean) => void;
+  onTest: () => void;
+  onDelete: () => void;
 }) {
   const requiredFields = (connection.config_schema ?? [])
     .filter((field) => field.required)
@@ -265,9 +521,25 @@ function ConnectionRow({
           </div>
         ) : null}
       </div>
-      <Badge variant={connection.enabled ? "default" : "secondary"}>
-        {connection.enabled ? "Enabled" : "Disabled"}
-      </Badge>
+      <div className="flex items-center gap-2">
+        <Badge variant={connection.enabled ? "default" : "secondary"}>
+          {connection.status || (connection.enabled ? "Enabled" : "Disabled")}
+        </Badge>
+        {canManage ? (
+          <>
+            <Switch checked={connection.enabled} onCheckedChange={onToggle} />
+            <Button variant="ghost" size="icon-sm" title="Test connection" onClick={onTest}>
+              <FlaskConical className="h-4 w-4 text-muted-foreground" />
+            </Button>
+            <Button variant="ghost" size="icon-sm" title="Edit connection" onClick={onEdit}>
+              <Settings className="h-4 w-4 text-muted-foreground" />
+            </Button>
+            <Button variant="ghost" size="icon-sm" title="Delete connection" onClick={onDelete}>
+              <Trash2 className="h-4 w-4 text-muted-foreground" />
+            </Button>
+          </>
+        ) : null}
+      </div>
     </div>
   );
 }

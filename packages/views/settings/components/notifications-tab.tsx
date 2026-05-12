@@ -86,24 +86,19 @@ export function NotificationsTab() {
   const mutation = useUpdateNotificationPreferences();
 
   const preferences = data?.preferences ?? {};
-  const configuredProviders = Array.from(
-    new Map(
-      (connectionsData?.connections ?? [])
-        .filter((connection) => connection.enabled)
-        .map((connection) => [
-          connection.provider,
-          {
-            provider: connection.provider,
-            label: connection.display_name || providerLabel(connection.provider),
-          },
-        ]),
-    ).values(),
-  );
-  const preferenceProviders = Object.keys(preferences.channel ?? {}).map((provider) => ({
-    provider,
-    label: providerLabel(provider),
+  const configuredChannels = (connectionsData?.connections ?? [])
+    .filter((connection) => connection.enabled)
+    .map((connection) => ({
+      id: connection.id,
+      provider: connection.provider,
+      label: connection.display_name || providerLabel(connection.provider),
+    }));
+  const preferenceChannels = Object.keys(preferences.channel ?? {}).map((id) => ({
+    id,
+    provider: id,
+    label: providerLabel(id),
   }));
-  const channelProviders = configuredProviders.length > 0 ? configuredProviders : preferenceProviders;
+  const channelConnections = configuredChannels.length > 0 ? configuredChannels : preferenceChannels;
 
   const handleToggle = (key: NotificationGroupKey, enabled: boolean) => {
     const updated: NotificationPreferences = {
@@ -119,22 +114,22 @@ export function NotificationsTab() {
     });
   };
 
-  const handleChannelToggle = (provider: string, key: ChannelEventKey, enabled: boolean) => {
-    const currentProvider = preferences.channel?.[provider] ?? {};
-    const updatedProvider = { ...currentProvider, [key]: enabled };
+  const handleChannelToggle = (connectionId: string, key: ChannelEventKey, enabled: boolean) => {
+    const currentConnection = preferences.channel?.[connectionId] ?? {};
+    const updatedConnection = { ...currentConnection, [key]: enabled };
 
     // Remove keys set to true (default) to keep the object clean
     if (enabled) {
-      delete updatedProvider[key];
+      delete updatedConnection[key];
     }
 
     const updatedChannel: ChannelPreferences = {
       ...preferences.channel,
     };
-    if (Object.keys(updatedProvider).length > 0) {
-      updatedChannel[provider] = updatedProvider;
+    if (Object.keys(updatedConnection).length > 0) {
+      updatedChannel[connectionId] = updatedConnection;
     } else {
-      delete updatedChannel[provider];
+      delete updatedChannel[connectionId];
     }
 
     const updated: NotificationPreferences = { ...preferences };
@@ -189,7 +184,7 @@ export function NotificationsTab() {
         </Card>
       </section>
 
-      {channelProviders.length > 0 ? (
+      {channelConnections.length > 0 ? (
         <section className="space-y-4">
           <div>
             <h2 className="text-sm font-semibold">Channel Notifications</h2>
@@ -200,13 +195,13 @@ export function NotificationsTab() {
           </div>
 
           <div className="space-y-3">
-            {channelProviders.map((channelProvider) => (
-              <Card key={channelProvider.provider}>
+            {channelConnections.map((channelConnection) => (
+              <Card key={channelConnection.id}>
                 <CardContent className="divide-y">
                   <div className="pb-3">
-                    <p className="text-sm font-medium">{channelProvider.label}</p>
+                    <p className="text-sm font-medium">{channelConnection.label}</p>
                     <p className="text-xs text-muted-foreground">
-                      {providerLabel(channelProvider.provider)}
+                      {providerLabel(channelConnection.provider)}
                     </p>
                   </div>
                   {channelNotificationTypes.map((type) => {
@@ -215,7 +210,7 @@ export function NotificationsTab() {
                     // from the backend default contract.
                     const enabled = isChannelEventEnabled(
                       preferences,
-                      channelProvider.provider,
+                      channelConnection.id,
                       type.key,
                     );
                     return (
@@ -232,7 +227,7 @@ export function NotificationsTab() {
                         <Switch
                           checked={enabled}
                           onCheckedChange={(checked) =>
-                            handleChannelToggle(channelProvider.provider, type.key, checked)
+                            handleChannelToggle(channelConnection.id, type.key, checked)
                           }
                         />
                       </div>

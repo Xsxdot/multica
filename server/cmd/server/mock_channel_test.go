@@ -28,6 +28,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/channel/facade"
+	"github.com/multica-ai/multica/server/internal/channel/gateway"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	"github.com/multica-ai/multica/server/internal/channel/outbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
@@ -424,7 +425,7 @@ func newProductionDispatchStep(
 	return inbound.NewDispatchStep(inbound.DispatchConfig{
 		IssueFacade:      facade.NewIssueFacade(issueSvc),
 		CommentFacade:    facade.NewCommentFacade(noopCommentService{}),
-		Registry:         registry,
+		Gateway:          gateway.NewRegistryGateway(registry),
 		ChatBinding:      newDBChatBindingLookup(pool),
 		UserResolver:     newDBUserInfoResolver(pool),
 		ProjectValidator: inbound.NewDBProjectWorkspaceValidator(pool),

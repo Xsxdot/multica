@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Check, Loader2, LogIn, MessageCircle, RotateCcw } from "lucide-react";
+import { ArrowLeft, Check, Loader2, LogIn, MessageCircle, RotateCcw } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "@multica/core/api";
 import { useAuthStore } from "@multica/core/auth";
@@ -28,14 +28,30 @@ function BindPageContent() {
   const token = params.get("token") ?? "";
   const provider = params.get("provider") ?? "";
   const connectionId = params.get("connection_id") ?? "";
-  const providerName = providerLabel(provider);
   const kind = params.get("kind") ?? "user";
   const user = useAuthStore((s) => s.user);
   const isLoading = useAuthStore((s) => s.isLoading);
+  const { data: preview } = useQuery({
+    queryKey: ["channel-bind-token", token],
+    queryFn: () => api.getChannelBindTokenPreview(token),
+    enabled: !!user && !!token,
+  });
+  const effectiveProvider = preview?.provider ?? provider;
+  const effectiveConnectionId = preview?.connection_id ?? connectionId;
+  const connectionName = preview?.connection_display_name ?? providerLabel(effectiveProvider);
+  const effectiveKind = preview?.kind ?? kind;
   const { data: workspaces = [], isLoading: workspacesLoading } = useQuery({
     ...workspaceListOptions(),
-    enabled: !!user && kind === "chat",
+    enabled: !!user && effectiveKind === "chat",
   });
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
+  const selectedWorkspace = workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
+  const { data: projectsData, isLoading: projectsLoading } = useQuery({
+    queryKey: ["channel-bind-projects", selectedWorkspaceId],
+    queryFn: () => api.listProjects({ workspace_id: selectedWorkspaceId ?? undefined }),
+    enabled: !!user && effectiveKind === "chat" && !!selectedWorkspaceId,
+  });
+  const projects = projectsData?.projects ?? [];
   const [state, setState] = useState<BindState>("idle");
   const [message, setMessage] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
@@ -54,20 +70,20 @@ function BindPageContent() {
   }, [isLoading, loginHref, router, user]);
 
   useEffect(() => {
-    if (isLoading || !user || !token || kind !== "user") return;
+    if (isLoading || !user || !token || effectiveKind !== "user") return;
 
-    const bindingKey = `${user.id}:${provider}:${token}:${retryNonce}`;
+    const bindingKey = `${user.id}:${effectiveProvider}:${effectiveConnectionId}:${token}:${retryNonce}`;
     if (bindingKeyRef.current === bindingKey) return;
     bindingKeyRef.current = bindingKey;
 
     let cancelled = false;
     setState("binding");
     api
-      .createChannelUserBinding({ token, provider })
+      .createChannelUserBinding({ token, provider: effectiveProvider, connection_id: effectiveConnectionId })
       .then(() => {
         if (cancelled) return;
         setState("success");
-        setMessage(`${providerName} 账号已绑定到当前 Multica 账号。回到原会话后再发送一次消息即可继续。`);
+        setMessage(`${connectionName} 账号已绑定到当前 Multica 账号。回到原会话后再发送一次消息即可继续。`);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -82,7 +98,7 @@ function BindPageContent() {
     return () => {
       cancelled = true;
     };
-  }, [isLoading, kind, provider, providerName, retryNonce, token, user]);
+  }, [connectionName, effectiveConnectionId, effectiveKind, effectiveProvider, isLoading, retryNonce, token, user]);
 
   if (isLoading || !user) {
     return (
@@ -143,12 +159,78 @@ function BindPageContent() {
     );
   }
 
-  if (kind === "chat") {
+  if (effectiveKind === "chat") {
+    const bindChat = (workspace: { id: string; slug: string; name: string }, defaultProjectId: string | null) => {
+      const projectKey = defaultProjectId ?? "none";
+      const bindingKey = `${user.id}:${effectiveProvider}:${effectiveConnectionId}:${token}:${workspace.id}:${projectKey}:${retryNonce}`;
+      if (bindingKeyRef.current === bindingKey) return;
+      bindingKeyRef.current = bindingKey;
+      setState("binding");
+      api
+        .createChannelBinding(workspace.id, {
+          token,
+          provider: effectiveProvider,
+          connection_id: effectiveConnectionId,
+          default_project_id: defaultProjectId,
+        })
+        .then(() => {
+          setState("success");
+          setMessage(`${connectionName} 会话已绑定到 ${workspace.name}。回到原会话发送指令即可使用。`);
+          router.push(paths.workspace(workspace.slug).settings());
+        })
+        .catch((err: unknown) => {
+          setState("error");
+          setMessage(err instanceof Error ? err.message : "会话绑定失败，请回到原会话重新发起绑定。");
+        });
+    };
+
+    if (selectedWorkspace) {
+      return (
+        <BindShell
+          icon={projectsLoading ? <Loader2 className="size-5 animate-spin" /> : <MessageCircle className="size-5" />}
+          title="选择默认项目"
+          description={`为 ${selectedWorkspace.name} 选择这个 ${connectionName} 会话的默认项目。也可以不设置默认项目。`}
+          action={
+            <div className="space-y-2">
+              <Button
+                className="w-full justify-start"
+                variant="secondary"
+                disabled={state === "binding"}
+                onClick={() => bindChat(selectedWorkspace, null)}
+              >
+                无默认项目
+              </Button>
+              {projects.map((project) => (
+                <Button
+                  key={project.id}
+                  className="w-full justify-start"
+                  variant="secondary"
+                  disabled={state === "binding"}
+                  onClick={() => bindChat(selectedWorkspace, project.id)}
+                >
+                  {project.title}
+                </Button>
+              ))}
+              <Button
+                className="w-full justify-start"
+                variant="ghost"
+                disabled={state === "binding"}
+                onClick={() => setSelectedWorkspaceId(null)}
+              >
+                <ArrowLeft className="size-4" />
+                返回工作区
+              </Button>
+            </div>
+          }
+        />
+      );
+    }
+
     return (
       <BindShell
         icon={workspacesLoading ? <Loader2 className="size-5 animate-spin" /> : <MessageCircle className="size-5" />}
         title="绑定会话到工作区"
-        description={`选择这个 ${providerName} 会话要连接的 Multica 工作区。绑定后，会话里可以使用 Bot 指令。`}
+        description={`选择这个 ${connectionName} 会话要连接的 Multica 工作区。绑定后，会话里可以使用 Bot 指令。`}
         action={
           <div className="space-y-2">
             {workspaces.map((workspace) => (
@@ -157,23 +239,7 @@ function BindPageContent() {
                 className="w-full justify-start"
                 variant="secondary"
                 disabled={state === "binding"}
-                onClick={() => {
-                  const bindingKey = `${user.id}:${provider}:${token}:${workspace.id}:${retryNonce}`;
-                  if (bindingKeyRef.current === bindingKey) return;
-                  bindingKeyRef.current = bindingKey;
-                  setState("binding");
-                  api
-                    .createChannelBinding(workspace.id, { token, provider })
-                    .then(() => {
-                      setState("success");
-                      setMessage(`${providerName} 会话已绑定到 ${workspace.name}。回到原会话发送指令即可使用。`);
-                      router.push(paths.workspace(workspace.slug).settings());
-                    })
-                    .catch((err: unknown) => {
-                      setState("error");
-                      setMessage(err instanceof Error ? err.message : "会话绑定失败，请回到原会话重新发起绑定。");
-                    });
-                }}
+                onClick={() => setSelectedWorkspaceId(workspace.id)}
               >
                 {workspace.name}
               </Button>
@@ -192,8 +258,8 @@ function BindPageContent() {
   return (
     <BindShell
       icon={<Loader2 className="size-5 animate-spin" />}
-      title={`正在绑定 ${providerName} 账号`}
-      description={`完成后，这个 ${providerName} 身份发来的消息会映射到当前 Multica 账号。`}
+      title={`正在绑定 ${connectionName} 账号`}
+      description={`完成后，这个 ${connectionName} 身份发来的消息会映射到当前 Multica 账号。`}
     />
   );
 }

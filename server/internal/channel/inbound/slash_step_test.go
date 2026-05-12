@@ -93,7 +93,7 @@ func TestSlashStep_Help_SkipAndReply(t *testing.T) {
 	t.Parallel()
 	cfg, _, _, recCh := buildDispatchConfig()
 	step := inbound.NewSlashStep(inbound.SlashConfig{
-		Registry:    cfg.Registry,
+		Gateway:     cfg.Gateway,
 		SendReplies: true,
 	})
 	for _, text := range []string{"/", "/help", "/HELP"} {
@@ -285,7 +285,7 @@ func TestPipeline_SlashHelp_StopsBeforeIntent(t *testing.T) {
 		inbound.NewDedupStep(store),
 		inbound.NewIdentityBindStep(),
 		inbound.NewSlashStep(inbound.SlashConfig{
-			Registry:    cfg.Registry,
+			Gateway:     cfg.Gateway,
 			SendReplies: true,
 		}),
 		ruleIntentStep{},

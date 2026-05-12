@@ -518,4 +518,33 @@ func TestNotificationPreferences(t *testing.T) {
 			t.Fatalf("expected 200 for channel key, got %d: %s", w.Code, w.Body.String())
 		}
 	})
+
+	t.Run("AcceptUUIDChannelKey", func(t *testing.T) {
+		connectionID := "123e4567-e89b-12d3-a456-426614174000"
+		w := updatePrefs(t, map[string]any{
+			"channel": map[string]any{
+				connectionID: map[string]any{
+					"comments": false,
+				},
+			},
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 for UUID channel key, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("RejectInvalidChannelKeys", func(t *testing.T) {
+		for _, key := range []string{"", "bad key", "bad.key"} {
+			w := updatePrefs(t, map[string]any{
+				"channel": map[string]any{
+					key: map[string]any{
+						"issues": false,
+					},
+				},
+			})
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for channel key %q, got %d: %s", key, w.Code, w.Body.String())
+			}
+		}
+	})
 }

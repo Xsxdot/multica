@@ -83,6 +83,10 @@ import type {
   ChannelBinding,
   ChannelUserBindingResponse,
   ListChannelConnectionsResponse,
+  ListChannelProvidersResponse,
+  ChannelConnection,
+  ChannelConnectionWriteRequest,
+  ChannelBindTokenPreview,
   ListChannelBindingsResponse,
   CreateChannelBindingRequest,
   CreateChannelUserBindingRequest,
@@ -1056,10 +1060,14 @@ export class ApiClient {
   }
 
   // Projects
-  async listProjects(params?: { status?: string }): Promise<ListProjectsResponse> {
+  async listProjects(params?: { status?: string; workspace_id?: string }): Promise<ListProjectsResponse> {
     const search = new URLSearchParams();
     if (params?.status) search.set("status", params.status);
-    return this.fetch(`/api/projects?${search}`);
+    if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
+    const init = params?.workspace_id
+      ? { headers: { "X-Workspace-Slug": "" } }
+      : undefined;
+    return this.fetch(`/api/projects?${search}`, init);
   }
 
   async getProject(id: string): Promise<Project> {
@@ -1236,8 +1244,39 @@ export class ApiClient {
   }
 
   // Channel Bindings
+  async listChannelProviders(): Promise<ListChannelProvidersResponse> {
+    return this.fetch("/api/channel-providers");
+  }
+
   async listChannelConnections(): Promise<ListChannelConnectionsResponse> {
     return this.fetch("/api/channel-connections");
+  }
+
+  async createChannelConnection(data: ChannelConnectionWriteRequest): Promise<ChannelConnection> {
+    return this.fetch("/api/channel-connections", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateChannelConnection(id: string, data: ChannelConnectionWriteRequest): Promise<ChannelConnection> {
+    return this.fetch(`/api/channel-connections/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteChannelConnection(id: string): Promise<void> {
+    await this.fetch(`/api/channel-connections/${id}`, { method: "DELETE" });
+  }
+
+  async testChannelConnection(id: string): Promise<{ ok: boolean }> {
+    return this.fetch(`/api/channel-connections/${id}/test`, { method: "POST" });
+  }
+
+  async getChannelBindTokenPreview(token: string): Promise<ChannelBindTokenPreview> {
+    const params = new URLSearchParams({ token });
+    return this.fetch(`/api/channel-bind-token?${params.toString()}`);
   }
 
   async listChannelBindings(workspaceId: string): Promise<ListChannelBindingsResponse> {

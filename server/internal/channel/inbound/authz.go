@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 )
 
@@ -125,10 +124,10 @@ type AuthzStore interface {
 // AuthzConfig holds the dependencies for the authz Step. All fields
 // are required unless noted otherwise.
 type AuthzConfig struct {
-	Store    AuthzStore
-	Registry *channel.Registry
+	Store   AuthzStore
+	Gateway port.ChannelGateway
 	// SendReplies controls whether the authz step sends the rejection
-	// reply directly via the channel Registry. When false (e.g. in
+	// reply directly via the channel gateway. When false (e.g. in
 	// tests), the step only returns the error and the caller is
 	// responsible for delivering the reply.
 	SendReplies bool
@@ -231,28 +230,18 @@ func (s *authzStep) reject(ctx context.Context, evt port.InboundEvent, code Auth
 }
 
 // maybeSendReply delivers the reply text to the originating chat when
-// SendReplies is enabled and the channel registry is available. Errors
-// are logged at Warn level but not propagated — the authz rejection
-// takes precedence.
+// SendReplies is enabled and the channel gateway is available. Errors are
+// logged at Warn level but not propagated because the authz rejection takes
+// precedence.
 func (s *authzStep) maybeSendReply(ctx context.Context, evt port.InboundEvent, text string) {
-	if !s.cfg.SendReplies || s.cfg.Registry == nil {
-		return
-	}
-	ch, err := s.cfg.Registry.Get(evt.ConnectionID())
-	if err != nil {
-		slog.Warn("authz: channel not found for reply",
-			"event_id", evt.EventID,
-			"channel_name", evt.ChannelName,
-			"chat_id", evt.ChatID,
-			"error", err,
-		)
+	if !s.cfg.SendReplies || s.cfg.Gateway == nil {
 		return
 	}
 	target := port.TargetChat(evt.ChatID)
 	if evt.ChatType == port.ChatTypeDirect {
 		target = port.TargetUser(evt.SenderID)
 	}
-	if _, err := ch.Send(ctx, port.OutboundMessage{
+	if _, err := s.cfg.Gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
 		Target: target,
 		ChatID: evt.ChatID,
 		Text:   text,

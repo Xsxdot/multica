@@ -144,6 +144,7 @@ export interface ChannelConnection {
   is_default: boolean;
   status: string;
   last_error: string | null;
+  config: Record<string, string>;
   created_at: string;
   updated_at: string;
   config_schema: ChannelConfigField[];
@@ -154,10 +155,41 @@ export interface ChannelConfigField {
   label: string;
   required: boolean;
   secret: boolean;
+  configured?: boolean;
 }
 
 export interface ListChannelConnectionsResponse {
   connections: ChannelConnection[];
+  can_manage: boolean;
+}
+
+export interface ChannelProvider {
+  provider: string;
+  display_name: string;
+  config_schema: ChannelConfigField[];
+}
+
+export interface ListChannelProvidersResponse {
+  providers: ChannelProvider[];
+}
+
+export interface ChannelConnectionWriteRequest {
+  provider?: string;
+  display_name?: string;
+  enabled?: boolean;
+  is_default?: boolean;
+  config?: Record<string, string | null>;
+  secret_config?: Record<string, string | null>;
+}
+
+export interface ChannelBindTokenPreview {
+  kind: "user" | "chat";
+  provider: string;
+  connection_id: string;
+  connection_display_name: string;
+  external_chat_id: string | null;
+  external_chat_name: string | null;
+  expires_at: string;
 }
 
 export interface ListChannelBindingsResponse {
@@ -167,11 +199,14 @@ export interface ListChannelBindingsResponse {
 export interface CreateChannelBindingRequest {
   token: string;
   provider: string;
+  connection_id?: string;
+  default_project_id?: string | null;
 }
 
 export interface CreateChannelUserBindingRequest {
   token: string;
   provider: string;
+  connection_id?: string;
 }
 
 export interface ChannelUserBindingResponse {

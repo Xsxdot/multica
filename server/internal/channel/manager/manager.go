@@ -3,15 +3,19 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multica-ai/multica/server/internal/channel"
+	"github.com/multica-ai/multica/server/internal/channel/gateway"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/leader"
@@ -30,13 +34,14 @@ type RuntimeComponents struct {
 	ChatIntent    chintent.AsyncChatIntentClient
 }
 
-type RuntimeBuilder func(fileDownloader inbound.FileDownloader) RuntimeComponents
+type RuntimeBuilder func() RuntimeComponents
 
 type Config struct {
 	Pool           *pgxpool.Pool
 	Queries        *db.Queries
 	Bus            *events.Bus
 	Registry       *channel.Registry
+	Gateway        *gateway.RegistryGateway
 	Factories      []provider.Factory
 	RuntimeBuilder RuntimeBuilder
 
@@ -56,15 +61,23 @@ type Config struct {
 type Manager struct {
 	cfg Config
 
-	mu          sync.Mutex
-	started     bool
-	cancels     []context.CancelFunc
-	subscribers []*outbound.Subscriber
-	ready       map[string]*atomic.Bool
+	mu      sync.Mutex
+	started bool
+	cancels []context.CancelFunc
+	ready   map[string]*atomic.Bool
+	running map[string]*runningConnection
+	runtime *inbound.Runtime
 }
 
 func New(cfg Config) *Manager {
-	return &Manager{cfg: cfg, ready: make(map[string]*atomic.Bool)}
+	if cfg.Gateway == nil && cfg.Registry != nil {
+		cfg.Gateway = gateway.NewRegistryGateway(cfg.Registry)
+	}
+	return &Manager{
+		cfg:     cfg,
+		ready:   make(map[string]*atomic.Bool),
+		running: make(map[string]*runningConnection),
+	}
 }
 
 func (m *Manager) Start(ctx context.Context) {
@@ -75,19 +88,10 @@ func (m *Manager) Start(ctx context.Context) {
 	}
 	m.started = true
 
-	connections := m.connections(ctx)
-	if len(connections) == 0 {
-		slog.Info("channel manager: no enabled channel providers")
-		return
-	}
-
-	for _, entry := range connections {
-		ready := &atomic.Bool{}
-		m.ready[entry.config.ConnectionID] = ready
-		m.startOutbound(entry.config, ready)
-		m.startInbound(ctx, entry.factory, entry.config, ready)
-	}
+	m.startInboundRuntimeLocked(ctx)
 	m.startOutbox(ctx)
+	m.startReconcileLoopLocked(ctx)
+	go m.reconcile(ctx)
 }
 
 func (m *Manager) Stop() {
@@ -97,10 +101,14 @@ func (m *Manager) Stop() {
 		cancel()
 	}
 	m.cancels = nil
-	for _, sub := range m.subscribers {
-		sub.Stop()
+	for _, running := range m.running {
+		running.cancel()
+		if running.subscriber != nil {
+			running.subscriber.Stop()
+		}
 	}
-	m.subscribers = nil
+	m.running = make(map[string]*runningConnection)
+	m.runtime = nil
 	m.started = false
 }
 
@@ -116,19 +124,33 @@ type envConnection struct {
 	config  provider.ConnectionConfig
 }
 
+type runningConnection struct {
+	cancel     context.CancelFunc
+	ready      *atomic.Bool
+	subscriber *outbound.Subscriber
+	configHash string
+}
+
 func (m *Manager) connections(ctx context.Context) []envConnection {
 	if m.cfg.Queries != nil {
-		rows, err := m.cfg.Queries.ListEnabledChannelConnections(ctx)
+		rows, err := m.cfg.Queries.ListChannelConnections(ctx)
 		if err != nil {
-			slog.Error("channel manager: list configured connections failed; falling back to env", "error", err)
+			slog.Error("channel manager: list configured connections failed", "error", err)
+			return nil
 		} else if len(rows) > 0 {
-			return m.dbConnections(rows)
+			enabled := make([]db.ChannelConnection, 0, len(rows))
+			for _, row := range rows {
+				if row.Enabled {
+					enabled = append(enabled, row)
+				}
+			}
+			return m.dbConnections(ctx, enabled)
 		}
 	}
 	return m.envConnections()
 }
 
-func (m *Manager) dbConnections(rows []db.ChannelConnection) []envConnection {
+func (m *Manager) dbConnections(ctx context.Context, rows []db.ChannelConnection) []envConnection {
 	factories := make(map[string]provider.Factory, len(m.cfg.Factories))
 	for _, factory := range m.cfg.Factories {
 		factories[factory.Provider()] = factory
@@ -140,20 +162,30 @@ func (m *Manager) dbConnections(rows []db.ChannelConnection) []envConnection {
 			slog.Warn("channel manager: configured provider has no factory", "provider", row.Provider, "connection_id", row.ID)
 			continue
 		}
-		envCfg := factory.EnvConfig()
-		values := make(map[string]string, len(envCfg.Values))
-		for key, value := range envCfg.Values {
-			values[key] = value
-		}
-		if len(row.Config) > 0 {
-			configured := map[string]string{}
-			if err := json.Unmarshal(row.Config, &configured); err != nil {
-				slog.Error("channel manager: invalid connection config", "provider", row.Provider, "connection_id", row.ID, "error", err)
+		values := map[string]string{}
+		valid := true
+		for _, rawConfig := range [][]byte{row.Config, row.SecretConfig} {
+			if len(rawConfig) == 0 {
 				continue
+			}
+			configured := map[string]string{}
+			if err := json.Unmarshal(rawConfig, &configured); err != nil {
+				slog.Error("channel manager: invalid connection config", "provider", row.Provider, "connection_id", row.ID, "error", err)
+				m.updateConnectionStatus(ctx, row.ID, "error", fmt.Errorf("invalid connection config: %w", err))
+				valid = false
+				break
 			}
 			for key, value := range configured {
 				values[key] = value
 			}
+		}
+		if !valid {
+			continue
+		}
+		if err := validateRequiredConfig(factory.ConfigSchema(), values); err != nil {
+			slog.Error("channel manager: connection config missing required fields", "provider", row.Provider, "connection_id", row.ID, "error", err)
+			m.updateConnectionStatus(ctx, row.ID, "error", err)
+			continue
 		}
 		out = append(out, envConnection{
 			factory: factory,
@@ -167,6 +199,18 @@ func (m *Manager) dbConnections(rows []db.ChannelConnection) []envConnection {
 		})
 	}
 	return out
+}
+
+func validateRequiredConfig(fields []provider.ConfigField, values map[string]string) error {
+	for _, field := range fields {
+		if !field.Required {
+			continue
+		}
+		if strings.TrimSpace(values[field.Key]) == "" {
+			return fmt.Errorf("missing required config field: %s", field.Key)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) envConnections() []envConnection {
@@ -191,7 +235,104 @@ func (m *Manager) envConnections() []envConnection {
 	return out
 }
 
-func (m *Manager) startInbound(ctx context.Context, factory provider.Factory, cfg provider.ConnectionConfig, ready *atomic.Bool) {
+func (m *Manager) startInboundRuntimeLocked(ctx context.Context) {
+	if m.cfg.RuntimeBuilder == nil || m.runtime != nil {
+		return
+	}
+	components := m.cfg.RuntimeBuilder()
+	inboundRuntime := inbound.NewRuntime(inbound.RuntimeConfig{
+		Store:                inbound.NewDBInboundEventStore(m.cfg.Pool),
+		PrePipeline:          components.PrePipeline,
+		PostPipeline:         components.PostPipeline,
+		RuleResolvers:        components.RuleResolvers,
+		ChatIntent:           components.ChatIntent,
+		ReplySink:            inbound.NewGatewayReplySink(m.cfg.Gateway),
+		Workers:              m.cfg.Workers,
+		ClaimBatch:           m.cfg.ClaimBatch,
+		IntentTaskTimeout:    m.cfg.IntentTaskTimeout,
+		ActionTaskTimeout:    m.cfg.ActionTaskTimeout,
+		ClarificationTimeout: m.cfg.ClarificationTimeout,
+		ProcessingLease:      m.cfg.ProcessingLease,
+	})
+	runtimeCtx, cancel := context.WithCancel(ctx)
+	m.cancels = append(m.cancels, cancel)
+	m.runtime = inboundRuntime
+	go inboundRuntime.Run(runtimeCtx)
+	slog.Info("channel manager: inbound runtime started", "workers", m.cfg.Workers, "claim_batch", m.cfg.ClaimBatch)
+}
+
+func (m *Manager) startReconcileLoopLocked(ctx context.Context) {
+	reconcileCtx, cancel := context.WithCancel(ctx)
+	m.cancels = append(m.cancels, cancel)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-reconcileCtx.Done():
+				return
+			case <-ticker.C:
+				m.reconcile(reconcileCtx)
+			}
+		}
+	}()
+}
+
+func (m *Manager) reconcile(ctx context.Context) {
+	desiredEntries := m.connections(ctx)
+	desired := make(map[string]envConnection, len(desiredEntries))
+	hashes := make(map[string]string, len(desiredEntries))
+	for _, entry := range desiredEntries {
+		if entry.config.ConnectionID == "" {
+			continue
+		}
+		desired[entry.config.ConnectionID] = entry
+		hashes[entry.config.ConnectionID] = connectionConfigHash(entry.config)
+	}
+
+	m.mu.Lock()
+	if !m.started {
+		m.mu.Unlock()
+		return
+	}
+	for connectionID, running := range m.running {
+		if _, ok := desired[connectionID]; !ok || running.configHash != hashes[connectionID] {
+			slog.Info("channel manager: stopping channel connection", "connection_id", connectionID)
+			running.cancel()
+			if running.subscriber != nil {
+				running.subscriber.Stop()
+			}
+			delete(m.running, connectionID)
+			delete(m.ready, connectionID)
+		}
+	}
+	for connectionID, entry := range desired {
+		if _, ok := m.running[connectionID]; ok {
+			continue
+		}
+		ready := &atomic.Bool{}
+		connCtx, cancel := context.WithCancel(ctx)
+		sub := m.startOutbound(entry.config, ready)
+		m.ready[connectionID] = ready
+		m.running[connectionID] = &runningConnection{
+			cancel:     cancel,
+			ready:      ready,
+			subscriber: sub,
+			configHash: hashes[connectionID],
+		}
+		slog.Info("channel manager: starting channel connection",
+			"provider", entry.config.Provider,
+			"connection_id", connectionID,
+		)
+		m.startConnection(connCtx, entry.factory, entry.config, ready)
+	}
+	if len(desired) == 0 {
+		slog.Info("channel manager: no enabled channel providers")
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) startConnection(ctx context.Context, factory provider.Factory, cfg provider.ConnectionConfig, ready *atomic.Bool) {
 	lockID, needsLeader := factory.LeaderLockID(cfg)
 	if needsLeader {
 		elector := leader.NewElector(m.cfg.Pool, lockID, 5*time.Second)
@@ -214,17 +355,12 @@ func (m *Manager) startInbound(ctx context.Context, factory provider.Factory, cf
 			if adapterCancel != nil {
 				adapterCancel()
 			}
-			if ch, err := m.cfg.Registry.Get(cfg.ConnectionID); err == nil {
-				if discErr := ch.Disconnect(releaseCtx); discErr != nil {
-					slog.Error("channel manager: adapter disconnect failed", "provider", cfg.Provider, "error", discErr)
-				}
-				_ = m.cfg.Registry.Unregister(cfg.ConnectionID)
-			}
+			m.unregisterConnection(releaseCtx, cfg)
 			return nil
 		})
 		leaderCtx, cancel := context.WithCancel(ctx)
-		m.cancels = append(m.cancels, cancel)
 		go func() {
+			defer cancel()
 			if err := elector.Run(leaderCtx); err != nil {
 				slog.Error("channel manager: leader terminated", "provider", cfg.Provider, "error", err)
 			}
@@ -233,8 +369,11 @@ func (m *Manager) startInbound(ctx context.Context, factory provider.Factory, cf
 	}
 
 	adapterCtx, cancel := context.WithCancel(ctx)
-	m.cancels = append(m.cancels, cancel)
 	go m.runAdapterLoop(adapterCtx, factory, cfg, ready)
+	go func() {
+		<-ctx.Done()
+		cancel()
+	}()
 }
 
 func (m *Manager) runAdapterLoop(ctx context.Context, factory provider.Factory, cfg provider.ConnectionConfig, ready *atomic.Bool) {
@@ -252,12 +391,14 @@ func (m *Manager) runAdapterLoop(ctx context.Context, factory provider.Factory, 
 		bundle, err := factory.Build(ctx, cfg)
 		if err != nil {
 			slog.Error("channel manager: build adapter failed", "provider", cfg.Provider, "error", err)
+			m.updateConnectionStatus(ctx, cfg.ConnectionID, "error", err)
 			waitReconnect(ctx, delay)
 			continue
 		}
 		baseAdapter := bundle.Channel
 		if baseAdapter == nil {
 			slog.Error("channel manager: provider returned nil adapter", "provider", cfg.Provider)
+			m.updateConnectionStatus(ctx, cfg.ConnectionID, "error", errors.New("provider returned nil adapter"))
 			waitReconnect(ctx, delay)
 			continue
 		}
@@ -266,11 +407,19 @@ func (m *Manager) runAdapterLoop(ctx context.Context, factory provider.Factory, 
 		_ = m.cfg.Registry.Unregister(cfg.ConnectionID)
 		if err := m.cfg.Registry.Register(adapter); err != nil {
 			slog.Error("channel manager: register adapter failed", "provider", cfg.Provider, "error", err)
+			m.updateConnectionStatus(ctx, cfg.ConnectionID, "error", err)
 			waitReconnect(ctx, delay)
 			continue
 		}
+		if m.cfg.Gateway != nil {
+			m.cfg.Gateway.RegisterConnection(cfg.ConnectionID, bundle.FileDownloader)
+		}
 		if err := adapter.Connect(ctx); err != nil {
 			slog.Error("channel manager: connect adapter failed; will retry", "provider", cfg.Provider, "error", err)
+			m.updateConnectionStatus(ctx, cfg.ConnectionID, "error", err)
+			if m.cfg.Gateway != nil {
+				m.cfg.Gateway.UnregisterConnection(cfg.ConnectionID)
+			}
 			_ = m.cfg.Registry.Unregister(cfg.ConnectionID)
 			waitReconnect(ctx, delay)
 			continue
@@ -278,16 +427,21 @@ func (m *Manager) runAdapterLoop(ctx context.Context, factory provider.Factory, 
 
 		ready.Store(true)
 		channelmetrics.M.SetAdapterConnected(cfg.Provider, true)
+		m.updateConnectionStatus(ctx, cfg.ConnectionID, "connected", nil)
 		slog.Info("channel manager: adapter connected", "provider", cfg.Provider, "connection_id", cfg.ConnectionID)
 
-		reconnect := m.runInboundRuntime(ctx, cfg, bundle.FileDownloader, adapter)
+		reconnect := m.drainAdapterEvents(ctx, cfg, adapter)
 		ready.Store(false)
 		channelmetrics.M.SetAdapterConnected(cfg.Provider, false)
+		m.updateConnectionStatus(ctx, cfg.ConnectionID, "configured", nil)
 		disconnectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := adapter.Disconnect(disconnectCtx); err != nil {
 			slog.Warn("channel manager: adapter disconnect before reconnect failed", "provider", cfg.Provider, "error", err)
 		}
 		cancel()
+		if m.cfg.Gateway != nil {
+			m.cfg.Gateway.UnregisterConnection(cfg.ConnectionID)
+		}
 		_ = m.cfg.Registry.Unregister(cfg.ConnectionID)
 		if !reconnect {
 			return
@@ -296,30 +450,7 @@ func (m *Manager) runAdapterLoop(ctx context.Context, factory provider.Factory, 
 	}
 }
 
-func (m *Manager) runInboundRuntime(ctx context.Context, cfg provider.ConnectionConfig, fileDownloader inbound.FileDownloader, adapter port.Channel) bool {
-	if m.cfg.RuntimeBuilder == nil {
-		slog.Error("channel manager: runtime builder is not configured", "provider", cfg.Provider)
-		return false
-	}
-	components := m.cfg.RuntimeBuilder(fileDownloader)
-	inboundRuntime := inbound.NewRuntime(inbound.RuntimeConfig{
-		Store:                inbound.NewDBInboundEventStore(m.cfg.Pool),
-		PrePipeline:          components.PrePipeline,
-		PostPipeline:         components.PostPipeline,
-		RuleResolvers:        components.RuleResolvers,
-		ChatIntent:           components.ChatIntent,
-		ReplySink:            inbound.NewRegistryReplySink(m.cfg.Registry),
-		Workers:              m.cfg.Workers,
-		ClaimBatch:           m.cfg.ClaimBatch,
-		IntentTaskTimeout:    m.cfg.IntentTaskTimeout,
-		ActionTaskTimeout:    m.cfg.ActionTaskTimeout,
-		ClarificationTimeout: m.cfg.ClarificationTimeout,
-		ProcessingLease:      m.cfg.ProcessingLease,
-	})
-	runtimeCtx, runtimeCancel := context.WithCancel(ctx)
-	go inboundRuntime.Run(runtimeCtx)
-	defer runtimeCancel()
-
+func (m *Manager) drainAdapterEvents(ctx context.Context, cfg provider.ConnectionConfig, adapter port.Channel) bool {
 	for {
 		select {
 		case <-ctx.Done():
@@ -331,6 +462,13 @@ func (m *Manager) runInboundRuntime(ctx context.Context, cfg provider.Connection
 			}
 			if evt.ChannelConnectionID == "" {
 				evt.ChannelConnectionID = cfg.ConnectionID
+			}
+			m.mu.Lock()
+			inboundRuntime := m.runtime
+			m.mu.Unlock()
+			if inboundRuntime == nil {
+				slog.Error("channel manager: inbound runtime is not running", "provider", cfg.Provider, "connection_id", cfg.ConnectionID)
+				continue
 			}
 			result, err := inboundRuntime.Accept(ctx, evt, inbound.AcceptOptions{
 				ConversationLimit: m.cfg.ConversationLimit,
@@ -358,9 +496,57 @@ func (m *Manager) runInboundRuntime(ctx context.Context, cfg provider.Connection
 	}
 }
 
-func (m *Manager) startOutbound(cfg provider.ConnectionConfig, ready *atomic.Bool) {
-	if m.cfg.Bus == nil || m.cfg.Queries == nil || m.cfg.Pool == nil || m.cfg.Registry == nil {
+func (m *Manager) unregisterConnection(ctx context.Context, cfg provider.ConnectionConfig) {
+	if m.cfg.Gateway != nil {
+		m.cfg.Gateway.UnregisterConnection(cfg.ConnectionID)
+	}
+	if ch, err := m.cfg.Registry.Get(cfg.ConnectionID); err == nil {
+		if discErr := ch.Disconnect(ctx); discErr != nil {
+			slog.Error("channel manager: adapter disconnect failed", "provider", cfg.Provider, "connection_id", cfg.ConnectionID, "error", discErr)
+		}
+		_ = m.cfg.Registry.Unregister(cfg.ConnectionID)
+	}
+}
+
+func connectionConfigHash(cfg provider.ConnectionConfig) string {
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Sprintf("%s:%s:%s", cfg.Provider, cfg.ConnectionID, cfg.DisplayName)
+	}
+	return string(raw)
+}
+
+func (m *Manager) updateConnectionStatus(ctx context.Context, connectionID, status string, runErr error) {
+	if m.cfg.Queries == nil || connectionID == "" {
 		return
+	}
+	lastError := pgtype.Text{}
+	if runErr != nil {
+		lastError = pgtype.Text{String: truncateStatusError(runErr), Valid: true}
+	}
+	if err := m.cfg.Queries.UpdateChannelConnectionStatus(ctx, db.UpdateChannelConnectionStatusParams{
+		ID:        connectionID,
+		Status:    status,
+		LastError: lastError,
+	}); err != nil {
+		slog.Warn("channel manager: update connection status failed", "connection_id", connectionID, "status", status, "error", err)
+	}
+}
+
+func truncateStatusError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if len(msg) > 2000 {
+		msg = msg[:2000]
+	}
+	return msg
+}
+
+func (m *Manager) startOutbound(cfg provider.ConnectionConfig, ready *atomic.Bool) *outbound.Subscriber {
+	if m.cfg.Bus == nil || m.cfg.Queries == nil || m.cfg.Pool == nil || m.cfg.Registry == nil {
+		return nil
 	}
 	notificationStore := outbound.NewDBNotificationStore(m.cfg.Pool)
 	sub := outbound.NewSubscriber(
@@ -376,8 +562,8 @@ func (m *Manager) startOutbound(cfg provider.ConnectionConfig, ready *atomic.Boo
 	}
 	sub.SetActiveFunc(ready.Load)
 	sub.Start()
-	m.subscribers = append(m.subscribers, sub)
 	slog.Info("channel manager: outbound subscriber started", "provider", cfg.Provider, "connection_id", cfg.ConnectionID)
+	return sub
 }
 
 func (m *Manager) startOutbox(ctx context.Context) {

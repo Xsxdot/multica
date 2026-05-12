@@ -11,6 +11,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/channel"
 	"github.com/multica-ai/multica/server/internal/channel/facade"
+	"github.com/multica-ai/multica/server/internal/channel/gateway"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 )
@@ -225,7 +226,7 @@ func buildDispatchConfig() (inbound.DispatchConfig, *fakeIssueService, *fakeComm
 	cfg := inbound.DispatchConfig{
 		IssueFacade:   facade.NewIssueFacade(issueSvc),
 		CommentFacade: facade.NewCommentFacade(commentSvc),
-		Registry:      reg,
+		Gateway:       gateway.NewRegistryGateway(reg),
 		ChatBinding:   &fakeChatBinding{wsID: uuid(0x01)},
 		UserResolver:  &fakeUserResolver{user: inbound.ResolvedUser{MulticaUserID: uuid(0x02), DisplayName: "测试用户"}},
 	}
@@ -1143,7 +1144,7 @@ func TestDispatchStep_ChannelNotInRegistry_DoesNotAbort(t *testing.T) {
 	cfg := inbound.DispatchConfig{
 		IssueFacade:   facade.NewIssueFacade(&fakeIssueService{}),
 		CommentFacade: facade.NewCommentFacade(&fakeCommentService{}),
-		Registry:      channel.NewRegistry(),
+		Gateway:       gateway.NewRegistryGateway(channel.NewRegistry()),
 		ChatBinding:   &fakeChatBinding{wsID: uuid(0x01)},
 		UserResolver:  &fakeUserResolver{user: inbound.ResolvedUser{MulticaUserID: uuid(0x02)}},
 	}
