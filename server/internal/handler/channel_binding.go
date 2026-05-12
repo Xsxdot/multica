@@ -257,14 +257,14 @@ func (h *Handler) mergeAndPersistExistingChatBindingSettings(
 		return db.ChannelChatBinding{}, false
 	}
 	defProj := existing.DefaultProjectID
-	if req.DefaultProjectID != nil {
-		if strings.TrimSpace(*req.DefaultProjectID) == "" {
+	if req.DefaultProjectID.Set {
+		if strings.TrimSpace(req.DefaultProjectID.Value) == "" {
 			defProj = pgtype.UUID{Valid: false}
 		} else {
 			defProj = defaultProjectID
 		}
 	}
-	agentOut, ok := h.resolveBindingAgentID(w, r, member.WorkspaceID, req.AgentID, existing.AgentID, true)
+	agentOut, ok := h.resolveBindingAgentID(w, r, member.WorkspaceID, req.AgentID.Ptr(), existing.AgentID, true)
 	if !ok {
 		return db.ChannelChatBinding{}, false
 	}
@@ -393,13 +393,13 @@ func (h *Handler) requireChannelConnectionOwner(w http.ResponseWriter, r *http.R
 }
 
 type CreateChannelBindingRequest struct {
-	Token            string  `json:"token"`
-	Provider         string  `json:"provider"`
-	ConnectionID     string  `json:"connection_id"`
-	DefaultProjectID *string `json:"default_project_id"`
-	ListenMode       string  `json:"listen_mode"`
-	// AgentID optional: omit or null = no dedicated agent; empty string clears a previously set agent.
-	AgentID *string `json:"agent_id"`
+	Token            string             `json:"token"`
+	Provider         string             `json:"provider"`
+	ConnectionID     string             `json:"connection_id"`
+	DefaultProjectID jsonOptionalString `json:"default_project_id"`
+	ListenMode       string             `json:"listen_mode"`
+	// AgentID optional: omit = keep existing on rebind; null/empty string clears.
+	AgentID jsonOptionalString `json:"agent_id"`
 }
 
 type CreateChannelUserBindingRequest struct {
@@ -409,13 +409,40 @@ type CreateChannelUserBindingRequest struct {
 }
 
 // PatchChannelBindingRequest partially updates a channel chat binding.
-// Pointer fields that are nil are left unchanged (except is_primary, which
-// uses presence: omit or null means do not change primary state).
+// Fields without presence are left unchanged; explicit null/empty string clears
+// nullable string settings.
 type PatchChannelBindingRequest struct {
-	IsPrimary        *bool   `json:"is_primary"`
-	DefaultProjectID *string `json:"default_project_id"`
-	ListenMode       *string `json:"listen_mode"`
-	AgentID          *string `json:"agent_id"`
+	IsPrimary        *bool              `json:"is_primary"`
+	DefaultProjectID jsonOptionalString `json:"default_project_id"`
+	ListenMode       *string            `json:"listen_mode"`
+	AgentID          jsonOptionalString `json:"agent_id"`
+}
+
+type jsonOptionalString struct {
+	Set   bool
+	Value string
+}
+
+func (f *jsonOptionalString) UnmarshalJSON(data []byte) error {
+	f.Set = true
+	if strings.TrimSpace(string(data)) == "null" {
+		f.Value = ""
+		return nil
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	f.Value = value
+	return nil
+}
+
+func (f jsonOptionalString) Ptr() *string {
+	if !f.Set {
+		return nil
+	}
+	value := f.Value
+	return &value
 }
 
 // ---------------------------------------------------------------------------
@@ -798,11 +825,11 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var defaultProjectID pgtype.UUID
-	if req.DefaultProjectID != nil {
-		if strings.TrimSpace(*req.DefaultProjectID) == "" {
+	if req.DefaultProjectID.Set {
+		if strings.TrimSpace(req.DefaultProjectID.Value) == "" {
 			defaultProjectID = pgtype.UUID{Valid: false}
 		} else {
-			projectID, ok := parseUUIDOrBadRequest(w, strings.TrimSpace(*req.DefaultProjectID), "default_project_id")
+			projectID, ok := parseUUIDOrBadRequest(w, strings.TrimSpace(req.DefaultProjectID.Value), "default_project_id")
 			if !ok {
 				return
 			}
@@ -954,7 +981,7 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	}
 	isPrimary := providerCount == 0
 
-	agentForCreate, ok := h.resolveBindingAgentID(w, r, member.WorkspaceID, req.AgentID, pgtype.UUID{}, false)
+	agentForCreate, ok := h.resolveBindingAgentID(w, r, member.WorkspaceID, req.AgentID.Ptr(), pgtype.UUID{}, false)
 	if !ok {
 		return
 	}
@@ -1161,7 +1188,7 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if req.IsPrimary == nil && req.DefaultProjectID == nil && req.ListenMode == nil && req.AgentID == nil {
+	if req.IsPrimary == nil && !req.DefaultProjectID.Set && req.ListenMode == nil && !req.AgentID.Set {
 		writeError(w, http.StatusBadRequest, "no updates provided")
 		return
 	}
@@ -1221,13 +1248,13 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	if req.DefaultProjectID != nil || req.ListenMode != nil || req.AgentID != nil {
+	if req.DefaultProjectID.Set || req.ListenMode != nil || req.AgentID.Set {
 		defProj := binding.DefaultProjectID
-		if req.DefaultProjectID != nil {
-			if strings.TrimSpace(*req.DefaultProjectID) == "" {
+		if req.DefaultProjectID.Set {
+			if strings.TrimSpace(req.DefaultProjectID.Value) == "" {
 				defProj = pgtype.UUID{Valid: false}
 			} else {
-				pid, ok := parseUUIDOrBadRequest(w, strings.TrimSpace(*req.DefaultProjectID), "default_project_id")
+				pid, ok := parseUUIDOrBadRequest(w, strings.TrimSpace(req.DefaultProjectID.Value), "default_project_id")
 				if !ok {
 					return
 				}
@@ -1257,7 +1284,7 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 			}
 			listenM = lm
 		}
-		agentOut, ok := h.resolveBindingAgentID(w, r, binding.WorkspaceID, req.AgentID, binding.AgentID, req.AgentID == nil)
+		agentOut, ok := h.resolveBindingAgentID(w, r, binding.WorkspaceID, req.AgentID.Ptr(), binding.AgentID, !req.AgentID.Set)
 		if !ok {
 			return
 		}

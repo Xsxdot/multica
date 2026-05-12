@@ -11,7 +11,7 @@
 1. **启动与健康检查**：`Makefile`、`scripts/dev.sh`、`docker-compose.yml` 路径与本仓库一致；下文命令均以当前 tree 为准。
 2. **飞书凭证**：后端从环境变量读取 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 等（见 `server/cmd/server/main.go`）。未配置时仍会启动 HTTP 服务，但 channel leader 会跳过 Feishu 适配器接线。
 3. **事件接收方式**：Feishu 适配器使用官方 SDK 的 **长连接（WebSocket）** 接收 `im.message.receive_v1`（见 `server/internal/channel/adapter/feishu/real_client.go`）。**不要求**飞书向你的本地 HTTP 回调 URL 推送事件，因此多数场景下 **不需要** ngrok 穿透也能收消息。
-4. **端到端手工验收**：当前主路径为 `normalize → dedup → identity-bind → chat-bind-command → slash_expand → rule intent → authz → dispatch → reply`。v1 只使用现有 rule matcher；LLM classifier 代码保留但不接入生产链路。
+4. **端到端手工验收**：当前主路径为 `accept/dedup → normalize → identity-bind → chat-bind-command → chat-settings-filter → slash_expand → rule/agent intent → authz → dispatch → reply`。`listen_mode=mentions` 时普通群聊消息会被过滤，`/bind`、slash 指令和 @ 机器人消息仍会继续处理。
 5. **主动推送范围**：评论提及、指派、inbox、状态相关通知会发给目标用户的飞书 **个人私聊**（`open_id`），不发 workspace primary 群。
 
 ---
@@ -233,8 +233,8 @@ cloudflared tunnel --url http://localhost:8080
 
 路径：**Settings → Integrations**（组件：`packages/views/settings/components/integrations-tab.tsx`）。
 
-- 绑定成功后，此页列出 **Channel Bindings**（可将某一绑定设为 **Primary**、解绑等）。
-- 只有 **Primary** 绑定会处理群内指令；非 primary 绑定不进入 inbound command dispatch。
+- 绑定成功后，此页列出 **Channel Bindings**（可将某一绑定设为 **Primary**、解绑、更新默认项目、监听范围和固定 Agent）。
+- 群内指令按当前群的 binding 解析；primary 与非 primary binding 都可以进入 inbound command dispatch。是否处理普通群聊消息由该 binding 的 **Listen scope** 控制：`mentions` 仅处理 @ 机器人，`all` 处理所有群消息。
 
 ### 5.3 HTTP API（开发者或自动化）
 
@@ -256,8 +256,8 @@ cloudflared tunnel --url http://localhost:8080
 
 ### 5.4 验收「群已绑定」
 
-- Integrations 列表中出现对应 Feishu 群绑定；且 **Primary** 绑定指向期望工作区。
-- 若群发消息收到 **`[WS_NOT_BOUND] 当前群尚未绑定工作区，请先完成绑定。`**（见 `server/internal/channel/inbound/authz.go`），说明 **chat 级绑定** 仍未建立或命中 **非 primary** 绑定。
+- Integrations 列表中出现对应 Feishu 群绑定；默认项目、监听范围和固定 Agent 符合预期。**Primary** 只表示该 workspace + connection 的首选绑定，不再限制入站指令处理。
+- 若群发消息收到 **`[WS_NOT_BOUND] 当前群尚未绑定工作区，请先完成绑定。`**（见 `server/internal/channel/inbound/authz.go`），说明当前群的 **chat 级绑定** 未建立、已删除，或消息来自另一个 channel connection。
 
 ---
 
@@ -302,7 +302,7 @@ cloudflared tunnel --url http://localhost:8080
 
 | 现象 | 处理 |
 |------|------|
-| `WS_NOT_BOUND` | 建立 **群 ↔ workspace** 绑定；确认 **primary** 绑定 |
+| `WS_NOT_BOUND` | 建立 **群 ↔ workspace** 绑定；确认消息来自已绑定的 channel connection |
 | 身份无法解析 / authz 失败 | 完成 **用户绑定**（identity token 链接）；确认发送者在 Multica workspace 中为成员 |
 | 私聊里发送普通指令 | v1 私聊只支持绑定与接收通知；普通指令会返回 `PRIVATE_UNSUPPORTED` |
 | 静默无回显 | 查看后端日志 inbound pipeline；确认进程内已接线 registry + pipeline（参见本文开头「必读」） |

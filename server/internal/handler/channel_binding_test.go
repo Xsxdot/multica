@@ -391,10 +391,10 @@ func TestCreateChannelBinding_ExistingChatForbiddenWhenNotBindingManager(t *test
 
 	w := httptest.NewRecorder()
 	req := channelBindingRequestAsUser(memberID, "POST", "/api/workspaces/"+testWorkspaceID+"/channel-bindings", map[string]any{
-		"token":           plaintext,
-		"provider":        "feishu",
-		"connection_id":   connID,
-		"listen_mode":     "all",
+		"token":         plaintext,
+		"provider":      "feishu",
+		"connection_id": connID,
+		"listen_mode":   "all",
 	})
 	req = withURLParam(req, "id", testWorkspaceID)
 	testHandler.CreateChannelBinding(w, req)
@@ -461,10 +461,10 @@ func TestCreateChannelBinding_ExistingChatUpdatesWhenBindingManager(t *testing.T
 
 	w := httptest.NewRecorder()
 	req := newRequest("POST", "/api/workspaces/"+testWorkspaceID+"/channel-bindings", map[string]any{
-		"token":           plaintext,
-		"provider":        "feishu",
-		"connection_id":   connID,
-		"listen_mode":     "all",
+		"token":         plaintext,
+		"provider":      "feishu",
+		"connection_id": connID,
+		"listen_mode":   "all",
 	})
 	req = withURLParam(req, "id", testWorkspaceID)
 	testHandler.CreateChannelBinding(w, req)
@@ -692,6 +692,52 @@ func TestSetPrimaryChannelBinding_OtherUserForbidden(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSetPrimaryChannelBinding_UpdateSettingsClearsDefaultProjectWithNull(t *testing.T) {
+	var projectID string
+	if err := testPool.QueryRow(t.Context(), `
+		INSERT INTO project (workspace_id, title)
+		VALUES ($1::uuid, $2)
+		RETURNING id
+	`, testWorkspaceID, "Channel Default Project").Scan(&projectID); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(t.Context(), `DELETE FROM project WHERE id = $1`, projectID)
+	})
+
+	bindingID := createTestBinding(t, testWorkspaceID, "feishu", "oc_test_clear_project", "group", true, testUserID)
+	if _, err := testPool.Exec(t.Context(), `
+		UPDATE channel_chat_binding
+		SET default_project_id = $1::uuid, listen_mode = 'all'
+		WHERE id = $2::uuid
+	`, projectID, bindingID); err != nil {
+		t.Fatalf("failed to seed binding default project: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest("PATCH", "/api/workspaces/"+testWorkspaceID+"/channel-bindings/"+bindingID, map[string]any{
+		"default_project_id": nil,
+	})
+	req = withURLParam(req, "id", testWorkspaceID)
+	req = withURLParam(req, "bindingId", bindingID)
+	testHandler.SetPrimaryChannelBinding(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	row, err := testHandler.Queries.GetChannelChatBinding(t.Context(), parseUUID(bindingID))
+	if err != nil {
+		t.Fatalf("failed to get binding: %v", err)
+	}
+	if row.DefaultProjectID.Valid {
+		t.Fatal("default_project_id should be cleared when request sends null")
+	}
+	if row.ListenMode != "all" {
+		t.Fatalf("listen_mode = %q, want preserved all", row.ListenMode)
 	}
 }
 
