@@ -63,10 +63,21 @@ func TestValidatePreferences(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "valid channel slack",
+			prefs: map[string]any{
+				"channel": map[string]any{
+					"slack": map[string]any{
+						"issues": true,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "invalid channel name",
 			prefs: map[string]any{
 				"channel": map[string]any{
-					"slack": map[string]any{},
+					"Slack!": map[string]any{},
 				},
 			},
 			wantErr: true,

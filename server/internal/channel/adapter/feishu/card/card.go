@@ -12,9 +12,9 @@
 //	}
 //
 // This package builds that JSON and returns it as a string ready to be
-// passed as SendRequest.Content. Callers should hand the rendered string
-// to the adapter via port.OutboundCardMessage.Body — the adapter does NOT
-// re-wrap plain text, so the card schema lives entirely in this package.
+// passed as SendRequest.Content. Only the Feishu adapter should call this
+// package; upstream channel runtime code passes platform-neutral title/body
+// messages and never pre-renders provider JSON.
 //
 // Responsibilities:
 //   - Define the (subset of the) Feishu interactive-card schema we use.

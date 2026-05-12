@@ -38,8 +38,8 @@ export type {
 } from "./agent";
 export type { Workspace, WorkspaceRepo, Member, MemberRole, User, MemberWithUser, Invitation } from "./workspace";
 export type { InboxItem, InboxSeverity, InboxItemType } from "./inbox";
-export type { NotificationGroupKey, NotificationGroupValue, NotificationPreferences, NotificationPreferenceResponse, FeishuChannelPreferences, ChannelPreferences, FeishuEventKey } from "./notification-preference";
-export { isFeishuEventEnabled } from "./notification-preference";
+export type { NotificationGroupKey, NotificationGroupValue, NotificationPreferences, NotificationPreferenceResponse, ChannelNotificationPreferences, ChannelPreferences, ChannelEventKey, FeishuChannelPreferences, FeishuEventKey } from "./notification-preference";
+export { isChannelEventEnabled, isFeishuEventEnabled } from "./notification-preference";
 export type { Comment, CommentType, CommentAuthorType, Reaction } from "./comment";
 export type { Label, CreateLabelRequest, UpdateLabelRequest, ListLabelsResponse, IssueLabelsResponse } from "./label";
 export type { TimelineEntry, AssigneeFrequencyEntry } from "./activity";

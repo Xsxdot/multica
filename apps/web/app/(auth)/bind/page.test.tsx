@@ -70,7 +70,7 @@ describe("BindPage", () => {
   it("shows success after the binding request resolves", async () => {
     render(<BindPage />);
 
-    expect(screen.getByText("正在绑定飞书账号")).toBeInTheDocument();
+    expect(screen.getByText("正在绑定 Feishu 账号")).toBeInTheDocument();
 
     await waitFor(() => {
       expect(screen.getByText("绑定完成")).toBeInTheDocument();

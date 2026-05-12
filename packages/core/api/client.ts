@@ -82,6 +82,7 @@ import type {
   NotificationPreferences,
   ChannelBinding,
   ChannelUserBindingResponse,
+  ListChannelConnectionsResponse,
   ListChannelBindingsResponse,
   CreateChannelBindingRequest,
   CreateChannelUserBindingRequest,
@@ -1235,6 +1236,10 @@ export class ApiClient {
   }
 
   // Channel Bindings
+  async listChannelConnections(): Promise<ListChannelConnectionsResponse> {
+    return this.fetch("/api/channel-connections");
+  }
+
   async listChannelBindings(workspaceId: string): Promise<ListChannelBindingsResponse> {
     return this.fetch(`/api/workspaces/${workspaceId}/channel-bindings`);
   }

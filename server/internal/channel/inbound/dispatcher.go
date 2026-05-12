@@ -175,12 +175,12 @@ func (d *dispatchStep) handleCreateIssue(ctx context.Context, evt port.InboundEv
 		return fmt.Sprintf("[%s] 缺少 Issue 标题，请提供要创建的内容。", replyMissingParam), nil
 	}
 
-	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
+	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil {
 		return "", fmt.Errorf("lookup workspace: %w", err)
 	}
 
-	user, err := d.cfg.UserResolver.Resolve(ctx, evt.ChannelName, evt.SenderID)
+	user, err := d.cfg.UserResolver.Resolve(ctx, evt.ConnectionID(), evt.SenderID)
 	if err != nil {
 		return "", fmt.Errorf("resolve user: %w", err)
 	}
@@ -229,7 +229,7 @@ func (d *dispatchStep) handleAddComment(ctx context.Context, evt port.InboundEve
 		return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), nil
 	}
 
-	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
+	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil {
 		return "", fmt.Errorf("lookup workspace: %w", err)
 	}
@@ -239,7 +239,7 @@ func (d *dispatchStep) handleAddComment(ctx context.Context, evt port.InboundEve
 		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil
 	}
 
-	user, err := d.cfg.UserResolver.Resolve(ctx, evt.ChannelName, evt.SenderID)
+	user, err := d.cfg.UserResolver.Resolve(ctx, evt.ConnectionID(), evt.SenderID)
 	if err != nil {
 		return "", fmt.Errorf("resolve user: %w", err)
 	}
@@ -259,13 +259,13 @@ func (d *dispatchStep) handleAddComment(ctx context.Context, evt port.InboundEve
 func (d *dispatchStep) handleQueryIssue(ctx context.Context, evt port.InboundEvent) (string, error) {
 	issueKey, hasKey := evt.Intent.Params["issue_key"]
 
-	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
+	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil {
 		return "", fmt.Errorf("lookup workspace: %w", err)
 	}
 
 	if !hasKey || issueKey == "" {
-		user, err := d.cfg.UserResolver.Resolve(ctx, evt.ChannelName, evt.SenderID)
+		user, err := d.cfg.UserResolver.Resolve(ctx, evt.ConnectionID(), evt.SenderID)
 		if err != nil {
 			return "", fmt.Errorf("resolve user: %w", err)
 		}
@@ -300,7 +300,7 @@ func (d *dispatchStep) handleQueryIssue(ctx context.Context, evt port.InboundEve
 	msg := fmt.Sprintf("📋 %s [%s] %s",
 		issue.Identifier, issue.Status, issue.Title)
 
-	if user, err := d.cfg.UserResolver.Resolve(ctx, evt.ChannelName, evt.SenderID); err == nil && user.DisplayName != "" {
+	if user, err := d.cfg.UserResolver.Resolve(ctx, evt.ConnectionID(), evt.SenderID); err == nil && user.DisplayName != "" {
 		msg += fmt.Sprintf("\n查询者: %s", user.DisplayName)
 	}
 
@@ -389,7 +389,7 @@ func (d *dispatchStep) resolveIssueAndUser(ctx context.Context, evt port.Inbound
 	if !ValidIdentifierFormat(issueKey) {
 		return facade.Issue{}, ResolvedUser{}, fmt.Errorf("[%s] Issue 编号格式不正确。", replyIssueNotFound)
 	}
-	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
+	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil {
 		return facade.Issue{}, ResolvedUser{}, fmt.Errorf("lookup workspace: %w", err)
 	}
@@ -397,7 +397,7 @@ func (d *dispatchStep) resolveIssueAndUser(ctx context.Context, evt port.Inbound
 	if err != nil {
 		return facade.Issue{}, ResolvedUser{}, nil // not found — caller formats reply
 	}
-	user, err := d.cfg.UserResolver.Resolve(ctx, evt.ChannelName, evt.SenderID)
+	user, err := d.cfg.UserResolver.Resolve(ctx, evt.ConnectionID(), evt.SenderID)
 	if err != nil {
 		return facade.Issue{}, ResolvedUser{}, fmt.Errorf("resolve user: %w", err)
 	}
@@ -408,9 +408,9 @@ func (d *dispatchStep) sendReply(ctx context.Context, evt port.InboundEvent, tex
 	if d.cfg.Registry == nil {
 		return nil
 	}
-	ch, err := d.cfg.Registry.Get(evt.ChannelName)
+	ch, err := d.cfg.Registry.Get(evt.ConnectionID())
 	if err != nil {
-		return fmt.Errorf("channel %q not in registry: %w", evt.ChannelName, err)
+		return fmt.Errorf("channel connection %q not in registry: %w", evt.ConnectionID(), err)
 	}
 
 	_, err = ch.Send(ctx, port.OutboundMessage{

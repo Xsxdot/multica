@@ -135,7 +135,7 @@ func newMemoryDedupStore() *memoryDedupStore {
 	return &memoryDedupStore{seen: map[string]bool{}}
 }
 
-func (m *memoryDedupStore) TryRecordInboundEvent(_ context.Context, provider, eventID string) (bool, error) {
+func (m *memoryDedupStore) TryRecordInboundEvent(_ context.Context, provider, _ string, eventID string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := provider + "|" + eventID
@@ -370,4 +370,3 @@ func waitForStable(t *testing.T, s *sinkStep, want int, dur time.Duration) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
-

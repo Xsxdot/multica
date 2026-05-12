@@ -1,8 +1,8 @@
 -- name: InsertOutboundFailure :one
 INSERT INTO channel_outbound_failure (
-    provider, event_kind, target_user_id, target_external_user_id,
+    provider, connection_id, event_kind, target_user_id, target_external_user_id,
     payload, status, max_attempts
-) VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
 RETURNING *;
 
 -- name: ClaimPendingOutboundFailures :many

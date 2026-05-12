@@ -93,27 +93,27 @@ type ReplySender interface {
 // so the authz Step stays free of pgx / sqlc types.
 type AuthzStore interface {
 	// LookupWorkspaceID returns the workspace_id bound to the given
-	// (channelName, chat_id) pair. channelName is the registry key
-	// (e.g. "feishu") matching port.Channel.Name(). If no binding
+	// (connectionID, chat_id) pair. connectionID is the configured channel
+	// connection id used by binding tables and the registry. If no binding
 	// exists it returns pgx.ErrNoRows.
 	//
 	// Deprecated: Use LookupPrimaryWorkspaceID for inbound command
 	// processing. LookupWorkspaceID is kept for backward compat with
 	// dispatch and other callers that need ANY binding (not just primary).
-	LookupWorkspaceID(ctx context.Context, channelName, chatID string) (pgtype.UUID, error)
+	LookupWorkspaceID(ctx context.Context, connectionID, chatID string) (pgtype.UUID, error)
 
 	// LookupPrimaryWorkspaceID returns the workspace_id of the PRIMARY
-	// binding for the given (channelName, chat_id) pair. Only primary
+	// binding for the given (connectionID, chat_id) pair. Only primary
 	// bindings process inbound commands; non-primary bindings receive
 	// notifications only.
-	LookupPrimaryWorkspaceID(ctx context.Context, channelName, chatID string) (pgtype.UUID, error)
+	LookupPrimaryWorkspaceID(ctx context.Context, connectionID, chatID string) (pgtype.UUID, error)
 
 	// IsWorkspaceMember returns true if (userID, workspaceID) exists in
 	// the member table. The caller must ensure userID.Valid == true;
 	// passing an invalid UUID is a programming error.
 	IsWorkspaceMember(ctx context.Context, userID, workspaceID pgtype.UUID) (bool, error)
 
-	ResolveUserID(ctx context.Context, channelName, externalUserID string) (pgtype.UUID, error)
+	ResolveUserID(ctx context.Context, connectionID, externalUserID string) (pgtype.UUID, error)
 
 	// CheckIssuePermission returns nil if the user is allowed to perform
 	// the requested action on the issue identified by (workspaceID,
@@ -170,7 +170,7 @@ func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 	// --- 1. Chat binding (TC-authz-1) ---
 	// Use LookupPrimaryWorkspaceID so only primary bindings process inbound commands.
 	// Non-primary bindings return WS_NOT_BOUND (they receive notifications only).
-	wsID, err := s.cfg.Store.LookupPrimaryWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
+	wsID, err := s.cfg.Store.LookupPrimaryWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return s.reject(ctx, evt, AuthzWsNotBound)
@@ -179,7 +179,7 @@ func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 	}
 
 	// --- 2. Identity resolution (fail-closed) ---
-	userID, err := s.cfg.Store.ResolveUserID(ctx, evt.ChannelName, evt.SenderID)
+	userID, err := s.cfg.Store.ResolveUserID(ctx, evt.ConnectionID(), evt.SenderID)
 	if err != nil || !userID.Valid {
 		return s.reject(ctx, evt, AuthzIdentityUnresolved)
 	}
@@ -238,7 +238,7 @@ func (s *authzStep) maybeSendReply(ctx context.Context, evt port.InboundEvent, t
 	if !s.cfg.SendReplies || s.cfg.Registry == nil {
 		return
 	}
-	ch, err := s.cfg.Registry.Get(evt.ChannelName)
+	ch, err := s.cfg.Registry.Get(evt.ConnectionID())
 	if err != nil {
 		slog.Warn("authz: channel not found for reply",
 			"event_id", evt.EventID,

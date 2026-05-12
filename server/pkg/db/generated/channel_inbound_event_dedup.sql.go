@@ -12,15 +12,16 @@ import (
 )
 
 const tryRecordInboundEvent = `-- name: TryRecordInboundEvent :one
-INSERT INTO channel_inbound_event_dedup (provider, event_id)
-VALUES ($1, $2)
-ON CONFLICT (provider, event_id) DO NOTHING
+INSERT INTO channel_inbound_event_dedup (provider, connection_id, event_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (connection_id, event_id) DO NOTHING
 RETURNING processed_at
 `
 
 type TryRecordInboundEventParams struct {
-	Provider string `json:"provider"`
-	EventID  string `json:"event_id"`
+	Provider     string `json:"provider"`
+	ConnectionID string `json:"connection_id"`
+	EventID      string `json:"event_id"`
 }
 
 // Insert a fresh dedup row for (provider, event_id). When the row already
@@ -39,7 +40,7 @@ type TryRecordInboundEventParams struct {
 // presence-vs-absence of a row, which the caller wraps into a
 // bool (inserted) at the dao boundary.
 func (q *Queries) TryRecordInboundEvent(ctx context.Context, arg TryRecordInboundEventParams) (pgtype.Timestamptz, error) {
-	row := q.db.QueryRow(ctx, tryRecordInboundEvent, arg.Provider, arg.EventID)
+	row := q.db.QueryRow(ctx, tryRecordInboundEvent, arg.Provider, arg.ConnectionID, arg.EventID)
 	var processed_at pgtype.Timestamptz
 	err := row.Scan(&processed_at)
 	return processed_at, err

@@ -13,11 +13,22 @@ import { Button } from "@multica/ui/components/ui/button";
 
 type BindState = "idle" | "binding" | "success" | "error";
 
+function providerLabel(value: string) {
+  if (!value) return "渠道";
+  return value
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 function BindPageContent() {
   const router = useRouter();
   const params = useSearchParams();
   const token = params.get("token") ?? "";
-  const provider = params.get("provider") ?? "feishu";
+  const provider = params.get("provider") ?? "";
+  const connectionId = params.get("connection_id") ?? "";
+  const providerName = providerLabel(provider);
   const kind = params.get("kind") ?? "user";
   const user = useAuthStore((s) => s.user);
   const isLoading = useAuthStore((s) => s.isLoading);
@@ -31,9 +42,12 @@ function BindPageContent() {
   const bindingKeyRef = useRef<string | null>(null);
 
   const loginHref = useMemo(() => {
-    const next = `/bind?kind=${encodeURIComponent(kind)}&token=${encodeURIComponent(token)}&provider=${encodeURIComponent(provider)}`;
+    const nextParams = new URLSearchParams({ kind, token });
+    if (provider) nextParams.set("provider", provider);
+    if (connectionId) nextParams.set("connection_id", connectionId);
+    const next = `/bind?${nextParams.toString()}`;
     return `${paths.login()}?next=${encodeURIComponent(next)}`;
-  }, [kind, provider, token]);
+  }, [connectionId, kind, provider, token]);
 
   useEffect(() => {
     if (!isLoading && !user) router.replace(loginHref);
@@ -53,22 +67,22 @@ function BindPageContent() {
       .then(() => {
         if (cancelled) return;
         setState("success");
-        setMessage("飞书账号已绑定到当前 Multica 账号。回到飞书后再发送一次消息即可继续。");
+        setMessage(`${providerName} 账号已绑定到当前 Multica 账号。回到原会话后再发送一次消息即可继续。`);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
         setState("error");
         if (err instanceof ApiError && err.status === 409) {
-          setMessage("这个绑定链接已经被使用过。请回到飞书重新发送消息，机器人会生成新的链接。");
+          setMessage("这个绑定链接已经被使用过。请回到原会话重新发送消息，机器人会生成新的链接。");
           return;
         }
-        setMessage(err instanceof Error ? err.message : "绑定失败，请回到飞书重新发送消息。");
+        setMessage(err instanceof Error ? err.message : "绑定失败，请回到原会话重新发送消息。");
       });
 
     return () => {
       cancelled = true;
     };
-  }, [isLoading, kind, provider, retryNonce, token, user?.id]);
+  }, [isLoading, kind, provider, providerName, retryNonce, token, user]);
 
   if (isLoading || !user) {
     return (
@@ -85,7 +99,7 @@ function BindPageContent() {
       <BindShell
         icon={<MessageCircle className="size-5" />}
         title="绑定链接无效"
-        description="缺少绑定 token。请回到飞书重新发送消息，让机器人生成新的绑定链接。"
+        description="缺少绑定 token。请回到原会话重新发送消息，让机器人生成新的绑定链接。"
       />
     );
   }
@@ -133,8 +147,8 @@ function BindPageContent() {
     return (
       <BindShell
         icon={workspacesLoading ? <Loader2 className="size-5 animate-spin" /> : <MessageCircle className="size-5" />}
-        title="绑定飞书群到工作区"
-        description="选择这个飞书群要连接的 Multica 工作区。绑定后，群里可以使用 Bot 指令。"
+        title="绑定会话到工作区"
+        description={`选择这个 ${providerName} 会话要连接的 Multica 工作区。绑定后，会话里可以使用 Bot 指令。`}
         action={
           <div className="space-y-2">
             {workspaces.map((workspace) => (
@@ -152,12 +166,12 @@ function BindPageContent() {
                     .createChannelBinding(workspace.id, { token, provider })
                     .then(() => {
                       setState("success");
-                      setMessage(`飞书群已绑定到 ${workspace.name}。回到群里发送指令即可使用。`);
+                      setMessage(`${providerName} 会话已绑定到 ${workspace.name}。回到原会话发送指令即可使用。`);
                       router.push(paths.workspace(workspace.slug).settings());
                     })
                     .catch((err: unknown) => {
                       setState("error");
-                      setMessage(err instanceof Error ? err.message : "群绑定失败，请回到飞书重新发起绑定。");
+                      setMessage(err instanceof Error ? err.message : "会话绑定失败，请回到原会话重新发起绑定。");
                     });
                 }}
               >
@@ -178,8 +192,8 @@ function BindPageContent() {
   return (
     <BindShell
       icon={<Loader2 className="size-5 animate-spin" />}
-      title="正在绑定飞书账号"
-      description="完成后，这个飞书身份发来的消息会映射到当前 Multica 账号。"
+      title={`正在绑定 ${providerName} 账号`}
+      description={`完成后，这个 ${providerName} 身份发来的消息会映射到当前 Multica 账号。`}
     />
   );
 }

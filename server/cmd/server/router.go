@@ -16,6 +16,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
+	channelprovider "github.com/multica-ai/multica/server/internal/channel/provider"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
@@ -69,10 +70,11 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 }
 
 type RouterOptions struct {
-	HTTPMetrics  *obsmetrics.HTTPMetrics
-	DaemonHub    *daemonws.Hub
-	DaemonWakeup service.TaskWakeupNotifier
-	Storage      storage.Storage
+	HTTPMetrics      *obsmetrics.HTTPMetrics
+	DaemonHub        *daemonws.Hub
+	DaemonWakeup     service.TaskWakeupNotifier
+	Storage          storage.Storage
+	ChannelProviders []channelprovider.Factory
 }
 
 func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analyticsClient analytics.Client, rdb *redis.Client, opts RouterOptions) chi.Router {
@@ -96,6 +98,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		AllowedEmailDomains: splitAndTrim(os.Getenv("ALLOWED_EMAIL_DOMAINS")),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
+	h.ChannelProviderSchemas = channelProviderSchemas(opts.ChannelProviders)
 	if opts.DaemonWakeup != nil {
 		h.TaskService.Wakeup = opts.DaemonWakeup
 	}
@@ -244,6 +247,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/api/cli-token", h.IssueCliToken)
 		r.Post("/api/upload-file", h.UploadFile)
 		r.Post("/api/feedback", h.CreateFeedback)
+		r.Get("/api/channel-connections", h.ListChannelConnections)
 		r.Post("/api/channel-user-bindings", h.CreateChannelUserBinding)
 
 		r.Route("/api/workspaces", func(r chi.Router) {
@@ -506,6 +510,24 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	})
 
 	return r
+}
+
+func channelProviderSchemas(factories []channelprovider.Factory) map[string][]handler.ChannelConfigFieldResponse {
+	schemas := make(map[string][]handler.ChannelConfigFieldResponse, len(factories))
+	for _, factory := range factories {
+		fields := factory.ConfigSchema()
+		resp := make([]handler.ChannelConfigFieldResponse, 0, len(fields))
+		for _, field := range fields {
+			resp = append(resp, handler.ChannelConfigFieldResponse{
+				Key:      field.Key,
+				Label:    field.Label,
+				Required: field.Required,
+				Secret:   field.Secret,
+			})
+		}
+		schemas[factory.Provider()] = resp
+	}
+	return schemas
 }
 
 // membershipChecker implements realtime.MembershipChecker using database queries.

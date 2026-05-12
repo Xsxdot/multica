@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Link2, Star, Trash2, MessageCircle } from "lucide-react";
+import { Link2, Star, Trash2, MessageCircle, Plug } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Badge } from "@multica/ui/components/ui/badge";
 import {
@@ -19,9 +19,27 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useCurrentWorkspace } from "@multica/core/paths";
 import { useCurrentMember } from "@multica/core/permissions";
-import { workspaceKeys, channelBindingListOptions } from "@multica/core/workspace/queries";
+import {
+  workspaceKeys,
+  channelBindingListOptions,
+  channelConnectionListOptions,
+} from "@multica/core/workspace/queries";
 import { api } from "@multica/core/api";
-import type { ChannelBinding } from "@multica/core/types";
+import type { ChannelBinding, ChannelConnection } from "@multica/core/types";
+
+function providerLabel(value: string) {
+  if (!value) return "Channel";
+  return value
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function connectionLabel(binding: ChannelBinding, connections: Map<string, ChannelConnection>) {
+  const connection = connections.get(binding.connection_id);
+  return connection?.display_name || providerLabel(binding.provider);
+}
 
 function BindingCard({
   binding,
@@ -29,12 +47,14 @@ function BindingCard({
   busy,
   onSetPrimary,
   onUnbind,
+  connectionName,
 }: {
   binding: ChannelBinding;
   canManage: boolean;
   busy: boolean;
   onSetPrimary: () => void;
   onUnbind: () => void;
+  connectionName: string;
 }) {
   return (
     <div className="flex items-center gap-3 px-4 py-3">
@@ -46,7 +66,7 @@ function BindingCard({
           {binding.external_chat_name ?? binding.external_chat_id}
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="capitalize">{binding.provider}</span>
+          <span>{connectionName}</span>
           <span>·</span>
           <span className="capitalize">{binding.chat_type}</span>
         </div>
@@ -89,7 +109,10 @@ export function IntegrationsTab() {
   const workspace = useCurrentWorkspace();
   const qc = useQueryClient();
   const wsId = useWorkspaceId();
+  const { data: connectionsData } = useQuery(channelConnectionListOptions());
   const { data: bindingsData, isLoading } = useQuery(channelBindingListOptions(wsId));
+  const connections = connectionsData?.connections ?? [];
+  const connectionByID = new Map(connections.map((connection) => [connection.id, connection]));
   const bindings = bindingsData?.bindings ?? [];
 
   const [actionBindingId, setActionBindingId] = useState<string | null>(null);
@@ -127,7 +150,7 @@ export function IntegrationsTab() {
   const handleUnbind = (binding: ChannelBinding) => {
     setConfirmAction({
       title: `Unbind ${binding.external_chat_name ?? binding.external_chat_id}?`,
-      description: `This will remove the binding to this ${binding.provider} chat. The chat will no longer receive notifications or be able to interact with this workspace.`,
+      description: `This will remove the binding to this ${connectionLabel(binding, connectionByID)} conversation. The conversation will no longer receive notifications or be able to interact with this workspace.`,
       variant: "destructive",
       onConfirm: async () => {
         setActionBindingId(binding.id);
@@ -151,6 +174,23 @@ export function IntegrationsTab() {
     <div className="space-y-8">
       <section className="space-y-4">
         <div className="flex items-center gap-2">
+          <Plug className="h-4 w-4 text-muted-foreground" />
+          <h2 className="text-sm font-semibold">Channel Connections ({connections.length})</h2>
+        </div>
+
+        {connections.length > 0 ? (
+          <div className="overflow-hidden rounded-xl ring-1 ring-foreground/10">
+            {connections.map((connection, i) => (
+              <ConnectionRow key={connection.id} connection={connection} separated={i > 0} />
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">No channel connections configured.</p>
+        )}
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex items-center gap-2">
           <Link2 className="h-4 w-4 text-muted-foreground" />
           <h2 className="text-sm font-semibold">Channel Bindings ({bindings.length})</h2>
         </div>
@@ -167,6 +207,7 @@ export function IntegrationsTab() {
                   busy={actionBindingId === b.id}
                   onSetPrimary={() => handleSetPrimary(b)}
                   onUnbind={() => handleUnbind(b)}
+                  connectionName={connectionLabel(b, connectionByID)}
                 />
               </div>
             ))}
@@ -195,6 +236,38 @@ export function IntegrationsTab() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </div>
+  );
+}
+
+function ConnectionRow({
+  connection,
+  separated,
+}: {
+  connection: ChannelConnection;
+  separated: boolean;
+}) {
+  const requiredFields = (connection.config_schema ?? [])
+    .filter((field) => field.required)
+    .map((field) => field.label || field.key);
+
+  return (
+    <div className={`flex items-center gap-3 px-4 py-3 ${separated ? "border-t border-border/50" : ""}`}>
+      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted">
+        <MessageCircle className="h-4 w-4 text-muted-foreground" />
+      </div>
+      <div className="min-w-0 flex-1 space-y-0.5">
+        <div className="text-sm font-medium truncate">{connection.display_name}</div>
+        <div className="text-xs text-muted-foreground">{providerLabel(connection.provider)}</div>
+        {requiredFields.length > 0 ? (
+          <div className="text-xs text-muted-foreground">
+            Required config: {requiredFields.join(", ")}
+          </div>
+        ) : null}
+      </div>
+      <Badge variant={connection.enabled ? "default" : "secondary"}>
+        {connection.enabled ? "Enabled" : "Disabled"}
+      </Badge>
     </div>
   );
 }

@@ -18,8 +18,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -50,7 +52,7 @@ func (l *dbChatBindingLookup) LookupWorkspaceID(ctx context.Context, channelName
 	var wsID pgtype.UUID
 	err := l.pool.QueryRow(ctx, `
 		SELECT workspace_id FROM channel_chat_binding
-		WHERE provider = $1 AND external_chat_id = $2
+		WHERE connection_id = $1 AND external_chat_id = $2
 	`, channelName, chatID).Scan(&wsID)
 	return wsID, err
 }
@@ -59,7 +61,7 @@ func (l *dbChatBindingLookup) LookupPrimaryWorkspaceID(ctx context.Context, chan
 	var wsID pgtype.UUID
 	err := l.pool.QueryRow(ctx, `
 		SELECT workspace_id FROM channel_chat_binding
-		WHERE provider = $1 AND external_chat_id = $2 AND is_primary = true
+		WHERE connection_id = $1 AND external_chat_id = $2 AND is_primary = true
 	`, channelName, chatID).Scan(&wsID)
 	return wsID, err
 }
@@ -87,12 +89,129 @@ func (r *dbUserInfoResolver) Resolve(ctx context.Context, channelName, externalU
 		SELECT u.id, u.name
 		FROM channel_user_binding b
 		JOIN "user" u ON u.id = b.user_id
-		WHERE b.provider = $1 AND b.external_user_id = $2
+		WHERE b.connection_id = $1 AND b.external_user_id = $2
 	`, channelName, externalUserID).Scan(&userID, &name)
 	if err != nil {
 		return inbound.ResolvedUser{}, err
 	}
 	return inbound.ResolvedUser{MulticaUserID: userID, DisplayName: name}, nil
+}
+
+func TestDBChannelHelpersUseConnectionID(t *testing.T) {
+	requirePool(t)
+
+	ctx := context.Background()
+	suffix := time.Now().UnixNano()
+	connA := fmt.Sprintf("feishu-test-a-%d", suffix)
+	connB := fmt.Sprintf("feishu-test-b-%d", suffix)
+	chatID := fmt.Sprintf("oc_conn_scoped_%d", suffix)
+	externalUserID := fmt.Sprintf("ou_conn_scoped_%d", suffix)
+	userAName := fmt.Sprintf("Connection A User %d", suffix)
+	userBName := fmt.Sprintf("Connection B User %d", suffix)
+
+	insertConnection := func(id string) {
+		t.Helper()
+		if _, err := testPool.Exec(ctx, `
+			INSERT INTO channel_connection (id, provider, display_name, enabled, is_default)
+			VALUES ($1, 'feishu', $2, TRUE, FALSE)
+		`, id, id); err != nil {
+			t.Fatalf("insert channel_connection %s: %v", id, err)
+		}
+		t.Cleanup(func() {
+			_, _ = testPool.Exec(context.Background(), `DELETE FROM channel_connection WHERE id = $1`, id)
+		})
+	}
+	insertConnection(connA)
+	insertConnection(connB)
+
+	createWorkspace := func(name string) string {
+		t.Helper()
+		var id string
+		if err := testPool.QueryRow(ctx, `
+			INSERT INTO workspace (name, slug, description, issue_prefix)
+			VALUES ($1, $2, 'connection-scoped helper test', 'CST')
+			RETURNING id
+		`, name, fmt.Sprintf("%s-%d", name, suffix)).Scan(&id); err != nil {
+			t.Fatalf("create workspace %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			_, _ = testPool.Exec(context.Background(), `DELETE FROM workspace WHERE id = $1`, id)
+		})
+		return id
+	}
+	workspaceA := createWorkspace("conn-helper-a")
+	workspaceB := createWorkspace("conn-helper-b")
+
+	createUser := func(name string) string {
+		t.Helper()
+		var id string
+		if err := testPool.QueryRow(ctx, `
+			INSERT INTO "user" (name, email)
+			VALUES ($1, $2)
+			RETURNING id
+		`, name, fmt.Sprintf("%s-%d@test.local", name, suffix)).Scan(&id); err != nil {
+			t.Fatalf("create user %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			_, _ = testPool.Exec(context.Background(), `DELETE FROM "user" WHERE id = $1`, id)
+		})
+		return id
+	}
+	userA := createUser(userAName)
+	userB := createUser(userBName)
+
+	insertChatBinding := func(connID, workspaceID, boundByUserID string) {
+		t.Helper()
+		if _, err := testPool.Exec(ctx, `
+			INSERT INTO channel_chat_binding
+				(provider, connection_id, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id)
+			VALUES ('feishu', $1, $2, 'group', $3, TRUE, $4)
+		`, connID, chatID, workspaceID, boundByUserID); err != nil {
+			t.Fatalf("insert chat binding %s: %v", connID, err)
+		}
+	}
+	insertChatBinding(connA, workspaceA, userA)
+	insertChatBinding(connB, workspaceB, userB)
+
+	insertUserBinding := func(connID, userID string) {
+		t.Helper()
+		if _, err := testPool.Exec(ctx, `
+			INSERT INTO channel_user_binding (provider, connection_id, external_user_id, user_id)
+			VALUES ('feishu', $1, $2, $3)
+		`, connID, externalUserID, userID); err != nil {
+			t.Fatalf("insert user binding %s: %v", connID, err)
+		}
+	}
+	insertUserBinding(connA, userA)
+	insertUserBinding(connB, userB)
+
+	lookup := &dbChatBindingLookup{pool: testPool}
+	gotWorkspace, err := lookup.LookupWorkspaceID(ctx, connB, chatID)
+	if err != nil {
+		t.Fatalf("LookupWorkspaceID: %v", err)
+	}
+	if want := uuidFromString(t, workspaceB); gotWorkspace != want {
+		t.Fatalf("LookupWorkspaceID workspace = %v, want %v", gotWorkspace, want)
+	}
+	gotPrimaryWorkspace, err := lookup.LookupPrimaryWorkspaceID(ctx, connB, chatID)
+	if err != nil {
+		t.Fatalf("LookupPrimaryWorkspaceID: %v", err)
+	}
+	if want := uuidFromString(t, workspaceB); gotPrimaryWorkspace != want {
+		t.Fatalf("LookupPrimaryWorkspaceID workspace = %v, want %v", gotPrimaryWorkspace, want)
+	}
+
+	resolver := newDBUserInfoResolver(testPool)
+	gotUser, err := resolver.Resolve(ctx, connB, externalUserID)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if want := uuidFromString(t, userB); gotUser.MulticaUserID != want {
+		t.Fatalf("Resolve user = %v, want %v", gotUser.MulticaUserID, want)
+	}
+	if gotUser.DisplayName != userBName {
+		t.Fatalf("Resolve display name = %q, want %q", gotUser.DisplayName, userBName)
+	}
 }
 
 // ---------------------------------------------------------------------------

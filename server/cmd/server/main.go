@@ -8,7 +8,6 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -16,9 +15,9 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel"
 	feishuadapter "github.com/multica-ai/multica/server/internal/channel/adapter/feishu"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
-	"github.com/multica-ai/multica/server/internal/channel/leader"
+	channelmanager "github.com/multica-ai/multica/server/internal/channel/manager"
 	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
-	"github.com/multica-ai/multica/server/internal/channel/outbound"
+	channelprovider "github.com/multica-ai/multica/server/internal/channel/provider"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -33,8 +32,6 @@ var (
 	version = "dev"
 	commit  = "unknown"
 )
-
-const feishuReconnectDelay = 5 * time.Second
 
 const (
 	defaultChannelInboundConversationLimit = 3
@@ -69,13 +66,6 @@ func closeRedisClient(label string, client *redis.Client) {
 	}
 	if err := client.Close(); err != nil {
 		slog.Warn("redis client close failed", "client", label, "error", err)
-	}
-}
-
-func waitFeishuReconnect(ctx context.Context) {
-	select {
-	case <-ctx.Done():
-	case <-time.After(feishuReconnectDelay):
 	}
 }
 
@@ -275,200 +265,45 @@ func main() {
 
 	// M1-T1: channel port registry — assembly point for external messaging adapters.
 	channelRegistry := channel.NewRegistry()
-
-	// M1-T7: Postgres advisory-lock leader election.
-	//
-	// Single-writer coordination for adapters whose upstream platforms
-	// (e.g. Feishu WS) deliver events to exactly one subscriber. The
-	// elector picks one replica per advisory-lock id; non-leaders sit in
-	// a 5s ping loop until the leader's connection drops.
-	//
-	// STA-47: Wire the real Feishu SDK client. The OnAcquire callback
-	// creates a new adapter with a real SDKClient backed by
-	// larksuite/oapi-sdk-go/v3, registers it in the channel registry,
-	// and connects. OnRelease disconnects and unregisters.
-	leaderCtx, leaderCancel := context.WithCancel(context.Background())
-	channelLeader := leader.NewElector(pool, leader.ChannelFeishuLockID, 5*time.Second)
-
-	// Read Feishu credentials from environment. These are required for
-	// the real SDK client. If not set, the leader election still runs
-	// but the adapter will not be wired (operators can observe leader
-	// rotation in pg_locks without Feishu credentials).
-	feishuAppID := os.Getenv("FEISHU_APP_ID")
-	feishuAppSecret := os.Getenv("FEISHU_APP_SECRET")
-	feishuEncryptKey := os.Getenv("FEISHU_ENCRYPT_KEY")
-	feishuVerifyToken := os.Getenv("FEISHU_VERIFY_TOKEN")
-	feishuEnabled := feishuAppID != "" && feishuAppSecret != ""
 	channelStorage := newStorageFromEnv()
-
-	// adapterCancel is cancelled on leader release to stop the WS client.
-	var adapterCancel context.CancelFunc
-	var channelAdapterReady atomic.Bool
-
-	channelLeader.OnAcquire(func(ctx context.Context) error {
-		channelmetrics.M.SetLeaderState("feishu", true)
-		channelmetrics.M.SetAdapterConnected("feishu", false)
-		slog.Info("channel leader: acquired", "lock_id", leader.ChannelFeishuLockID)
-
-		if !feishuEnabled {
-			slog.Warn("channel leader: FEISHU_APP_ID / FEISHU_APP_SECRET not set; skipping feishu adapter wiring")
-			return nil
-		}
-
-		// Create a context that survives beyond the OnAcquire call so
-		// the WS client keeps running until OnRelease cancels it.
-		adapterCtx, cancel := context.WithCancel(context.Background())
-		adapterCancel = cancel
-
-		go func() {
-			for {
-				if adapterCtx.Err() != nil {
-					return
-				}
-				channelAdapterReady.Store(false)
-				channelmetrics.M.SetAdapterConnected("feishu", false)
-
-				sdkClient := feishuadapter.NewRealClient(feishuAppID, feishuAppSecret, feishuEncryptKey, feishuVerifyToken)
-				adapter := feishuadapter.NewAdapter(sdkClient, feishuadapter.Config{
-					AppID:       feishuAppID,
-					AppSecret:   feishuAppSecret,
-					EncryptKey:  feishuEncryptKey,
-					VerifyToken: feishuVerifyToken,
-				})
-
-				_ = channelRegistry.Unregister("feishu")
-				if err := channelRegistry.Register(adapter); err != nil {
-					slog.Error("channel leader: failed to register feishu adapter", "error", err)
-					waitFeishuReconnect(adapterCtx)
-					continue
-				}
-
-				if err := adapter.Connect(adapterCtx); err != nil {
-					slog.Error("channel leader: failed to connect feishu adapter; will retry", "error", err)
-					_ = channelRegistry.Unregister("feishu")
-					waitFeishuReconnect(adapterCtx)
-					continue
-				}
-
-				channelAdapterReady.Store(true)
-				channelmetrics.M.SetAdapterConnected("feishu", true)
-
-				pipelineOpt := channelPipelineOptions{Observer: channelmetrics.M, TaskService: taskSvc}
-				if channelStorage != nil {
-					pipelineOpt.Storage = channelStorage
-					pipelineOpt.FileDownloader = feishuadapter.NewRealFileDownloader(sdkClient.APIClient())
-				} else {
-					slog.Info("channel attachment step disabled: storage is not configured")
-				}
-				components := newChannelInboundRuntimeComponents(pool, channelRegistry, pipelineOpt)
-				inboundRuntime := inbound.NewRuntime(inbound.RuntimeConfig{
-					Store:                inbound.NewDBInboundEventStore(pool),
-					PrePipeline:          components.PrePipeline,
-					PostPipeline:         components.PostPipeline,
-					RuleResolvers:        components.RuleResolvers,
-					ChatIntent:           components.ChatIntent,
-					ReplySink:            inbound.NewRegistryReplySink(channelRegistry),
-					Workers:              envPositiveInt("CHANNEL_INBOUND_WORKERS", defaultChannelInboundWorkers),
-					ClaimBatch:           envPositiveInt("CHANNEL_INBOUND_CLAIM_BATCH", defaultChannelInboundClaimBatch),
-					IntentTaskTimeout:    envDuration("CHANNEL_INTENT_TASK_TIMEOUT", defaultChannelIntentTaskTimeout),
-					ActionTaskTimeout:    envDuration("CHANNEL_ACTION_TASK_TIMEOUT", defaultChannelActionTaskTimeout),
-					ClarificationTimeout: envDuration("CHANNEL_CLARIFICATION_TIMEOUT", defaultChannelClarificationTimeout),
-					ProcessingLease:      envDuration("CHANNEL_INBOUND_PROCESSING_LEASE", defaultChannelInboundProcessingLease),
-				})
-				runtimeCtx, runtimeCancel := context.WithCancel(adapterCtx)
-				go inboundRuntime.Run(runtimeCtx)
-				conversationLimit := envPositiveInt("CHANNEL_INBOUND_CONVERSATION_LIMIT", defaultChannelInboundConversationLimit)
-				globalLimit := envPositiveInt("CHANNEL_INBOUND_GLOBAL_PENDING_LIMIT", defaultChannelInboundGlobalLimit)
-				slog.Info("channel leader: feishu adapter connected", "app_id", feishuAppID)
-
-				reconnect := false
-				for {
-					select {
-					case <-adapterCtx.Done():
-						return
-					case evt, ok := <-adapter.Events():
-						if !ok {
-							slog.Warn("channel leader: feishu adapter event stream closed; reconnecting")
-							reconnect = true
-							goto reconnectFeishu
-						}
-						result, err := inboundRuntime.Accept(adapterCtx, evt, inbound.AcceptOptions{
-							ConversationLimit: conversationLimit,
-							GlobalLimit:       globalLimit,
-						})
-						if err != nil {
-							slog.Error("channel inbound accept failed",
-								"channel", evt.ChannelName,
-								"chat_id", evt.ChatID,
-								"event_id", evt.EventID,
-								"error", err,
-							)
-							continue
-						}
-						slog.Debug("channel inbound event accepted",
-							"channel", evt.ChannelName,
-							"chat_id", evt.ChatID,
-							"event_id", evt.EventID,
-							"row_id", result.EventID,
-							"duplicate", result.Duplicate,
-							"rejected_backpressure", result.RejectedBackpressure,
-							"clarification_consumed", result.ClarificationConsumed,
-						)
-					}
-				}
-
-			reconnectFeishu:
-				runtimeCancel()
-				channelAdapterReady.Store(false)
-				channelmetrics.M.SetAdapterConnected("feishu", false)
-				disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				if err := adapter.Disconnect(disconnectCtx); err != nil {
-					slog.Warn("channel leader: feishu adapter disconnect before reconnect failed", "error", err)
-				}
-				disconnectCancel()
-				_ = channelRegistry.Unregister("feishu")
-				if reconnect {
-					waitFeishuReconnect(adapterCtx)
-				}
+	channelProviders := []channelprovider.Factory{
+		feishuadapter.NewFactory(),
+	}
+	channelCtx, channelCancel := context.WithCancel(context.Background())
+	channelManager := channelmanager.New(channelmanager.Config{
+		Pool:      pool,
+		Queries:   queries,
+		Bus:       bus,
+		Registry:  channelRegistry,
+		Factories: channelProviders,
+		RuntimeBuilder: func(fileDownloader inbound.FileDownloader) channelmanager.RuntimeComponents {
+			pipelineOpt := channelPipelineOptions{Observer: channelmetrics.M, TaskService: taskSvc}
+			if channelStorage != nil && fileDownloader != nil {
+				pipelineOpt.Storage = channelStorage
+				pipelineOpt.FileDownloader = fileDownloader
+			} else if channelStorage != nil {
+				slog.Info("channel attachment step disabled: provider file downloader is not configured")
 			}
-		}()
-
-		return nil
+			components := newChannelInboundRuntimeComponents(pool, channelRegistry, pipelineOpt)
+			return channelmanager.RuntimeComponents{
+				PrePipeline:   components.PrePipeline,
+				PostPipeline:  components.PostPipeline,
+				RuleResolvers: components.RuleResolvers,
+				ChatIntent:    components.ChatIntent,
+			}
+		},
+		ConversationLimit:      envPositiveInt("CHANNEL_INBOUND_CONVERSATION_LIMIT", defaultChannelInboundConversationLimit),
+		GlobalLimit:            envPositiveInt("CHANNEL_INBOUND_GLOBAL_PENDING_LIMIT", defaultChannelInboundGlobalLimit),
+		Workers:                envPositiveInt("CHANNEL_INBOUND_WORKERS", defaultChannelInboundWorkers),
+		ClaimBatch:             envPositiveInt("CHANNEL_INBOUND_CLAIM_BATCH", defaultChannelInboundClaimBatch),
+		IntentTaskTimeout:      envDuration("CHANNEL_INTENT_TASK_TIMEOUT", defaultChannelIntentTaskTimeout),
+		ActionTaskTimeout:      envDuration("CHANNEL_ACTION_TASK_TIMEOUT", defaultChannelActionTaskTimeout),
+		ClarificationTimeout:   envDuration("CHANNEL_CLARIFICATION_TIMEOUT", defaultChannelClarificationTimeout),
+		ProcessingLease:        envDuration("CHANNEL_INBOUND_PROCESSING_LEASE", defaultChannelInboundProcessingLease),
+		RetryWorkerEnabled:     os.Getenv("CHANNEL_RETRY_WORKER_ENABLED") != "false",
+		NotificationOutbox:     true,
+		OutboundCleanupEnabled: true,
 	})
-	channelLeader.OnRelease(func(ctx context.Context) error {
-		slog.Info("channel leader: released", "lock_id", leader.ChannelFeishuLockID)
-		channelAdapterReady.Store(false)
-		channelmetrics.M.SetAdapterConnected("feishu", false)
-		channelmetrics.M.SetLeaderState("feishu", false)
-
-		// Cancel the adapter context to stop the WS client.
-		if adapterCancel != nil {
-			adapterCancel()
-		}
-
-		// Disconnect the adapter if registered.
-		adapter, err := channelRegistry.Get("feishu")
-		if err != nil {
-			// Not registered — nothing to disconnect.
-			return nil
-		}
-		if discErr := adapter.Disconnect(ctx); discErr != nil {
-			slog.Error("channel leader: feishu adapter disconnect failed", "error", discErr)
-		}
-		// Unregister so the next acquire starts fresh.
-		_ = channelRegistry.Unregister("feishu")
-		return nil
-	})
-	go func() {
-		if err := channelLeader.Run(leaderCtx); err != nil {
-			// Run only returns non-nil on a structural error (pool /
-			// callback misbehaviour). Log and continue — the server
-			// stays up; the elector is best-effort coordination, not
-			// a critical-path dependency for HTTP traffic.
-			slog.Error("channel leader: run terminated with error", "error", err)
-		}
-	}()
-
 	analyticsClient := analytics.NewFromEnv()
 	defer analyticsClient.Close()
 
@@ -479,31 +314,7 @@ func main() {
 	registerSubscriberListeners(bus, queries)
 	registerActivityListeners(bus, queries)
 	registerNotificationListeners(bus, queries)
-
-	var channelOutboundSubscriber *outbound.Subscriber
-	var channelOutboxCancel context.CancelFunc
-	if feishuEnabled {
-		outboundChannel := newRegistryChannel(channelRegistry, "feishu")
-		notificationStore := outbound.NewDBNotificationStore(pool)
-		channelOutboundSubscriber = outbound.NewSubscriber(
-			bus,
-			outboundChannel,
-			outbound.NewDBBindingStore(pool),
-			outbound.NewDBPrefStore(queries),
-			"",
-		)
-		channelOutboundSubscriber.SetFailureRecorder(queries)
-		channelOutboundSubscriber.SetNotificationEnqueuer(notificationStore)
-		channelOutboundSubscriber.Start()
-		outboxCtx, cancel := context.WithCancel(context.Background())
-		channelOutboxCancel = cancel
-		outboxWorker := outbound.NewOutboxWorker(notificationStore, newRegistryRetrySender(channelRegistry))
-		outboxWorker.SetActiveFunc(channelAdapterReady.Load)
-		go outboxWorker.Run(outboxCtx)
-		slog.Info("channel outbound subscriber started", "provider", "feishu")
-	} else {
-		slog.Info("channel outbound subscriber disabled: Feishu credentials are not configured")
-	}
+	channelManager.Start(channelCtx)
 
 	metricsConfig := obsmetrics.ConfigFromEnv()
 	var metricsServer *http.Server
@@ -527,10 +338,11 @@ func main() {
 	}
 
 	r := NewRouterWithOptions(pool, hub, bus, analyticsClient, storeRedis, RouterOptions{
-		HTTPMetrics:  httpMetrics,
-		DaemonHub:    daemonHub,
-		DaemonWakeup: daemonWakeup,
-		Storage:      channelStorage,
+		HTTPMetrics:      httpMetrics,
+		DaemonHub:        daemonHub,
+		DaemonWakeup:     daemonWakeup,
+		Storage:          channelStorage,
+		ChannelProviders: channelProviders,
 	})
 
 	srv := &http.Server{
@@ -548,28 +360,6 @@ func main() {
 	go runRuntimeSweeper(sweepCtx, queries, taskSvc, bus)
 	go runAutopilotScheduler(autopilotCtx, queries, autopilotSvc)
 	go runDBStatsLogger(sweepCtx, pool)
-
-	// Start outbound retry + cleanup workers (T15).
-	var retryCancel context.CancelFunc
-	if !feishuEnabled {
-		slog.Info("channel outbound retry worker disabled: Feishu credentials are not configured")
-	} else if outbound.RetryWorkerEnabled() {
-		retryCtx, cancel := context.WithCancel(context.Background())
-		retryCancel = cancel
-		retryWorker := outbound.NewRetryWorker(pool, queries, newRegistryRetrySender(channelRegistry))
-		retryWorker.SetActiveFunc(channelAdapterReady.Load)
-		go retryWorker.Run(retryCtx)
-		if os.Getenv("CHANNEL_RETRY_WORKER_ENABLED") == "" {
-			slog.Info("channel outbound retry worker started by default")
-		} else {
-			slog.Info("channel outbound retry worker started by env")
-		}
-	} else {
-		slog.Info("channel outbound retry worker disabled by CHANNEL_RETRY_WORKER_ENABLED=false")
-	}
-	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
-	cleanupWorker := outbound.NewCleanupWorker(queries)
-	go cleanupWorker.Run(cleanupCtx)
 
 	if metricsServer != nil {
 		go func() {
@@ -595,21 +385,8 @@ func main() {
 	slog.Info("shutting down server")
 	sweepCancel()
 	autopilotCancel()
-	if retryCancel != nil {
-		retryCancel()
-	}
-	if channelOutboundSubscriber != nil {
-		channelOutboundSubscriber.Stop()
-	}
-	if channelOutboxCancel != nil {
-		channelOutboxCancel()
-	}
-	cleanupCancel()
-	// Stop the channel leader before HTTP shutdown: OnRelease may want
-	// to send a final "going down" message via the still-up service
-	// layer; doing it after API shutdown would race the http.Server's
-	// drain.
-	leaderCancel()
+	channelManager.Stop()
+	channelCancel()
 
 	apiShutdownCtx, apiShutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := srv.Shutdown(apiShutdownCtx); err != nil {

@@ -308,12 +308,10 @@ func TestAdapter_Send_TargetUserUsesOpenID(t *testing.T) {
 	}
 }
 
-// TC-adapt-2 (card path) — SendCard forwards a pre-rendered card JSON body
-// verbatim as msg_type "interactive". The Body field of OutboundCardMessage
-// is contractually the rendered JSON produced by the card sub-package; the
-// adapter does NOT wrap plain text into a card schema (per Review Issue 4 —
-// the port DTO must not be polymorphic).
-func TestAdapter_SendCard_PreRenderedJSON(t *testing.T) {
+// TC-adapt-2 (card path) — SendCard renders the platform-neutral title/body
+// payload into Feishu interactive-card JSON. Callers must not pre-render
+// provider JSON outside the adapter.
+func TestAdapter_SendCard_RendersInteractiveCard(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeFeishuClient("ou_bot_xxx")
@@ -327,11 +325,10 @@ func TestAdapter_SendCard_PreRenderedJSON(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = adapter.Disconnect(context.Background()) })
 
-	preRendered := `{"header":{"title":{"tag":"plain_text","content":"[STA-2] 测试"}},"elements":[{"tag":"markdown","text":{"tag":"lark_md","content":"**状态**: done"}}]}`
-
 	res, err := adapter.SendCard(ctx, port.OutboundCardMessage{
 		ChatID: "oc_002",
-		Body:   preRendered,
+		Title:  "[STA-2] 测试",
+		Body:   "**状态**: done",
 	})
 	if err != nil {
 		t.Fatalf("SendCard returned error: %v", err)
@@ -357,14 +354,24 @@ func TestAdapter_SendCard_PreRenderedJSON(t *testing.T) {
 	if c.receiveType != "chat_id" {
 		t.Errorf("receive_id_type = %q, want %q", c.receiveType, "chat_id")
 	}
-	// The Body must be passed through verbatim — not double-wrapped.
-	if c.body != preRendered {
-		t.Errorf("content was double-wrapped:\ngot:  %s\nwant: %s", c.body, preRendered)
-	}
-	// Sanity: it really is valid JSON.
+	// Sanity: it really is valid Feishu card JSON rendered by the adapter.
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(c.body), &parsed); err != nil {
 		t.Errorf("content is not valid JSON: %v\nbody: %s", err, c.body)
+	}
+	header := parsed["header"].(map[string]any)
+	title := header["title"].(map[string]any)
+	if title["content"] != "[STA-2] 测试" {
+		t.Errorf("card title = %v, want %q", title["content"], "[STA-2] 测试")
+	}
+	elements := parsed["elements"].([]any)
+	if len(elements) != 1 {
+		t.Fatalf("elements len = %d, want 1", len(elements))
+	}
+	el := elements[0].(map[string]any)
+	text := el["text"].(map[string]any)
+	if text["content"] != "**状态**: done" {
+		t.Errorf("card body = %v, want %q", text["content"], "**状态**: done")
 	}
 }
 
@@ -384,7 +391,7 @@ func TestAdapter_SendCard_TargetChatUsesChatID(t *testing.T) {
 
 	if _, err := adapter.SendCard(ctx, port.OutboundCardMessage{
 		Target: port.TargetChat("oc_003"),
-		Body:   `{"header":{"title":{"tag":"plain_text","content":"x"}}}`,
+		Title:  "x",
 	}); err != nil {
 		t.Fatalf("SendCard returned error: %v", err)
 	}
@@ -418,7 +425,7 @@ func TestAdapter_SendCard_EmptyChatID(t *testing.T) {
 
 	_, err := adapter.SendCard(ctx, port.OutboundCardMessage{
 		ChatID: "",
-		Body:   `{"header":{"title":{"tag":"plain_text","content":"x"}}}`,
+		Title:  "x",
 	})
 	if err == nil {
 		t.Fatal("SendCard with empty ChatID should return error")
@@ -429,9 +436,8 @@ func TestAdapter_SendCard_EmptyChatID(t *testing.T) {
 	}
 }
 
-// SendCard with empty Body must fail fast — the contract is that Body
-// carries pre-rendered card JSON, and an empty body is a programmer bug.
-func TestAdapter_SendCard_EmptyBody(t *testing.T) {
+// SendCard with empty Body is valid: the adapter renders a title-only card.
+func TestAdapter_SendCard_EmptyBodyRendersTitleOnlyCard(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeFeishuClient("ou_bot_xxx")
@@ -447,12 +453,23 @@ func TestAdapter_SendCard_EmptyBody(t *testing.T) {
 
 	_, err := adapter.SendCard(ctx, port.OutboundCardMessage{
 		ChatID: "oc_x",
+		Title:  "Only title",
 		Body:   "",
 	})
-	if err == nil {
-		t.Fatal("SendCard with empty Body should return error")
+	if err != nil {
+		t.Fatalf("SendCard returned error: %v", err)
 	}
-	if calls := fake.snapshotSendCalls(); len(calls) != 0 {
-		t.Errorf("expected no SendMessage calls, got %d", len(calls))
+	calls := fake.snapshotSendCalls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d SendMessage calls, want 1", len(calls))
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(calls[0].body), &parsed); err != nil {
+		t.Fatalf("content is not valid JSON: %v", err)
+	}
+	header := parsed["header"].(map[string]any)
+	title := header["title"].(map[string]any)
+	if title["content"] != "Only title" {
+		t.Errorf("card title = %v, want %q", title["content"], "Only title")
 	}
 }

@@ -50,25 +50,26 @@ type Config struct {
 }
 
 type Handler struct {
-	Queries               *db.Queries
-	DB                    dbExecutor
-	TxStarter             txStarter
-	Hub                   *realtime.Hub
-	DaemonHub             *daemonws.Hub
-	Bus                   *events.Bus
-	TaskService           *service.TaskService
-	AutopilotService      *service.AutopilotService
-	EmailService          *service.EmailService
-	UpdateStore           *UpdateStore
-	ModelListStore        ModelListStore
-	LocalSkillListStore   LocalSkillListStore
-	LocalSkillImportStore LocalSkillImportStore
-	Storage               storage.Storage
-	CFSigner              *auth.CloudFrontSigner
-	Analytics             analytics.Client
-	PATCache              *auth.PATCache
-	DaemonTokenCache      *auth.DaemonTokenCache
-	cfg                   Config
+	Queries                *db.Queries
+	DB                     dbExecutor
+	TxStarter              txStarter
+	Hub                    *realtime.Hub
+	DaemonHub              *daemonws.Hub
+	Bus                    *events.Bus
+	TaskService            *service.TaskService
+	AutopilotService       *service.AutopilotService
+	EmailService           *service.EmailService
+	UpdateStore            *UpdateStore
+	ModelListStore         ModelListStore
+	LocalSkillListStore    LocalSkillListStore
+	LocalSkillImportStore  LocalSkillImportStore
+	Storage                storage.Storage
+	CFSigner               *auth.CloudFrontSigner
+	Analytics              analytics.Client
+	PATCache               *auth.PATCache
+	DaemonTokenCache       *auth.DaemonTokenCache
+	ChannelProviderSchemas map[string][]ChannelConfigFieldResponse
+	cfg                    Config
 }
 
 func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config, daemonHubs ...*daemonws.Hub) *Handler {

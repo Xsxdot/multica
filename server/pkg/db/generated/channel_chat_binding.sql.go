@@ -15,29 +15,30 @@ const clearPrimaryBindingsForWorkspaceProvider = `-- name: ClearPrimaryBindingsF
 UPDATE channel_chat_binding SET
     is_primary = false,
     updated_at = now()
-WHERE workspace_id = $1 AND provider = $2 AND is_primary = true
+WHERE workspace_id = $1 AND connection_id = $2 AND is_primary = true
 `
 
 type ClearPrimaryBindingsForWorkspaceProviderParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	Provider    string      `json:"provider"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	ConnectionID string      `json:"connection_id"`
 }
 
 func (q *Queries) ClearPrimaryBindingsForWorkspaceProvider(ctx context.Context, arg ClearPrimaryBindingsForWorkspaceProviderParams) error {
-	_, err := q.db.Exec(ctx, clearPrimaryBindingsForWorkspaceProvider, arg.WorkspaceID, arg.Provider)
+	_, err := q.db.Exec(ctx, clearPrimaryBindingsForWorkspaceProvider, arg.WorkspaceID, arg.ConnectionID)
 	return err
 }
 
 const createChannelChatBinding = `-- name: CreateChannelChatBinding :one
 INSERT INTO channel_chat_binding (
-    provider, external_chat_id, chat_type, workspace_id,
+    provider, connection_id, external_chat_id, chat_type, workspace_id,
     is_primary, bound_by_user_id, external_chat_name, default_project_id
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id, connection_id
 `
 
 type CreateChannelChatBindingParams struct {
 	Provider         string      `json:"provider"`
+	ConnectionID     string      `json:"connection_id"`
 	ExternalChatID   string      `json:"external_chat_id"`
 	ChatType         string      `json:"chat_type"`
 	WorkspaceID      pgtype.UUID `json:"workspace_id"`
@@ -50,6 +51,7 @@ type CreateChannelChatBindingParams struct {
 func (q *Queries) CreateChannelChatBinding(ctx context.Context, arg CreateChannelChatBindingParams) (ChannelChatBinding, error) {
 	row := q.db.QueryRow(ctx, createChannelChatBinding,
 		arg.Provider,
+		arg.ConnectionID,
 		arg.ExternalChatID,
 		arg.ChatType,
 		arg.WorkspaceID,
@@ -71,6 +73,7 @@ func (q *Queries) CreateChannelChatBinding(ctx context.Context, arg CreateChanne
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DefaultProjectID,
+		&i.ConnectionID,
 	)
 	return i, err
 }
@@ -85,7 +88,7 @@ func (q *Queries) DeleteChannelChatBinding(ctx context.Context, id pgtype.UUID) 
 }
 
 const getChannelChatBinding = `-- name: GetChannelChatBinding :one
-SELECT id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id FROM channel_chat_binding
+SELECT id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id, connection_id FROM channel_chat_binding
 WHERE id = $1
 `
 
@@ -104,22 +107,23 @@ func (q *Queries) GetChannelChatBinding(ctx context.Context, id pgtype.UUID) (Ch
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DefaultProjectID,
+		&i.ConnectionID,
 	)
 	return i, err
 }
 
 const getChannelChatBindingByProviderAndChatID = `-- name: GetChannelChatBindingByProviderAndChatID :one
-SELECT id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id FROM channel_chat_binding
-WHERE provider = $1 AND external_chat_id = $2
+SELECT id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id, connection_id FROM channel_chat_binding
+WHERE connection_id = $1 AND external_chat_id = $2
 `
 
 type GetChannelChatBindingByProviderAndChatIDParams struct {
-	Provider       string `json:"provider"`
+	ConnectionID   string `json:"connection_id"`
 	ExternalChatID string `json:"external_chat_id"`
 }
 
 func (q *Queries) GetChannelChatBindingByProviderAndChatID(ctx context.Context, arg GetChannelChatBindingByProviderAndChatIDParams) (ChannelChatBinding, error) {
-	row := q.db.QueryRow(ctx, getChannelChatBindingByProviderAndChatID, arg.Provider, arg.ExternalChatID)
+	row := q.db.QueryRow(ctx, getChannelChatBindingByProviderAndChatID, arg.ConnectionID, arg.ExternalChatID)
 	var i ChannelChatBinding
 	err := row.Scan(
 		&i.ID,
@@ -133,22 +137,23 @@ func (q *Queries) GetChannelChatBindingByProviderAndChatID(ctx context.Context, 
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DefaultProjectID,
+		&i.ConnectionID,
 	)
 	return i, err
 }
 
 const getPrimaryChannelChatBinding = `-- name: GetPrimaryChannelChatBinding :one
-SELECT id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id FROM channel_chat_binding
-WHERE workspace_id = $1 AND provider = $2 AND is_primary = true
+SELECT id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id, connection_id FROM channel_chat_binding
+WHERE workspace_id = $1 AND connection_id = $2 AND is_primary = true
 `
 
 type GetPrimaryChannelChatBindingParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	Provider    string      `json:"provider"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	ConnectionID string      `json:"connection_id"`
 }
 
 func (q *Queries) GetPrimaryChannelChatBinding(ctx context.Context, arg GetPrimaryChannelChatBindingParams) (ChannelChatBinding, error) {
-	row := q.db.QueryRow(ctx, getPrimaryChannelChatBinding, arg.WorkspaceID, arg.Provider)
+	row := q.db.QueryRow(ctx, getPrimaryChannelChatBinding, arg.WorkspaceID, arg.ConnectionID)
 	var i ChannelChatBinding
 	err := row.Scan(
 		&i.ID,
@@ -162,12 +167,13 @@ func (q *Queries) GetPrimaryChannelChatBinding(ctx context.Context, arg GetPrima
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DefaultProjectID,
+		&i.ConnectionID,
 	)
 	return i, err
 }
 
 const listChannelChatBindings = `-- name: ListChannelChatBindings :many
-SELECT id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id FROM channel_chat_binding
+SELECT id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id, connection_id FROM channel_chat_binding
 WHERE workspace_id = $1
 ORDER BY is_primary DESC, created_at ASC
 `
@@ -193,6 +199,7 @@ func (q *Queries) ListChannelChatBindings(ctx context.Context, workspaceID pgtyp
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.DefaultProjectID,
+			&i.ConnectionID,
 		); err != nil {
 			return nil, err
 		}
@@ -209,7 +216,7 @@ UPDATE channel_chat_binding SET
     is_primary = $2,
     updated_at = now()
 WHERE id = $1
-RETURNING id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id
+RETURNING id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id, connection_id
 `
 
 type SetChannelChatBindingPrimaryParams struct {
@@ -232,6 +239,7 @@ func (q *Queries) SetChannelChatBindingPrimary(ctx context.Context, arg SetChann
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DefaultProjectID,
+		&i.ConnectionID,
 	)
 	return i, err
 }
@@ -241,7 +249,7 @@ UPDATE channel_chat_binding SET
     default_project_id = $2,
     updated_at = now()
 WHERE id = $1
-RETURNING id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id
+RETURNING id, provider, external_chat_id, chat_type, workspace_id, is_primary, bound_by_user_id, external_chat_name, created_at, updated_at, default_project_id, connection_id
 `
 
 type UpdateChannelChatBindingDefaultProjectParams struct {
@@ -264,6 +272,7 @@ func (q *Queries) UpdateChannelChatBindingDefaultProject(ctx context.Context, ar
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DefaultProjectID,
+		&i.ConnectionID,
 	)
 	return i, err
 }

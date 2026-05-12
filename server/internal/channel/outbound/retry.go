@@ -66,10 +66,10 @@ type RetryPayload struct {
 }
 
 // RetrySender abstracts the channel send operation so the worker can be
-// tested without a real Feishu adapter. The provider parameter identifies
-// which channel adapter to use (e.g. "feishu").
+// tested without a real adapter. The connectionID parameter identifies the
+// concrete channel connection to use.
 type RetrySender interface {
-	SendCard(ctx context.Context, provider string, externalUserID string, card RetryPayload) error
+	SendCard(ctx context.Context, connectionID string, externalUserID string, card RetryPayload) error
 }
 
 // FailureStore abstracts the DB operations needed by RetryWorker.
@@ -203,7 +203,7 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 	}
 	externalUserID := f.TargetExternalUserID.String
 
-	err := w.sender.SendCard(ctx, f.Provider, externalUserID, payload)
+	err := w.sender.SendCard(ctx, f.ConnectionID, externalUserID, payload)
 
 	if err == nil {
 		// Success — delete the failure record entirely.

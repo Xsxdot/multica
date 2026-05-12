@@ -27,12 +27,12 @@ import (
 // DO NOTHING — the canonical PostgreSQL idiom for "did we just write
 // this row?".
 type DedupStore interface {
-	TryRecordInboundEvent(ctx context.Context, provider, eventID string) (bool, error)
+	TryRecordInboundEvent(ctx context.Context, provider, connectionID, eventID string) (bool, error)
 }
 
 type DedupOutcomeStore interface {
-	MarkInboundEventProcessed(ctx context.Context, provider, eventID string) error
-	MarkInboundEventFailed(ctx context.Context, provider, eventID, lastError string) error
+	MarkInboundEventProcessed(ctx context.Context, connectionID, eventID string) error
+	MarkInboundEventFailed(ctx context.Context, connectionID, eventID, lastError string) error
 }
 
 // dedupStep is the Step implementation that consults DedupStore on every
@@ -64,7 +64,7 @@ func (s *dedupStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 	if evt.ChannelName == "" || evt.EventID == "" {
 		return evt, DecisionContinue, errors.New("dedup: missing channel_name or event_id")
 	}
-	inserted, err := s.store.TryRecordInboundEvent(ctx, evt.ChannelName, evt.EventID)
+	inserted, err := s.store.TryRecordInboundEvent(ctx, evt.ChannelName, evt.ConnectionID(), evt.EventID)
 	if err != nil {
 		return evt, DecisionContinue, err
 	}
@@ -83,9 +83,9 @@ func (s *dedupStep) Finalize(ctx context.Context, evt port.InboundEvent, outcome
 		return nil
 	}
 	if runErr != nil {
-		return outcomes.MarkInboundEventFailed(ctx, evt.ChannelName, evt.EventID, runErr.Error())
+		return outcomes.MarkInboundEventFailed(ctx, evt.ConnectionID(), evt.EventID, runErr.Error())
 	}
-	return outcomes.MarkInboundEventProcessed(ctx, evt.ChannelName, evt.EventID)
+	return outcomes.MarkInboundEventProcessed(ctx, evt.ConnectionID(), evt.EventID)
 }
 
 type dedupDB interface {
@@ -103,11 +103,11 @@ func NewDBDedupStore(db dedupDB) DedupStore {
 	return &dbDedupStore{db: db}
 }
 
-func (s *dbDedupStore) TryRecordInboundEvent(ctx context.Context, provider, eventID string) (bool, error) {
+func (s *dbDedupStore) TryRecordInboundEvent(ctx context.Context, provider, connectionID, eventID string) (bool, error) {
 	const q = `
-INSERT INTO channel_inbound_event_dedup (provider, event_id, status, attempts, processed_at, updated_at)
-VALUES ($1, $2, 'processing', 1, now(), now())
-ON CONFLICT (provider, event_id) DO UPDATE SET
+INSERT INTO channel_inbound_event_dedup (provider, connection_id, event_id, status, attempts, processed_at, updated_at)
+VALUES ($1, $2, $3, 'processing', 1, now(), now())
+ON CONFLICT (connection_id, event_id) DO UPDATE SET
     status = 'processing',
     attempts = channel_inbound_event_dedup.attempts + 1,
     last_error = NULL,
@@ -120,7 +120,7 @@ WHERE channel_inbound_event_dedup.status = 'failed'
 RETURNING status
 `
 	var status string
-	err := s.db.QueryRow(ctx, q, provider, eventID).Scan(&status)
+	err := s.db.QueryRow(ctx, q, provider, connectionID, eventID).Scan(&status)
 	if err == nil {
 		return true, nil
 	}
@@ -130,35 +130,35 @@ RETURNING status
 	return false, err
 }
 
-func (s *dbDedupStore) MarkInboundEventProcessed(ctx context.Context, provider, eventID string) error {
+func (s *dbDedupStore) MarkInboundEventProcessed(ctx context.Context, connectionID, eventID string) error {
 	const q = `
 UPDATE channel_inbound_event_dedup SET
     status = 'processed',
     processed_at = now(),
     updated_at = now(),
     last_error = NULL
-WHERE provider = $1
+WHERE connection_id = $1
   AND event_id = $2
   AND status = 'processing'
 `
-	_, err := s.db.Exec(ctx, q, provider, eventID)
+	_, err := s.db.Exec(ctx, q, connectionID, eventID)
 	return err
 }
 
-func (s *dbDedupStore) MarkInboundEventFailed(ctx context.Context, provider, eventID, lastError string) error {
+func (s *dbDedupStore) MarkInboundEventFailed(ctx context.Context, connectionID, eventID, lastError string) error {
 	const q = `
 UPDATE channel_inbound_event_dedup SET
     status = 'failed',
     last_error = $3,
     updated_at = now()
-WHERE provider = $1
+WHERE connection_id = $1
   AND event_id = $2
   AND status = 'processing'
 `
 	if len(lastError) > 2000 {
 		lastError = lastError[:2000]
 	}
-	_, err := s.db.Exec(ctx, q, provider, eventID, lastError)
+	_, err := s.db.Exec(ctx, q, connectionID, eventID, lastError)
 	if err != nil {
 		return fmt.Errorf("dedup: mark failed: %w", err)
 	}

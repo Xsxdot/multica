@@ -38,10 +38,18 @@ func (f *fakeUserResolver) Resolve(_ context.Context, _, _ string) (inbound.Reso
 }
 
 type fakeProjectValidator struct {
+	calls []struct {
+		WorkspaceID pgtype.UUID
+		ProjectID   pgtype.UUID
+	}
 	err error
 }
 
-func (f fakeProjectValidator) ValidateProjectInWorkspace(context.Context, pgtype.UUID, pgtype.UUID) error {
+func (f *fakeProjectValidator) ValidateProjectInWorkspace(_ context.Context, workspaceID, projectID pgtype.UUID) error {
+	f.calls = append(f.calls, struct {
+		WorkspaceID pgtype.UUID
+		ProjectID   pgtype.UUID
+	}{WorkspaceID: workspaceID, ProjectID: projectID})
 	return f.err
 }
 
@@ -355,7 +363,7 @@ func TestDispatchStep_CreateIssue_ProjectOutsideWorkspaceRejected(t *testing.T) 
 	t.Parallel()
 
 	cfg, issueSvc, _, recCh := buildDispatchConfig()
-	cfg.ProjectValidator = fakeProjectValidator{err: pgx.ErrNoRows}
+	cfg.ProjectValidator = &fakeProjectValidator{err: pgx.ErrNoRows}
 	step := inbound.NewDispatchStep(cfg)
 
 	evt := makeEvt(port.IntentCreateIssue, map[string]string{
@@ -402,11 +410,39 @@ func TestDispatchStep_CreateIssue_ProjectIDRequiresValidator(t *testing.T) {
 	}
 }
 
+func TestDispatchStep_CreateIssue_TypedNilProjectValidatorReturnsInfrastructureError(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	var validator *inbound.DBProjectWorkspaceValidator
+	cfg.ProjectValidator = validator
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentCreateIssue, map[string]string{
+		"title":      "登录页加载慢",
+		"project_id": "11111111-1111-1111-1111-111111111111",
+	})
+	_, _, err := step.Run(context.Background(), evt)
+	if err == nil {
+		t.Fatal("Run should return infrastructure error")
+	}
+	if !strings.Contains(err.Error(), "project validator is not configured") {
+		t.Fatalf("error = %q, want missing project validator", err.Error())
+	}
+	if len(issueSvc.created) != 0 {
+		t.Fatalf("CreateIssue called %d times, want 0", len(issueSvc.created))
+	}
+	if len(recCh.sends) != 0 {
+		t.Fatalf("expected no send on retryable error, got %d", len(recCh.sends))
+	}
+}
+
 func TestDispatchStep_CreateIssue_ProjectIDValidatedAndPassedThrough(t *testing.T) {
 	t.Parallel()
 
 	cfg, issueSvc, _, recCh := buildDispatchConfig()
-	cfg.ProjectValidator = fakeProjectValidator{}
+	validator := &fakeProjectValidator{}
+	cfg.ProjectValidator = validator
 	issueSvc.createReturn = facade.Issue{
 		ID:         uuid(0xBC),
 		Identifier: "STA-41",
@@ -425,6 +461,15 @@ func TestDispatchStep_CreateIssue_ProjectIDValidatedAndPassedThrough(t *testing.
 	}
 	if len(issueSvc.created) != 1 {
 		t.Fatalf("CreateIssue called %d times, want 1", len(issueSvc.created))
+	}
+	if len(validator.calls) != 1 {
+		t.Fatalf("ValidateProjectInWorkspace called %d times, want 1", len(validator.calls))
+	}
+	if got := validator.calls[0].WorkspaceID; got != uuid(0x01) {
+		t.Fatalf("validated workspace ID = %v, want chat workspace id", got)
+	}
+	if got := validator.calls[0].ProjectID; got != uuid(0x11) {
+		t.Fatalf("validated project ID = %v, want parsed project id", got)
 	}
 	if got := issueSvc.created[0].ProjectID; got != uuid(0x11) {
 		t.Fatalf("ProjectID = %v, want parsed project id", got)

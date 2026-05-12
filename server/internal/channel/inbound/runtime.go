@@ -215,6 +215,7 @@ func (r *Runtime) resolveIntent(ctx context.Context, rec *InboundEventRecord) (b
 		DefaultProjectID: chatCtx.DefaultProjectID,
 		Text:             evt.Text,
 		Channel:          evt.ChannelName,
+		ConnectionID:     evt.ConnectionID(),
 		ChatID:           evt.ChatID,
 		ChatType:         string(evt.ChatType),
 		SenderID:         evt.SenderID,
@@ -390,7 +391,7 @@ func (r *Runtime) runPipeline(ctx context.Context, pipeline *Pipeline, evt port.
 }
 
 func (r *Runtime) lookupChatContext(ctx context.Context, evt port.InboundEvent) ChatBindingContext {
-	chatCtx, err := r.cfg.Store.LookupChatContext(ctx, evt.ChannelName, evt.ChatID)
+	chatCtx, err := r.cfg.Store.LookupChatContext(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		slog.Error("channel inbound runtime: lookup chat context failed",
 			"channel", evt.ChannelName,

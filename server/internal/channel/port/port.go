@@ -87,8 +87,10 @@ const (
 //
 // Field-level rationale (DESIGN §3.1, §4.1):
 //
-//   - ChannelName matches the registry key (port.Channel.Name()), e.g. "feishu".
-//     It lets the dispatcher route per-platform without a type assertion.
+//   - ChannelName is the provider key emitted by the adapter, e.g. "feishu".
+//     ChannelConnectionID is injected by the runtime manager when a concrete
+//     configured connection receives the event. Downstream code should use
+//     ConnectionID() for binding, queueing, and registry lookups.
 //   - EventID is the platform's native event id, used as the de-duplication key
 //     by the inbound de-dup table (T6). Adapters must NOT generate their own
 //     uuid here — re-deliveries from the platform's replay buffer must collide
@@ -101,19 +103,27 @@ const (
 //     re-marshal it without a re-encoding step (and so a nil payload is
 //     trivially distinguishable from an empty object).
 type InboundEvent struct {
-	ChannelName    string
-	EventID        string
-	Type           EventType
-	ChatID         string
-	ChatType       ChatType
-	SenderID       string
-	SenderName     string
-	Text           string
-	MessageID      string
-	RuntimeEventID string `json:"-"`
-	Intent         InboundIntent
-	Attachments    []AttachmentInfo
-	RawPayload     json.RawMessage
+	ChannelName         string
+	ChannelConnectionID string
+	EventID             string
+	Type                EventType
+	ChatID              string
+	ChatType            ChatType
+	SenderID            string
+	SenderName          string
+	Text                string
+	MessageID           string
+	RuntimeEventID      string `json:"-"`
+	Intent              InboundIntent
+	Attachments         []AttachmentInfo
+	RawPayload          json.RawMessage
+}
+
+func (e InboundEvent) ConnectionID() string {
+	if e.ChannelConnectionID != "" {
+		return e.ChannelConnectionID
+	}
+	return e.ChannelName
 }
 
 // AttachmentInfo carries metadata about a non-text attachment (image, file,
@@ -170,17 +180,22 @@ type OutboundMessage struct {
 	Text   string
 }
 
-// OutboundCardMessage is a structured (rich) message to be sent to the
-// external channel. Card rendering is T16 — for the M1 MVP, adapters return
-// ErrNotImplemented from SendCard; the field shape is fixed now to avoid
-// churning every channel adapter when card support lands.
-type OutboundCardMessage struct {
+// OutboundRichMessage is a platform-neutral rich message to be sent to the
+// external channel. The channel layer owns the intent ("title + markdown body"),
+// while each adapter owns the platform-specific rendering (Feishu interactive
+// card, Slack Block Kit, WeCom markdown/template card, etc.).
+type OutboundRichMessage struct {
 	Target OutboundTarget
 	// ChatID is the legacy chat target. New call sites should set Target.
 	ChatID string
 	Title  string
 	Body   string
 }
+
+// OutboundCardMessage is kept as the current public name used throughout the
+// outbound pipeline. Its contract is now platform-neutral; Body must be human
+// markdown/plain text, not pre-rendered provider JSON.
+type OutboundCardMessage = OutboundRichMessage
 
 // SendResult carries the outcome of a Send or SendCard call.
 //
@@ -197,11 +212,12 @@ type SendResult struct {
 	Retryable         bool
 }
 
-// Channel is the abstraction over an external messaging platform. Each
-// adapter (Feishu, Slack, Discord, …) implements this interface so the rest
-// of the server can treat channels uniformly.
+// Channel is the abstraction over an external messaging platform connection.
+// Provider adapters (Feishu, Slack, Discord, …) implement this interface; the
+// runtime manager may wrap them so Name() becomes the configured connection id
+// used by the registry.
 type Channel interface {
-	// Name returns the human-readable channel identifier (e.g. "feishu").
+	// Name returns the registry identifier for this channel instance.
 	Name() string
 
 	// Connect establishes the connection to the external platform. For
@@ -217,8 +233,8 @@ type Channel interface {
 	// Send delivers a plain text message.
 	Send(ctx context.Context, msg OutboundMessage) (SendResult, error)
 
-	// SendCard delivers a structured / rich message. Adapters that have not
-	// yet implemented cards return ErrNotImplemented (T16).
+	// SendCard delivers a structured / rich message. Adapters render the
+	// platform-neutral message into their native format internally.
 	SendCard(ctx context.Context, msg OutboundCardMessage) (SendResult, error)
 
 	// Events returns a receive-only channel of inbound events. The channel

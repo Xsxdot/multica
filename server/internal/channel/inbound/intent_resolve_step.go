@@ -37,14 +37,15 @@ func (*intentResolveStep) Name() string { return "intent-recog" }
 
 func (s *intentResolveStep) Run(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
 	req := chintent.IntentRequest{
-		WorkspaceID: s.lookupWorkspaceID(ctx, evt),
-		Text:        evt.Text,
-		Channel:     evt.ChannelName,
-		ChatID:      evt.ChatID,
-		ChatType:    string(evt.ChatType),
-		SenderID:    evt.SenderID,
-		SenderName:  evt.SenderName,
-		SourceHint:  chintent.IntentSource(evt.Intent.Source),
+		WorkspaceID:  s.lookupWorkspaceID(ctx, evt),
+		Text:         evt.Text,
+		Channel:      evt.ChannelName,
+		ConnectionID: evt.ConnectionID(),
+		ChatID:       evt.ChatID,
+		ChatType:     string(evt.ChatType),
+		SenderID:     evt.SenderID,
+		SenderName:   evt.SenderName,
+		SourceHint:   chintent.IntentSource(evt.Intent.Source),
 	}
 
 	for _, r := range s.resolvers {
@@ -71,7 +72,7 @@ func (s *intentResolveStep) lookupWorkspaceID(ctx context.Context, evt port.Inbo
 	if s.workspace == nil {
 		return ""
 	}
-	wsID, err := s.workspace.LookupPrimaryWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
+	wsID, err := s.workspace.LookupPrimaryWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil || !wsID.Valid {
 		return ""
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -28,43 +29,39 @@ var validNotifValues = map[string]bool{
 	"muted": true,
 }
 
-// validNotifChannelKeys is the set of supported channel names in
-// preferences.channel.*.
-var validNotifChannelKeys = map[string]bool{
-	"feishu": true,
-}
+var validNotifChannelKeyRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
-// validNotifFeishuKeys is the set of boolean keys under
-// preferences.channel.feishu.*. Each key represents one event family that
-// can be muted for the Feishu push integration.
+// validNotifChannelEventKeys is the set of boolean keys under
+// preferences.channel.<provider>.*. Each key represents one event family that
+// can be muted for a channel provider.
 //
 // Default semantics: a key absent from the map is treated as enabled
 // (`true`). This is the contract the API, the UI, and any downstream
 // consumer (e.g. the T13 Subscriber) MUST share — see
-// IsFeishuEventEnabled below for the canonical predicate.
-var validNotifFeishuKeys = map[string]bool{
+// IsChannelEventEnabled below for the canonical predicate.
+var validNotifChannelEventKeys = map[string]bool{
 	"issues":        true,
 	"comments":      true,
 	"mentions":      true,
 	"slash_aliases": true,
 }
 
-// IsFeishuEventEnabled returns true when the Feishu integration should
+// IsChannelEventEnabled returns true when the provider integration should
 // deliver an event of the given key for the given preferences map.
 // Missing keys mean "enabled" (default-on); explicit false means muted.
 //
 // Centralising this rule prevents drift between the UI ("missing == on")
 // and any downstream worker that might otherwise treat missing as off.
-func IsFeishuEventEnabled(prefs map[string]any, key string) bool {
+func IsChannelEventEnabled(prefs map[string]any, provider, key string) bool {
 	channel, ok := prefs["channel"].(map[string]any)
 	if !ok {
 		return true
 	}
-	feishu, ok := channel["feishu"].(map[string]any)
+	providerPrefs, ok := channel[provider].(map[string]any)
 	if !ok {
 		return true
 	}
-	v, ok := feishu[key]
+	v, ok := providerPrefs[key]
 	if !ok {
 		return true
 	}
@@ -77,11 +74,17 @@ func IsFeishuEventEnabled(prefs map[string]any, key string) bool {
 	return b
 }
 
+// IsFeishuEventEnabled is kept for older call-sites and tests. New channel
+// code should use IsChannelEventEnabled with the provider key from the
+// connection.
+func IsFeishuEventEnabled(prefs map[string]any, key string) bool {
+	return IsChannelEventEnabled(prefs, "feishu", key)
+}
+
 // validatePreferences checks that every key in the incoming preferences map is
 // valid. Flat keys must have string values ("all"/"muted"). The special
 // "channel" key must be an object whose sub-keys are recognised channel
-// names; each channel's leaf values must match that channel's value
-// schema (booleans for feishu).
+// names; each channel's leaf values must match the channel value schema.
 func validatePreferences(prefs map[string]any) error {
 	for k, v := range prefs {
 		if k == "channel" {
@@ -90,37 +93,35 @@ func validatePreferences(prefs map[string]any) error {
 				return fmt.Errorf("channel must be an object, got %T", v)
 			}
 			for ck, cv := range channelMap {
-				if !validNotifChannelKeys[ck] {
+				if !validNotifChannelKeyRe.MatchString(ck) {
 					return fmt.Errorf("invalid channel: %s", ck)
 				}
-				if ck == "feishu" {
-					feishuMap, ok := cv.(map[string]any)
-					if !ok {
-						return fmt.Errorf("channel.feishu must be an object, got %T", cv)
+				providerMap, ok := cv.(map[string]any)
+				if !ok {
+					return fmt.Errorf("channel.%s must be an object, got %T", ck, cv)
+				}
+				for fk, fv := range providerMap {
+					if fk == "slash_aliases" {
+						aliases, ok := fv.(map[string]any)
+						if !ok {
+							return fmt.Errorf("channel.%s.slash_aliases must be an object, got %T", ck, fv)
+						}
+						for ak, av := range aliases {
+							if _, ok := av.(string); !ok {
+								return fmt.Errorf("channel.%s.slash_aliases.%s must be a string, got %T", ck, ak, av)
+							}
+						}
+						continue
 					}
-					for fk, fv := range feishuMap {
-						if fk == "slash_aliases" {
-							aliases, ok := fv.(map[string]any)
-							if !ok {
-								return fmt.Errorf("channel.feishu.slash_aliases must be an object, got %T", fv)
-							}
-							for ak, av := range aliases {
-								if _, ok := av.(string); !ok {
-									return fmt.Errorf("channel.feishu.slash_aliases.%s must be a string, got %T", ak, av)
-								}
-							}
-							continue
-						}
-						if !validNotifFeishuKeys[fk] {
-							return fmt.Errorf("invalid channel.feishu key: %s", fk)
-						}
-						// C3: leaf values must be bool. Letting strings,
-						// numbers, or nested objects through here lets the
-						// JSONB column accumulate garbage that downstream
-						// readers (T13 Subscriber) cannot type-assert.
-						if _, ok := fv.(bool); !ok {
-							return fmt.Errorf("channel.feishu.%s must be a bool, got %T", fk, fv)
-						}
+					if !validNotifChannelEventKeys[fk] {
+						return fmt.Errorf("invalid channel.%s key: %s", ck, fk)
+					}
+					// C3: leaf values must be bool. Letting strings,
+					// numbers, or nested objects through here lets the
+					// JSONB column accumulate garbage that downstream
+					// readers cannot type-assert.
+					if _, ok := fv.(bool); !ok {
+						return fmt.Errorf("channel.%s.%s must be a bool, got %T", ck, fk, fv)
 					}
 				}
 			}
@@ -168,42 +169,38 @@ func mergePreferences(existing, incoming map[string]any) map[string]any {
 				newChannel[ek] = ev
 			}
 			for ck, cv := range incomingChannel {
-				if ck == "feishu" {
-					incomingFeishu, ok := cv.(map[string]any)
-					if !ok {
-						newChannel[ck] = cv
-						continue
-					}
-					// R2: same defensive copy at the feishu level.
-					existingFeishu, _ := newChannel[ck].(map[string]any)
-					newFeishu := make(map[string]any, len(existingFeishu)+len(incomingFeishu))
-					for fk, fv := range existingFeishu {
-						newFeishu[fk] = fv
-					}
-					for fk, fv := range incomingFeishu {
-						if fk == "slash_aliases" {
-							incomingAliases, ok := fv.(map[string]any)
-							if !ok {
-								newFeishu[fk] = fv
-								continue
-							}
-							existingAliases, _ := newFeishu[fk].(map[string]any)
-							mergedAliases := make(map[string]any, len(existingAliases)+len(incomingAliases))
-							for k, v := range existingAliases {
-								mergedAliases[k] = v
-							}
-							for k, v := range incomingAliases {
-								mergedAliases[k] = v
-							}
-							newFeishu[fk] = mergedAliases
+				incomingProvider, ok := cv.(map[string]any)
+				if !ok {
+					newChannel[ck] = cv
+					continue
+				}
+				// R2: same defensive copy at the provider level.
+				existingProvider, _ := newChannel[ck].(map[string]any)
+				newProvider := make(map[string]any, len(existingProvider)+len(incomingProvider))
+				for fk, fv := range existingProvider {
+					newProvider[fk] = fv
+				}
+				for fk, fv := range incomingProvider {
+					if fk == "slash_aliases" {
+						incomingAliases, ok := fv.(map[string]any)
+						if !ok {
+							newProvider[fk] = fv
 							continue
 						}
-						newFeishu[fk] = fv
+						existingAliases, _ := newProvider[fk].(map[string]any)
+						mergedAliases := make(map[string]any, len(existingAliases)+len(incomingAliases))
+						for k, v := range existingAliases {
+							mergedAliases[k] = v
+						}
+						for k, v := range incomingAliases {
+							mergedAliases[k] = v
+						}
+						newProvider[fk] = mergedAliases
+						continue
 					}
-					newChannel[ck] = newFeishu
-				} else {
-					newChannel[ck] = cv
+					newProvider[fk] = fv
 				}
+				newChannel[ck] = newProvider
 			}
 			merged[k] = newChannel
 		} else {

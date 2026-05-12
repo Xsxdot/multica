@@ -178,6 +178,7 @@ type ChannelBindToken struct {
 	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
 	ConsumedAt       pgtype.Timestamptz `json:"consumed_at"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	ConnectionID     string             `json:"connection_id"`
 }
 
 type ChannelChatBinding struct {
@@ -192,6 +193,20 @@ type ChannelChatBinding struct {
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	DefaultProjectID pgtype.UUID        `json:"default_project_id"`
+	ConnectionID     string             `json:"connection_id"`
+}
+
+type ChannelConnection struct {
+	ID          string             `json:"id"`
+	Provider    string             `json:"provider"`
+	DisplayName string             `json:"display_name"`
+	Enabled     bool               `json:"enabled"`
+	IsDefault   bool               `json:"is_default"`
+	Config      []byte             `json:"config"`
+	Status      string             `json:"status"`
+	LastError   pgtype.Text        `json:"last_error"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
 type ChannelConversation struct {
@@ -204,6 +219,7 @@ type ChannelConversation struct {
 	ActiveSince      pgtype.Timestamptz `json:"active_since"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ConnectionID     string             `json:"connection_id"`
 }
 
 type ChannelInboundEvent struct {
@@ -240,16 +256,18 @@ type ChannelInboundEvent struct {
 	LastError           pgtype.Text        `json:"last_error"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	ConnectionID        string             `json:"connection_id"`
 }
 
 type ChannelInboundEventDedup struct {
-	Provider    string             `json:"provider"`
-	EventID     string             `json:"event_id"`
-	ProcessedAt pgtype.Timestamptz `json:"processed_at"`
-	Status      string             `json:"status"`
-	Attempts    int32              `json:"attempts"`
-	LastError   pgtype.Text        `json:"last_error"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	Provider     string             `json:"provider"`
+	EventID      string             `json:"event_id"`
+	ProcessedAt  pgtype.Timestamptz `json:"processed_at"`
+	Status       string             `json:"status"`
+	Attempts     int32              `json:"attempts"`
+	LastError    pgtype.Text        `json:"last_error"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	ConnectionID string             `json:"connection_id"`
 }
 
 type ChannelOutboundFailure struct {
@@ -267,6 +285,7 @@ type ChannelOutboundFailure struct {
 	LastAttemptedAt      pgtype.Timestamptz `json:"last_attempted_at"`
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+	ConnectionID         string             `json:"connection_id"`
 }
 
 type ChannelOutboundNotification struct {
@@ -285,6 +304,7 @@ type ChannelOutboundNotification struct {
 	LastError            pgtype.Text        `json:"last_error"`
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+	ConnectionID         string             `json:"connection_id"`
 }
 
 type ChannelUserBinding struct {
@@ -295,6 +315,7 @@ type ChannelUserBinding struct {
 	ExternalName   pgtype.Text        `json:"external_name"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ConnectionID   string             `json:"connection_id"`
 }
 
 type ChatMessage struct {

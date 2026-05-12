@@ -56,13 +56,13 @@ func NewDBBindingStore(pool DBPool) *DBBindingStore {
 	return &DBBindingStore{pool: pool}
 }
 
-// FindUserID looks up the Multica user_id for a given (provider, external_user_id) pair.
+// FindUserID looks up the Multica user_id for a given channel connection and external_user_id pair.
 // Returns ErrNotBound when no row exists; wraps real DB errors for fail-closed behavior.
-func (s *DBBindingStore) FindUserID(ctx context.Context, provider, externalUserID string) (pgtype.UUID, error) {
+func (s *DBBindingStore) FindUserID(ctx context.Context, connectionID, externalUserID string) (pgtype.UUID, error) {
 	var uid pgtype.UUID
 	err := s.pool.QueryRow(ctx,
-		`SELECT user_id FROM channel_user_binding WHERE provider = $1 AND external_user_id = $2`,
-		provider, externalUserID,
+		`SELECT user_id FROM channel_user_binding WHERE connection_id = $1 AND external_user_id = $2`,
+		connectionID, externalUserID,
 	).Scan(&uid)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return pgtype.UUID{}, ErrNotBound
@@ -73,13 +73,13 @@ func (s *DBBindingStore) FindUserID(ctx context.Context, provider, externalUserI
 	return uid, nil
 }
 
-// ResolveExternalID looks up the external_user_id for a given (provider, user_id) pair.
+// ResolveExternalID looks up the external_user_id for a given channel connection and user_id pair.
 // Returns ErrNotBound when no row exists; wraps real DB errors for fail-closed behavior.
-func (s *DBBindingStore) ResolveExternalID(ctx context.Context, provider, userID string) (string, error) {
+func (s *DBBindingStore) ResolveExternalID(ctx context.Context, connectionID, userID string) (string, error) {
 	var extID string
 	err := s.pool.QueryRow(ctx,
-		`SELECT external_user_id FROM channel_user_binding WHERE provider = $1 AND user_id = $2`,
-		provider, userID,
+		`SELECT external_user_id FROM channel_user_binding WHERE connection_id = $1 AND user_id = $2`,
+		connectionID, userID,
 	).Scan(&extID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotBound
@@ -110,6 +110,28 @@ type Subscriber struct {
 	failures    FailureRecorder
 	outbox      NotificationEnqueuer
 	activeFunc  func() bool
+}
+
+type channelConnectionNamer interface {
+	ConnectionID() string
+}
+
+type channelProviderNamer interface {
+	ProviderName() string
+}
+
+func channelConnectionID(ch port.Channel) string {
+	if named, ok := ch.(channelConnectionNamer); ok && named.ConnectionID() != "" {
+		return named.ConnectionID()
+	}
+	return ch.Name()
+}
+
+func channelProviderName(ch port.Channel) string {
+	if named, ok := ch.(channelProviderNamer); ok && named.ProviderName() != "" {
+		return named.ProviderName()
+	}
+	return ch.Name()
 }
 
 // NewSubscriber creates an outbound subscriber. Call Start() to begin
@@ -342,40 +364,42 @@ func statusLabel(status string) string {
 // sends a card message.
 func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body string) {
 	ctx := context.Background()
+	providerName := channelProviderName(s.channel)
+	connectionID := channelConnectionID(s.channel)
 
 	// R4: parseUUID returns error; log+drop on invalid UUID.
 	wsUUID, err := parseUUID(workspaceID)
 	if err != nil {
-		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "parse_workspace_id", false)
+		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "parse_workspace_id", false)
 		slog.Error("outbound: invalid workspace id", "workspace_id", workspaceID, "error", err)
 		return
 	}
 	userUUID, err := parseUUID(userID)
 	if err != nil {
-		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "parse_user_id", false)
+		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "parse_user_id", false)
 		slog.Error("outbound: invalid user id", "user_id", userID, "error", err)
 		return
 	}
 
-	enabled, err := s.prefs.GetChannelPref(ctx, wsUUID, userUUID, s.channel.Name(), eventKind)
+	enabled, err := s.prefs.GetChannelPref(ctx, wsUUID, userUUID, providerName, eventKind)
 	if err != nil {
-		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "pref_lookup", false)
+		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "pref_lookup", false)
 		slog.Error("outbound: check pref", "user_id", userID, "error", err)
 		return
 	}
 	if !enabled {
-		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "muted")
+		channelmetrics.M.RecordOutboundCard(providerName, eventKind, "muted")
 		return // muted
 	}
 
 	// R5: Inline ResolveExternalID (removed wrapper).
-	externalUserID, err := s.bindings.ResolveExternalID(ctx, s.channel.Name(), userID)
+	externalUserID, err := s.bindings.ResolveExternalID(ctx, connectionID, userID)
 	if err != nil {
 		if errors.Is(err, ErrNotBound) {
-			channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "unbound")
+			channelmetrics.M.RecordOutboundCard(providerName, eventKind, "unbound")
 			return // TC-out-2: unbound -> drop silently
 		}
-		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "binding_lookup", false)
+		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "binding_lookup", false)
 		slog.Error("outbound: resolve binding", "user_id", userID, "error", err)
 		return
 	}
@@ -389,49 +413,51 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 
 	if s.outbox != nil {
 		if err := s.outbox.EnqueueNotification(ctx, NotificationEnqueueRequest{
-			Provider:             s.channel.Name(),
+			Provider:             providerName,
+			ConnectionID:         connectionID,
 			EventKind:            eventKind,
 			TargetUserID:         userUUID,
 			TargetExternalUserID: externalUserID,
 			Title:                title,
 			Body:                 body,
 		}); err != nil {
-			channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "outbox_enqueue", true)
+			channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "outbox_enqueue", true)
 			slog.Error("outbound: enqueue notification", "user_id", userID, "error", err)
 			return
 		}
-		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "queued")
-		channelmetrics.M.RecordOutboundOutbox(s.channel.Name(), "queued", 1)
+		channelmetrics.M.RecordOutboundCard(providerName, eventKind, "queued")
+		channelmetrics.M.RecordOutboundOutbox(providerName, "queued", 1)
 		return
 	}
 
 	if !s.isActive() {
-		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "inactive")
+		channelmetrics.M.RecordOutboundCard(providerName, eventKind, "inactive")
 		return
 	}
 
 	if s.aggregator != nil {
 		s.aggregator.AddWithMeta(externalUserID, card, AggregationMeta{
-			Provider:     s.channel.Name(),
+			Provider:     providerName,
+			ConnectionID: connectionID,
 			EventKind:    eventKind,
 			TargetUserID: userUUID,
 		}, false)
-		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "queued")
+		channelmetrics.M.RecordOutboundCard(providerName, eventKind, "queued")
 		return
 	}
 
 	result, err := s.channel.SendCard(ctx, card)
 	if err != nil {
-		channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "error")
-		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "send", result.Retryable)
+		channelmetrics.M.RecordOutboundCard(providerName, eventKind, "error")
+		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "send", result.Retryable)
 		if result.Retryable {
-			s.recordFailure(ctx, eventKind, userUUID, externalUserID, card, err)
+			s.recordFailure(ctx, providerName, connectionID, eventKind, userUUID, externalUserID, card, err)
 		}
 		slog.Error("outbound: send card", "user_id", userID, "error", err)
 		return
 	}
 
-	channelmetrics.M.RecordOutboundCard(s.channel.Name(), eventKind, "sent")
+	channelmetrics.M.RecordOutboundCard(providerName, eventKind, "sent")
 	slog.Info("outbound: card sent",
 		"user_id", userID,
 		"platform_msg_id", result.PlatformMessageID,
@@ -475,7 +501,7 @@ func extractStringSlice(v any) []string {
 	return nil
 }
 
-func (s *Subscriber) recordFailure(ctx context.Context, eventKind string, targetUserID pgtype.UUID, externalUserID string, card port.OutboundCardMessage, sendErr error) {
+func (s *Subscriber) recordFailure(ctx context.Context, providerName, connectionID, eventKind string, targetUserID pgtype.UUID, externalUserID string, card port.OutboundCardMessage, sendErr error) {
 	if s.failures == nil {
 		return
 	}
@@ -484,19 +510,20 @@ func (s *Subscriber) recordFailure(ctx context.Context, eventKind string, target
 		Body:  card.Body,
 	})
 	if err != nil {
-		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "retry_payload_marshal", true)
+		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "retry_payload_marshal", true)
 		slog.Error("outbound: marshal retry payload", "user_id", uuidStr(targetUserID), "error", err)
 		return
 	}
 	if _, err := s.failures.InsertOutboundFailure(ctx, db.InsertOutboundFailureParams{
-		Provider:             s.channel.Name(),
+		Provider:             providerName,
+		ConnectionID:         connectionID,
 		EventKind:            eventKind,
 		TargetUserID:         targetUserID,
 		TargetExternalUserID: pgtype.Text{String: externalUserID, Valid: externalUserID != ""},
 		Payload:              payload,
 		MaxAttempts:          3,
 	}); err != nil {
-		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "failure_insert", true)
+		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "failure_insert", true)
 		slog.Error("outbound: insert failure",
 			"user_id", uuidStr(targetUserID),
 			"event_kind", eventKind,
@@ -504,7 +531,7 @@ func (s *Subscriber) recordFailure(ctx context.Context, eventKind string, target
 			"error", err,
 		)
 	} else {
-		channelmetrics.M.RecordOutboundFailure(s.channel.Name(), eventKind, "failure_recorded", true)
+		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "failure_recorded", true)
 	}
 }
 

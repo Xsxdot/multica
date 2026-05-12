@@ -63,6 +63,7 @@ type pendingCard struct {
 // wait in the aggregation buffer.
 type AggregationMeta struct {
 	Provider     string
+	ConnectionID string
 	EventKind    string
 	TargetUserID pgtype.UUID
 }

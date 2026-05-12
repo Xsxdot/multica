@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 
+	feishucard "github.com/multica-ai/multica/server/internal/channel/adapter/feishu/card"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 )
 
@@ -79,39 +80,25 @@ func (a *Adapter) sendText(ctx context.Context, msg port.OutboundMessage) (port.
 	}, nil
 }
 
-// sendCard is the SendCard entry point for the adapter. It forwards the
-// pre-rendered card JSON in OutboundCardMessage.Body to the Feishu OpenAPI
-// with msg_type "interactive".
-//
-// Contract: Body is REQUIRED to contain card JSON produced by the
-// feishu/card sub-package (e.g. card.IssueCard(...).Render()). The
-// adapter intentionally does NOT wrap plain text into a card schema —
-// that would push the card vocabulary into the port layer (and the
-// outbound aggregator T14) and fork the schema across the codebase. By
-// keeping the contract narrow, the port DTO stays platform-agnostic and
-// the card schema lives in exactly one place.
-//
-// Empty Body is treated as a programmer bug (4xx-class); we surface a
-// non-retryable error so the outbound queue drops the message instead of
-// looping.
+// sendCard is the SendCard entry point for the adapter. It renders the
+// platform-neutral OutboundCardMessage into Feishu's interactive-card JSON and
+// sends it with msg_type "interactive". The rest of the channel runtime should
+// never construct Feishu card JSON directly.
 func (a *Adapter) sendCard(ctx context.Context, msg port.OutboundCardMessage) (port.SendResult, error) {
 	receiveIDType, receiveID := resolveReceiveID(msg.Target, msg.ChatID)
 	if receiveID == "" {
 		return port.SendResult{Retryable: false}, errors.New("feishu: OutboundCardMessage target is empty")
 	}
-	if msg.Body == "" {
-		// The card-rendering contract requires callers to pass the
-		// JSON output of card.*Card.Render(); empty Body means the
-		// caller skipped that step. Fail fast so the symptom shows
-		// up at the call site, not as an opaque Feishu 400 later.
-		return port.SendResult{Retryable: false}, errors.New("feishu: OutboundCardMessage.Body is empty; expected pre-rendered card JSON")
+	content, err := renderCard(msg.Title, msg.Body)
+	if err != nil {
+		return port.SendResult{Retryable: false}, fmt.Errorf("feishu: render card: %w", err)
 	}
 
 	resp, err := a.client.SendMessage(ctx, SendRequest{
 		ReceiveIDType: receiveIDType,
 		ReceiveID:     receiveID,
 		MsgType:       "interactive",
-		Content:       msg.Body,
+		Content:       content,
 	})
 	if err != nil {
 		return port.SendResult{Retryable: isRetryable(err)}, fmt.Errorf("feishu: send card: %w", err)
@@ -120,6 +107,14 @@ func (a *Adapter) sendCard(ctx context.Context, msg port.OutboundCardMessage) (p
 		PlatformMessageID: resp.MessageID,
 		Retryable:         false,
 	}, nil
+}
+
+func renderCard(title, body string) (string, error) {
+	card := feishucard.NewCard(title, "blue")
+	if body != "" {
+		card.AddMarkdown(body)
+	}
+	return card.Render()
 }
 
 func resolveReceiveID(target port.OutboundTarget, legacyChatID string) (string, string) {

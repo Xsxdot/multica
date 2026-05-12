@@ -8,27 +8,29 @@ export type NotificationGroupKey =
 export type NotificationGroupValue = "all" | "muted";
 
 /**
- * Feishu channel preferences. Each key represents one event family the
- * Feishu push integration can mute.
+ * Provider channel preferences. Each key represents one event family a
+ * channel provider integration can mute.
  *
  * Default semantics: a key absent from this object is treated as
  * **enabled** (default-on). Only an explicit `false` mutes the family.
  * The backend (`server/internal/handler/notification_preference.go`)
- * holds the same contract — see `IsFeishuEventEnabled` for the
- * canonical predicate. Use {@link isFeishuEventEnabled} below from
- * any frontend code rather than re-implementing the rule.
+ * holds the same contract — see `IsChannelEventEnabled` for the
+ * canonical predicate. Use {@link isChannelEventEnabled} below from
+ * frontend code rather than re-implementing the rule.
  */
-export interface FeishuChannelPreferences {
+export interface ChannelNotificationPreferences {
   issues?: boolean;
   comments?: boolean;
   mentions?: boolean;
+  slash_aliases?: Record<string, string>;
 }
 
-export type FeishuEventKey = keyof FeishuChannelPreferences;
+export type ChannelEventKey = "issues" | "comments" | "mentions";
 
-export interface ChannelPreferences {
-  feishu?: FeishuChannelPreferences;
-}
+export type ChannelPreferences = Record<string, ChannelNotificationPreferences | undefined>;
+
+export type FeishuChannelPreferences = ChannelNotificationPreferences;
+export type FeishuEventKey = ChannelEventKey;
 
 export interface NotificationPreferences {
   assignments?: NotificationGroupValue;
@@ -45,17 +47,25 @@ export interface NotificationPreferenceResponse {
 }
 
 /**
- * Returns true when the Feishu integration should deliver an event of
+ * Returns true when a provider integration should deliver an event of
  * the given key for the given preferences. Missing keys mean
  * "enabled" (default-on); explicit false means muted.
  *
  * Centralising this rule keeps the UI and any future frontend consumer
  * aligned with the backend default semantics.
  */
+export function isChannelEventEnabled(
+  prefs: NotificationPreferences | undefined | null,
+  provider: string,
+  key: ChannelEventKey,
+): boolean {
+  const value = prefs?.channel?.[provider]?.[key];
+  return value !== false;
+}
+
 export function isFeishuEventEnabled(
   prefs: NotificationPreferences | undefined | null,
   key: FeishuEventKey,
 ): boolean {
-  const value = prefs?.channel?.feishu?.[key];
-  return value !== false;
+  return isChannelEventEnabled(prefs, "feishu", key);
 }

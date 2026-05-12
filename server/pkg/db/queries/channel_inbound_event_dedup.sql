@@ -14,7 +14,7 @@
 -- so sqlc has a non-system column to bind to; the actual signal is
 -- presence-vs-absence of a row, which the caller wraps into a
 -- bool (inserted) at the dao boundary.
-INSERT INTO channel_inbound_event_dedup (provider, event_id)
-VALUES ($1, $2)
-ON CONFLICT (provider, event_id) DO NOTHING
+INSERT INTO channel_inbound_event_dedup (provider, connection_id, event_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (connection_id, event_id) DO NOTHING
 RETURNING processed_at;

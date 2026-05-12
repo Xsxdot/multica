@@ -20,6 +20,7 @@ import (
 type ChannelBindingResponse struct {
 	ID               string  `json:"id"`
 	Provider         string  `json:"provider"`
+	ConnectionID     string  `json:"connection_id"`
 	ExternalChatID   string  `json:"external_chat_id"`
 	ChatType         string  `json:"chat_type"`
 	ExternalChatName *string `json:"external_chat_name"`
@@ -27,6 +28,41 @@ type ChannelBindingResponse struct {
 	IsPrimary        bool    `json:"is_primary"`
 	BoundByUserID    string  `json:"bound_by_user_id"`
 	CreatedAt        string  `json:"created_at"`
+}
+
+type ChannelConnectionResponse struct {
+	ID           string                       `json:"id"`
+	Provider     string                       `json:"provider"`
+	DisplayName  string                       `json:"display_name"`
+	Enabled      bool                         `json:"enabled"`
+	IsDefault    bool                         `json:"is_default"`
+	Status       string                       `json:"status"`
+	LastError    *string                      `json:"last_error"`
+	CreatedAt    string                       `json:"created_at"`
+	UpdatedAt    string                       `json:"updated_at"`
+	ConfigSchema []ChannelConfigFieldResponse `json:"config_schema"`
+}
+
+type ChannelConfigFieldResponse struct {
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	Required bool   `json:"required"`
+	Secret   bool   `json:"secret"`
+}
+
+func connectionToResponse(c db.ChannelConnection, schema []ChannelConfigFieldResponse) ChannelConnectionResponse {
+	return ChannelConnectionResponse{
+		ID:           c.ID,
+		Provider:     c.Provider,
+		DisplayName:  c.DisplayName,
+		Enabled:      c.Enabled,
+		IsDefault:    c.IsDefault,
+		Status:       c.Status,
+		LastError:    textToPtr(c.LastError),
+		CreatedAt:    timestampToString(c.CreatedAt),
+		UpdatedAt:    timestampToString(c.UpdatedAt),
+		ConfigSchema: schema,
+	}
 }
 
 // canManageBinding returns true if the member is allowed to manage (delete or
@@ -41,6 +77,7 @@ func bindingToResponse(b db.ChannelChatBinding) ChannelBindingResponse {
 	return ChannelBindingResponse{
 		ID:               uuidToString(b.ID),
 		Provider:         b.Provider,
+		ConnectionID:     b.ConnectionID,
 		ExternalChatID:   b.ExternalChatID,
 		ChatType:         b.ChatType,
 		ExternalChatName: textToPtr(b.ExternalChatName),
@@ -51,10 +88,10 @@ func bindingToResponse(b db.ChannelChatBinding) ChannelBindingResponse {
 	}
 }
 
-func lockChannelBindingProvider(ctx context.Context, tx pgx.Tx, workspaceID pgtype.UUID, provider string) error {
+func lockChannelBindingProvider(ctx context.Context, tx pgx.Tx, workspaceID pgtype.UUID, connectionID string) error {
 	_, err := tx.Exec(ctx, `
 		SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2))
-	`, workspaceID, provider)
+	`, workspaceID, connectionID)
 	return err
 }
 
@@ -88,8 +125,8 @@ func (h *Handler) CreateChannelUserBinding(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Token == "" || req.Provider == "" {
-		writeError(w, http.StatusBadRequest, "token and provider are required")
+	if req.Token == "" {
+		writeError(w, http.StatusBadRequest, "token is required")
 		return
 	}
 
@@ -110,7 +147,7 @@ func (h *Handler) CreateChannelUserBinding(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
-	if peeked.Provider != req.Provider {
+	if req.Provider != "" && peeked.Provider != req.Provider {
 		writeError(w, http.StatusBadRequest, "provider mismatch")
 		return
 	}
@@ -137,18 +174,18 @@ func (h *Handler) CreateChannelUserBinding(w http.ResponseWriter, r *http.Reques
 
 	if _, err := tx.Exec(r.Context(), `
 		DELETE FROM channel_user_binding
-		WHERE provider = $1 AND user_id = $2 AND external_user_id <> $3
-	`, token.Provider, parseUUID(userID), token.ExternalUserID); err != nil {
+		WHERE connection_id = $1 AND user_id = $2 AND external_user_id <> $3
+	`, token.ConnectionID, parseUUID(userID), token.ExternalUserID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to replace existing user binding")
 		return
 	}
 
 	_, err = tx.Exec(r.Context(), `
-		INSERT INTO channel_user_binding (provider, external_user_id, user_id)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (provider, external_user_id)
+		INSERT INTO channel_user_binding (provider, connection_id, external_user_id, user_id)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (connection_id, external_user_id)
 		DO UPDATE SET user_id = EXCLUDED.user_id, updated_at = now()
-	`, token.Provider, token.ExternalUserID, parseUUID(userID))
+	`, token.Provider, token.ConnectionID, token.ExternalUserID, parseUUID(userID))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create user binding")
 		return
@@ -160,9 +197,32 @@ func (h *Handler) CreateChannelUserBinding(w http.ResponseWriter, r *http.Reques
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"provider":         token.Provider,
+		"connection_id":    token.ConnectionID,
 		"external_user_id": token.ExternalUserID,
 		"user_id":          userID,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/channel-connections
+// ---------------------------------------------------------------------------
+
+func (h *Handler) ListChannelConnections(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireUserID(w, r); !ok {
+		return
+	}
+
+	connections, err := h.Queries.ListChannelConnections(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list channel connections")
+		return
+	}
+
+	resp := make([]ChannelConnectionResponse, 0, len(connections))
+	for _, connection := range connections {
+		resp = append(resp, connectionToResponse(connection, h.ChannelProviderSchemas[connection.Provider]))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"connections": resp})
 }
 
 // ---------------------------------------------------------------------------
@@ -207,8 +267,8 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Token == "" || req.Provider == "" {
-		writeError(w, http.StatusBadRequest, "token and provider are required")
+	if req.Token == "" {
+		writeError(w, http.StatusBadRequest, "token is required")
 		return
 	}
 
@@ -247,7 +307,7 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if peeked.Provider != req.Provider {
+	if req.Provider != "" && peeked.Provider != req.Provider {
 		writeError(w, http.StatusBadRequest, "provider mismatch")
 		return
 	}
@@ -259,13 +319,13 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid chat binding token")
 		return
 	}
-	if !userOwnsExternalChannelIdentity(r, tx, member.UserID, peeked.Provider, peeked.ExternalUserID) {
+	if !userOwnsExternalChannelIdentity(r, tx, member.UserID, peeked.ConnectionID, peeked.ExternalUserID) {
 		writeError(w, http.StatusForbidden, "binding link belongs to another channel user")
 		return
 	}
 
 	existing, err := qtx.GetChannelChatBindingByProviderAndChatID(r.Context(), db.GetChannelChatBindingByProviderAndChatIDParams{
-		Provider:       peeked.Provider,
+		ConnectionID:   peeked.ConnectionID,
 		ExternalChatID: peeked.ExternalChatID.String,
 	})
 	if err == nil {
@@ -306,13 +366,13 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := lockChannelBindingProvider(r.Context(), tx, member.WorkspaceID, req.Provider); err != nil {
+	if err := lockChannelBindingProvider(r.Context(), tx, member.WorkspaceID, token.ConnectionID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
 		return
 	}
 
 	existing, err = qtx.GetChannelChatBindingByProviderAndChatID(r.Context(), db.GetChannelChatBindingByProviderAndChatIDParams{
-		Provider:       peeked.Provider,
+		ConnectionID:   peeked.ConnectionID,
 		ExternalChatID: peeked.ExternalChatID.String,
 	})
 	if err == nil {
@@ -343,13 +403,13 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lock and check existing bindings for this workspace/provider
+	// Lock and check existing bindings for this workspace/channel connection
 	// to determine is_primary
 	if _, err := tx.Exec(r.Context(), `
 		SELECT id FROM channel_chat_binding
-		WHERE workspace_id = $1 AND provider = $2
+		WHERE workspace_id = $1 AND connection_id = $2
 		FOR UPDATE
-	`, member.WorkspaceID, req.Provider); err != nil {
+	`, member.WorkspaceID, token.ConnectionID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
 		return
 	}
@@ -361,14 +421,15 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	}
 	providerCount := 0
 	for _, b := range existingBindings {
-		if b.Provider == req.Provider {
+		if b.ConnectionID == token.ConnectionID {
 			providerCount++
 		}
 	}
 	isPrimary := providerCount == 0
 
 	binding, err := qtx.CreateChannelChatBinding(r.Context(), db.CreateChannelChatBindingParams{
-		Provider:         req.Provider,
+		Provider:         token.Provider,
+		ConnectionID:     token.ConnectionID,
 		ExternalChatID:   token.ExternalChatID.String,
 		ChatType:         normalizeChannelChatType(token.ExternalChatType.String),
 		WorkspaceID:      member.WorkspaceID,
@@ -396,12 +457,12 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 
 func userOwnsExternalChannelIdentity(r *http.Request, exec interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}, userID pgtype.UUID, provider, externalUserID string) bool {
+}, userID pgtype.UUID, connectionID, externalUserID string) bool {
 	var count int
 	err := exec.QueryRow(r.Context(), `
 		SELECT count(*) FROM channel_user_binding
-		WHERE provider = $1 AND external_user_id = $2 AND user_id = $3
-	`, provider, externalUserID, userID).Scan(&count)
+		WHERE connection_id = $1 AND external_user_id = $2 AND user_id = $3
+	`, connectionID, externalUserID, userID).Scan(&count)
 	return err == nil && count > 0
 }
 
@@ -458,15 +519,15 @@ func (h *Handler) DeleteChannelBinding(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = tx.Rollback(r.Context()) }()
 	qtx := db.New(tx)
 
-	if err := lockChannelBindingProvider(r.Context(), tx, binding.WorkspaceID, binding.Provider); err != nil {
+	if err := lockChannelBindingProvider(r.Context(), tx, binding.WorkspaceID, binding.ConnectionID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
 		return
 	}
 	if _, err := tx.Exec(r.Context(), `
 		SELECT id FROM channel_chat_binding
-		WHERE workspace_id = $1 AND provider = $2
+		WHERE workspace_id = $1 AND connection_id = $2
 		FOR UPDATE
-	`, binding.WorkspaceID, binding.Provider); err != nil {
+	`, binding.WorkspaceID, binding.ConnectionID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
 		return
 	}
@@ -490,7 +551,7 @@ func (h *Handler) DeleteChannelBinding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Prevent deleting the primary binding while other bindings for the
-	// same provider still exist — zero bindings is a valid state, but
+	// same channel connection still exist — zero bindings is a valid state, but
 	// orphaned non-primary bindings are not.
 	if binding.IsPrimary {
 		bindings, err := qtx.ListChannelChatBindings(r.Context(), binding.WorkspaceID)
@@ -500,7 +561,7 @@ func (h *Handler) DeleteChannelBinding(w http.ResponseWriter, r *http.Request) {
 		}
 		providerBindingCount := 0
 		for _, b := range bindings {
-			if b.Provider == binding.Provider {
+			if b.ConnectionID == binding.ConnectionID {
 				providerBindingCount++
 			}
 		}
@@ -567,7 +628,7 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Prevent unsetting the only primary binding for a workspace/provider
+	// Prevent unsetting the only primary binding for a workspace/channel connection.
 	if !req.IsPrimary && binding.IsPrimary {
 		bindings, err := h.Queries.ListChannelChatBindings(r.Context(), binding.WorkspaceID)
 		if err != nil {
@@ -576,7 +637,7 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 		}
 		primaryCount := 0
 		for _, b := range bindings {
-			if b.Provider == binding.Provider && b.IsPrimary {
+			if b.ConnectionID == binding.ConnectionID && b.IsPrimary {
 				primaryCount++
 			}
 		}
@@ -597,19 +658,19 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 	if req.IsPrimary {
 		if _, err := tx.Exec(r.Context(), `
 			SELECT id FROM channel_chat_binding
-			WHERE workspace_id = $1 AND provider = $2
+			WHERE workspace_id = $1 AND connection_id = $2
 			FOR UPDATE
-		`, binding.WorkspaceID, binding.Provider); err != nil {
+		`, binding.WorkspaceID, binding.ConnectionID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
 			return
 		}
 	}
 
-	// If setting primary, first clear existing primary for this workspace/provider
+	// If setting primary, first clear existing primary for this workspace/channel connection.
 	if req.IsPrimary {
 		if err := qtx.ClearPrimaryBindingsForWorkspaceProvider(r.Context(), db.ClearPrimaryBindingsForWorkspaceProviderParams{
-			WorkspaceID: binding.WorkspaceID,
-			Provider:    binding.Provider,
+			WorkspaceID:  binding.WorkspaceID,
+			ConnectionID: binding.ConnectionID,
 		}); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to clear primary bindings")
 			return

@@ -1,10 +1,10 @@
 -- name: CreateChannelBindToken :one
 INSERT INTO channel_bind_token (
-    token_hash, purpose, provider, external_user_id,
+    token_hash, purpose, provider, connection_id, external_user_id,
     external_chat_id, external_chat_type, external_chat_name,
     expires_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING *;
 
 -- name: ConsumeChannelBindToken :one

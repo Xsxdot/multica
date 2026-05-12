@@ -17,7 +17,7 @@ UPDATE channel_bind_token SET
 WHERE token_hash = $1
   AND consumed_at IS NULL
   AND expires_at > now()
-RETURNING token_hash, purpose, provider, external_user_id, external_chat_id, external_chat_type, external_chat_name, expires_at, consumed_at, created_at
+RETURNING token_hash, purpose, provider, external_user_id, external_chat_id, external_chat_type, external_chat_name, expires_at, consumed_at, created_at, connection_id
 `
 
 func (q *Queries) ConsumeChannelBindToken(ctx context.Context, tokenHash []byte) (ChannelBindToken, error) {
@@ -34,24 +34,26 @@ func (q *Queries) ConsumeChannelBindToken(ctx context.Context, tokenHash []byte)
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.ConnectionID,
 	)
 	return i, err
 }
 
 const createChannelBindToken = `-- name: CreateChannelBindToken :one
 INSERT INTO channel_bind_token (
-    token_hash, purpose, provider, external_user_id,
+    token_hash, purpose, provider, connection_id, external_user_id,
     external_chat_id, external_chat_type, external_chat_name,
     expires_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING token_hash, purpose, provider, external_user_id, external_chat_id, external_chat_type, external_chat_name, expires_at, consumed_at, created_at
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING token_hash, purpose, provider, external_user_id, external_chat_id, external_chat_type, external_chat_name, expires_at, consumed_at, created_at, connection_id
 `
 
 type CreateChannelBindTokenParams struct {
 	TokenHash        []byte             `json:"token_hash"`
 	Purpose          string             `json:"purpose"`
 	Provider         string             `json:"provider"`
+	ConnectionID     string             `json:"connection_id"`
 	ExternalUserID   string             `json:"external_user_id"`
 	ExternalChatID   pgtype.Text        `json:"external_chat_id"`
 	ExternalChatType pgtype.Text        `json:"external_chat_type"`
@@ -64,6 +66,7 @@ func (q *Queries) CreateChannelBindToken(ctx context.Context, arg CreateChannelB
 		arg.TokenHash,
 		arg.Purpose,
 		arg.Provider,
+		arg.ConnectionID,
 		arg.ExternalUserID,
 		arg.ExternalChatID,
 		arg.ExternalChatType,
@@ -82,6 +85,7 @@ func (q *Queries) CreateChannelBindToken(ctx context.Context, arg CreateChannelB
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.ConnectionID,
 	)
 	return i, err
 }
@@ -97,7 +101,7 @@ func (q *Queries) DeleteExpiredChannelBindTokens(ctx context.Context) error {
 }
 
 const getChannelBindToken = `-- name: GetChannelBindToken :one
-SELECT token_hash, purpose, provider, external_user_id, external_chat_id, external_chat_type, external_chat_name, expires_at, consumed_at, created_at FROM channel_bind_token
+SELECT token_hash, purpose, provider, external_user_id, external_chat_id, external_chat_type, external_chat_name, expires_at, consumed_at, created_at, connection_id FROM channel_bind_token
 WHERE token_hash = $1
 `
 
@@ -115,6 +119,7 @@ func (q *Queries) GetChannelBindToken(ctx context.Context, tokenHash []byte) (Ch
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.ConnectionID,
 	)
 	return i, err
 }

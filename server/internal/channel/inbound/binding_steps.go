@@ -33,8 +33,8 @@ func (s *userIdentityBindStep) Run(ctx context.Context, evt port.InboundEvent) (
 	var userID pgtype.UUID
 	err := s.pool.QueryRow(ctx, `
 		SELECT user_id FROM channel_user_binding
-		WHERE provider = $1 AND external_user_id = $2
-	`, evt.ChannelName, evt.SenderID).Scan(&userID)
+		WHERE connection_id = $1 AND external_user_id = $2
+	`, evt.ConnectionID(), evt.SenderID).Scan(&userID)
 	if err == nil {
 		return evt, DecisionContinue, nil
 	}
@@ -42,21 +42,21 @@ func (s *userIdentityBindStep) Run(ctx context.Context, evt port.InboundEvent) (
 		return evt, DecisionContinue, fmt.Errorf("identity-bind: lookup binding: %w", err)
 	}
 
-	token, err := s.issuer.IssueUserIdentity(ctx, evt.ChannelName, evt.SenderID)
+	token, err := s.issuer.IssueUserIdentityForConnection(ctx, evt.ChannelName, evt.ConnectionID(), evt.SenderID)
 	if err != nil {
 		return evt, DecisionContinue, fmt.Errorf("identity-bind: issue token: %w", err)
 	}
-	ch, err := s.registry.Get(evt.ChannelName)
+	ch, err := s.registry.Get(evt.ConnectionID())
 	if err != nil {
 		return evt, DecisionContinue, fmt.Errorf("identity-bind: get channel: %w", err)
 	}
-	body := fmt.Sprintf("点击绑定 Multica 账号（10 分钟内有效）: %s", ChannelBindURL("user", token.Plaintext))
+	body := fmt.Sprintf("点击绑定 Multica 账号（10 分钟内有效）: %s", ChannelBindURL("user", token.Plaintext, evt.ChannelName, evt.ConnectionID()))
 	if _, err := ch.Send(ctx, port.OutboundMessage{
 		Target: port.TargetUser(evt.SenderID),
 		Text:   body,
 	}); err != nil {
 		if evt.ChatType == port.ChatTypeGroup {
-			notice := "请先和机器人私聊或开启机器人私聊权限后，在群里重新发送 /bind。"
+			notice := "请先和机器人私聊或开启机器人私聊权限后，在群聊里重新发送 /bind。"
 			if _, sendErr := ch.Send(ctx, port.OutboundMessage{
 				Target: port.TargetChat(evt.ChatID),
 				Text:   notice,
@@ -86,7 +86,7 @@ func (s *chatBindCommandStep) Run(ctx context.Context, evt port.InboundEvent) (p
 		return evt, DecisionContinue, nil
 	}
 
-	ch, err := s.registry.Get(evt.ChannelName)
+	ch, err := s.registry.Get(evt.ConnectionID())
 	if err != nil {
 		return evt, DecisionContinue, fmt.Errorf("chat-bind-command: get channel: %w", err)
 	}
@@ -94,7 +94,7 @@ func (s *chatBindCommandStep) Run(ctx context.Context, evt port.InboundEvent) (p
 	if evt.ChatType == port.ChatTypeDirect {
 		if _, err := ch.Send(ctx, port.OutboundMessage{
 			Target: port.TargetUser(evt.SenderID),
-			Text:   "请在飞书群里发送 /bind 绑定群。",
+			Text:   "请在群聊里发送 /bind 绑定当前会话。",
 		}); err != nil {
 			return evt, DecisionContinue, fmt.Errorf("chat-bind-command: send direct notice: %w", err)
 		}
@@ -114,6 +114,7 @@ func (s *chatBindCommandStep) Run(ctx context.Context, evt port.InboundEvent) (p
 
 	token, err := s.issuer.IssueChatWorkspace(ctx, binding.IssueChatWorkspaceReq{
 		Provider:                evt.ChannelName,
+		ConnectionID:            evt.ConnectionID(),
 		InitiatorExternalUserID: evt.SenderID,
 		ExternalChatID:          chatInfo.ID,
 		ExternalChatType:        string(chatInfo.Type),
@@ -123,7 +124,7 @@ func (s *chatBindCommandStep) Run(ctx context.Context, evt port.InboundEvent) (p
 		return evt, DecisionContinue, fmt.Errorf("chat-bind-command: issue token: %w", err)
 	}
 
-	body := fmt.Sprintf("点击绑定当前群到 Multica 工作区（10 分钟内有效）: %s", ChannelBindURL("chat", token.Plaintext))
+	body := fmt.Sprintf("点击绑定当前会话到 Multica 工作区（10 分钟内有效）: %s", ChannelBindURL("chat", token.Plaintext, evt.ChannelName, evt.ConnectionID()))
 	if _, err := ch.Send(ctx, port.OutboundMessage{
 		Target: port.TargetUser(evt.SenderID),
 		Text:   body,
@@ -140,12 +141,21 @@ func (s *chatBindCommandStep) Run(ctx context.Context, evt port.InboundEvent) (p
 	return evt, DecisionSkip, nil
 }
 
-func ChannelBindURL(kind, token string) string {
+func ChannelBindURL(kind, token, provider, connectionID string) string {
 	baseURL := strings.TrimRight(os.Getenv("MULTICA_APP_URL"), "/")
 	if baseURL == "" {
 		baseURL = "http://localhost:3000"
 	}
-	return fmt.Sprintf("%s/bind?kind=%s&token=%s", baseURL, url.QueryEscape(kind), url.QueryEscape(token))
+	values := url.Values{}
+	values.Set("kind", kind)
+	values.Set("token", token)
+	if provider != "" {
+		values.Set("provider", provider)
+	}
+	if connectionID != "" {
+		values.Set("connection_id", connectionID)
+	}
+	return fmt.Sprintf("%s/bind?%s", baseURL, values.Encode())
 }
 
 type DBChatBindingLookup struct {
@@ -160,7 +170,7 @@ func (l *DBChatBindingLookup) LookupWorkspaceID(ctx context.Context, channelName
 	var wsID pgtype.UUID
 	err := l.pool.QueryRow(ctx, `
 		SELECT workspace_id FROM channel_chat_binding
-		WHERE provider = $1 AND external_chat_id = $2
+		WHERE connection_id = $1 AND external_chat_id = $2
 	`, channelName, chatID).Scan(&wsID)
 	return wsID, err
 }
@@ -169,7 +179,7 @@ func (l *DBChatBindingLookup) LookupPrimaryWorkspaceID(ctx context.Context, chan
 	var wsID pgtype.UUID
 	err := l.pool.QueryRow(ctx, `
 		SELECT workspace_id FROM channel_chat_binding
-		WHERE provider = $1 AND external_chat_id = $2 AND is_primary = TRUE
+		WHERE connection_id = $1 AND external_chat_id = $2 AND is_primary = TRUE
 	`, channelName, chatID).Scan(&wsID)
 	return wsID, err
 }
@@ -178,7 +188,7 @@ func (l *DBChatBindingLookup) ResolveUserID(ctx context.Context, channelName, ex
 	var userID pgtype.UUID
 	err := l.pool.QueryRow(ctx, `
 		SELECT user_id FROM channel_user_binding
-		WHERE provider = $1 AND external_user_id = $2
+		WHERE connection_id = $1 AND external_user_id = $2
 	`, channelName, externalUserID).Scan(&userID)
 	return userID, err
 }
@@ -231,7 +241,7 @@ func (r *DBUserInfoResolver) Resolve(ctx context.Context, channelName, externalU
 		SELECT u.id, u.name
 		FROM channel_user_binding b
 		JOIN "user" u ON u.id = b.user_id
-		WHERE b.provider = $1 AND b.external_user_id = $2
+		WHERE b.connection_id = $1 AND b.external_user_id = $2
 	`, channelName, externalUserID).Scan(&userID, &name)
 	if err != nil {
 		return ResolvedUser{}, err

@@ -22,6 +22,7 @@ const (
 
 type NotificationEnqueueRequest struct {
 	Provider             string
+	ConnectionID         string
 	EventKind            string
 	TargetUserID         pgtype.UUID
 	TargetExternalUserID string
@@ -36,6 +37,7 @@ type NotificationEnqueuer interface {
 type OutboxNotification struct {
 	ID                   pgtype.UUID
 	Provider             string
+	ConnectionID         string
 	EventKind            string
 	TargetUserID         pgtype.UUID
 	TargetExternalUserID string
@@ -60,7 +62,8 @@ func NewDBNotificationStore(db outboxDB) *DBNotificationStore {
 }
 
 func (s *DBNotificationStore) EnqueueNotification(ctx context.Context, req NotificationEnqueueRequest) error {
-	if strings.TrimSpace(req.Provider) == "" || strings.TrimSpace(req.EventKind) == "" ||
+	if strings.TrimSpace(req.Provider) == "" || strings.TrimSpace(req.ConnectionID) == "" ||
+		strings.TrimSpace(req.EventKind) == "" ||
 		strings.TrimSpace(req.TargetExternalUserID) == "" || !req.TargetUserID.Valid {
 		return errors.New("outbox: invalid notification enqueue request")
 	}
@@ -70,12 +73,13 @@ func (s *DBNotificationStore) EnqueueNotification(ctx context.Context, req Notif
 	}
 	const q = `
 INSERT INTO channel_outbound_notification (
-    provider, event_kind, target_user_id, target_external_user_id,
+    provider, connection_id, event_kind, target_user_id, target_external_user_id,
     title, body, aggregation_due_at
-) VALUES ($1, $2, $3, $4, $5, $6, now() + $7::interval)
+) VALUES ($1, $2, $3, $4, $5, $6, $7, now() + $8::interval)
 `
 	_, err := s.db.Exec(ctx, q,
 		req.Provider,
+		req.ConnectionID,
 		req.EventKind,
 		req.TargetUserID,
 		req.TargetExternalUserID,
@@ -101,7 +105,7 @@ WHERE id IN (
     LIMIT $1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, provider, event_kind, target_user_id, target_external_user_id,
+RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
           title, body, attempts, max_attempts
 `
 	return s.queryNotifications(ctx, q, limit)
@@ -121,7 +125,7 @@ WHERE id IN (
     LIMIT $1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, provider, event_kind, target_user_id, target_external_user_id,
+RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
           title, body, attempts, max_attempts
 `
 	return s.queryNotifications(ctx, q, limit, pgInterval(staleAfter))
@@ -140,6 +144,7 @@ func (s *DBNotificationStore) queryNotifications(ctx context.Context, q string, 
 		if err := rows.Scan(
 			&n.ID,
 			&n.Provider,
+			&n.ConnectionID,
 			&n.EventKind,
 			&n.TargetUserID,
 			&n.TargetExternalUserID,
@@ -284,6 +289,7 @@ func (w *OutboxWorker) processBatch(ctx context.Context) {
 
 type notificationGroup struct {
 	provider       string
+	connectionID   string
 	eventKind      string
 	externalUserID string
 	targetUserID   pgtype.UUID
@@ -293,11 +299,12 @@ type notificationGroup struct {
 func groupNotifications(rows []OutboxNotification) []notificationGroup {
 	byKey := map[string]*notificationGroup{}
 	for _, n := range rows {
-		key := n.Provider + "\x00" + n.EventKind + "\x00" + n.TargetExternalUserID + "\x00" + uuidStr(n.TargetUserID)
+		key := n.ConnectionID + "\x00" + n.EventKind + "\x00" + n.TargetExternalUserID + "\x00" + uuidStr(n.TargetUserID)
 		g := byKey[key]
 		if g == nil {
 			g = &notificationGroup{
 				provider:       n.Provider,
+				connectionID:   n.ConnectionID,
 				eventKind:      n.EventKind,
 				externalUserID: n.TargetExternalUserID,
 				targetUserID:   n.TargetUserID,
@@ -329,7 +336,7 @@ func (w *OutboxWorker) processGroup(ctx context.Context, g notificationGroup) {
 		payload.Title = g.items[0].Title
 		payload.Body = g.items[0].Body
 	}
-	err := w.sender.SendCard(ctx, g.provider, g.externalUserID, payload)
+	err := w.sender.SendCard(ctx, g.connectionID, g.externalUserID, payload)
 	if err == nil {
 		channelmetrics.M.RecordOutboundOutbox(g.provider, "sent", len(g.items))
 		if markErr := w.store.MarkSent(ctx, ids); markErr != nil {

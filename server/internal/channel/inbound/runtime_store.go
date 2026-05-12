@@ -115,9 +115,9 @@ func NewDBInboundEventStore(pool *pgxpool.Pool) *DBInboundEventStore {
 func ConversationKey(evt port.InboundEvent) string {
 	chatType := normalizedRuntimeChatType(evt)
 	if chatType == string(port.ChatTypeDirect) {
-		return strings.Join([]string{evt.ChannelName, chatType, evt.SenderID}, ":")
+		return strings.Join([]string{evt.ConnectionID(), chatType, evt.SenderID}, ":")
 	}
-	return strings.Join([]string{evt.ChannelName, chatType, evt.ChatID, evt.SenderID}, ":")
+	return strings.Join([]string{evt.ConnectionID(), chatType, evt.ChatID, evt.SenderID}, ":")
 }
 
 func ControlMessageBypassesBackpressure(evt port.InboundEvent) bool {
@@ -131,6 +131,10 @@ func (s *DBInboundEventStore) AcceptEvent(ctx context.Context, evt port.InboundE
 	}
 	if evt.ChannelName == "" || evt.EventID == "" {
 		return AcceptResult{}, errors.New("inbound accept: missing channel_name or event_id")
+	}
+	connectionID := evt.ConnectionID()
+	if connectionID == "" {
+		return AcceptResult{}, errors.New("inbound accept: missing connection_id")
 	}
 	key := ConversationKey(evt)
 	if key == "" {
@@ -146,8 +150,8 @@ func (s *DBInboundEventStore) AcceptEvent(ctx context.Context, evt port.InboundE
 	var existingID, existingStatus string
 	err = tx.QueryRow(ctx, `
 SELECT id::text, status FROM channel_inbound_event
-WHERE provider = $1 AND event_id = $2
-`, evt.ChannelName, evt.EventID).Scan(&existingID, &existingStatus)
+WHERE connection_id = $1 AND event_id = $2
+`, connectionID, evt.EventID).Scan(&existingID, &existingStatus)
 	if err == nil {
 		return AcceptResult{EventID: existingID, Duplicate: true}, tx.Commit(ctx)
 	}
@@ -183,9 +187,9 @@ WHERE status IN ('queued', 'processing', 'waiting_agent', 'waiting_user')
 	if err := tx.QueryRow(ctx, `
 SELECT COALESCE(active_event_id::text, '')
 FROM channel_conversation
-WHERE provider = $1 AND conversation_key = $2
+WHERE connection_id = $1 AND conversation_key = $2
 FOR UPDATE
-`, evt.ChannelName, key).Scan(&activeID); err != nil {
+`, connectionID, key).Scan(&activeID); err != nil {
 		return AcceptResult{}, err
 	}
 	if activeID != "" {
@@ -194,7 +198,7 @@ FOR UPDATE
 			return AcceptResult{}, err
 		}
 		if terminal {
-			if err := clearConversationActive(ctx, tx, evt.ChannelName, key, activeID); err != nil {
+			if err := clearConversationActive(ctx, tx, connectionID, key, activeID); err != nil {
 				return AcceptResult{}, err
 			}
 			activeID = ""
@@ -202,7 +206,7 @@ FOR UPDATE
 			if err := markDeadTx(ctx, tx, activeID, "user clarification timed out"); err != nil {
 				return AcceptResult{}, err
 			}
-			if err := clearConversationActive(ctx, tx, evt.ChannelName, key, activeID); err != nil {
+			if err := clearConversationActive(ctx, tx, connectionID, key, activeID); err != nil {
 				return AcceptResult{}, err
 			}
 			activeID = ""
@@ -242,10 +246,10 @@ WHERE id = $1
 	var depth int
 	if err := tx.QueryRow(ctx, `
 SELECT count(*) FROM channel_inbound_event
-WHERE provider = $1
+WHERE connection_id = $1
   AND conversation_key = $2
   AND status IN ('queued', 'processing', 'waiting_agent', 'waiting_user')
-`, evt.ChannelName, key).Scan(&depth); err != nil {
+`, connectionID, key).Scan(&depth); err != nil {
 		return AcceptResult{}, err
 	}
 
@@ -282,7 +286,7 @@ func (s *DBInboundEventStore) ClaimNext(ctx context.Context, workerID string) (*
 SELECT e.id::text
 FROM channel_inbound_event e
 JOIN channel_conversation c
-  ON c.provider = e.provider
+  ON c.connection_id = e.connection_id
  AND c.conversation_key = e.conversation_key
 WHERE e.status = 'queued'
   AND e.next_attempt_at <= now()
@@ -305,7 +309,7 @@ SET active_event_id = e.id,
     updated_at = now()
 FROM channel_inbound_event e
 WHERE e.id = $1
-  AND c.provider = e.provider
+  AND c.connection_id = e.connection_id
   AND c.conversation_key = e.conversation_key
 `, id); err != nil {
 		return nil, err
@@ -553,7 +557,7 @@ func (s *DBInboundEventStore) LookupChatContext(ctx context.Context, channelName
 	err := s.pool.QueryRow(ctx, `
 SELECT workspace_id::text, COALESCE(default_project_id::text, '')
 FROM channel_chat_binding
-WHERE provider = $1 AND external_chat_id = $2
+WHERE connection_id = $1 AND external_chat_id = $2
 `, channelName, chatID).Scan(&out.WorkspaceID, &out.DefaultProjectID)
 	return out, err
 }
@@ -640,14 +644,14 @@ FOR UPDATE SKIP LOCKED
 func upsertConversation(ctx context.Context, tx pgx.Tx, evt port.InboundEvent, key string) error {
 	chatType := normalizedRuntimeChatType(evt)
 	_, err := tx.Exec(ctx, `
-INSERT INTO channel_conversation (provider, conversation_key, chat_id, chat_type, sender_external_id)
-VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (provider, conversation_key) DO UPDATE SET
+INSERT INTO channel_conversation (provider, connection_id, conversation_key, chat_id, chat_type, sender_external_id)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (connection_id, conversation_key) DO UPDATE SET
     chat_id = EXCLUDED.chat_id,
     chat_type = EXCLUDED.chat_type,
     sender_external_id = EXCLUDED.sender_external_id,
     updated_at = now()
-`, evt.ChannelName, key, evt.ChatID, chatType, evt.SenderID)
+`, evt.ChannelName, evt.ConnectionID(), key, evt.ChatID, chatType, evt.SenderID)
 	return err
 }
 
@@ -659,16 +663,16 @@ func insertInboundEvent(ctx context.Context, tx pgx.Tx, evt port.InboundEvent, k
 	var id string
 	err = tx.QueryRow(ctx, `
 INSERT INTO channel_inbound_event (
-    provider, event_id, event_type, conversation_key, chat_id, chat_type,
+    provider, connection_id, event_id, event_type, conversation_key, chat_id, chat_type,
     sender_external_id, sender_name, message_id, text, canonical_event,
     raw_payload, status, phase
 ) VALUES (
-    $1, $2, $3, $4, $5, $6,
-    $7, $8, $9, $10, $11,
-    $12, $13, $14
+    $1, $2, $3, $4, $5, $6, $7,
+    $8, $9, $10, $11, $12,
+    $13, $14, $15
 )
 RETURNING id::text
-`, evt.ChannelName, evt.EventID, string(evt.Type), key, evt.ChatID, normalizedRuntimeChatType(evt),
+`, evt.ChannelName, evt.ConnectionID(), evt.EventID, string(evt.Type), key, evt.ChatID, normalizedRuntimeChatType(evt),
 		evt.SenderID, evt.SenderName, evt.MessageID, evt.Text, canonical, raw, status, phase).Scan(&id)
 	return id, err
 }
@@ -690,12 +694,13 @@ func loadInboundEventRecord(ctx context.Context, q interface {
 		waitTaskID       string
 		workspaceID      string
 		defaultProjectID string
+		connectionID     string
 	)
 	err := q.QueryRow(ctx, `
 SELECT id::text, canonical_event, status, phase, conversation_key,
        COALESCE(wait_kind, ''), COALESCE(wait_task_id::text, ''),
        COALESCE(workspace_id::text, ''), COALESCE(default_project_id::text, ''),
-       attempts, max_attempts, updated_at
+       attempts, max_attempts, updated_at, connection_id
 FROM channel_inbound_event
 WHERE id = $1
 `, id).Scan(
@@ -711,12 +716,16 @@ WHERE id = $1
 		&rec.Attempts,
 		&rec.MaxAttempts,
 		&rec.UpdatedAt,
+		&connectionID,
 	)
 	if err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(canonical, &rec.Event); err != nil {
 		return nil, err
+	}
+	if rec.Event.ChannelConnectionID == "" {
+		rec.Event.ChannelConnectionID = connectionID
 	}
 	rec.Event.RuntimeEventID = rec.ID
 	rec.WaitKind = waitKind
@@ -772,16 +781,16 @@ func combineClarification(original, clarification string) string {
 	return original + "\n\n用户补充：" + clarification
 }
 
-func clearConversationActive(ctx context.Context, tx pgx.Tx, provider, key, activeID string) error {
+func clearConversationActive(ctx context.Context, tx pgx.Tx, connectionID, key, activeID string) error {
 	_, err := tx.Exec(ctx, `
 UPDATE channel_conversation
 SET active_event_id = NULL,
     active_since = NULL,
     updated_at = now()
-WHERE provider = $1
+WHERE connection_id = $1
   AND conversation_key = $2
   AND active_event_id = $3
-`, provider, key, activeID)
+`, connectionID, key, activeID)
 	return err
 }
 
@@ -793,7 +802,7 @@ SET active_event_id = NULL,
     updated_at = now()
 FROM channel_inbound_event e
 WHERE e.id = $1
-  AND c.provider = e.provider
+  AND c.connection_id = e.connection_id
   AND c.conversation_key = e.conversation_key
   AND c.active_event_id = e.id
 `, id)

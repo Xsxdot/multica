@@ -78,6 +78,7 @@ type IssueResult struct {
 
 type IssueChatWorkspaceReq struct {
 	Provider                string
+	ConnectionID            string
 	InitiatorExternalUserID string
 	ExternalChatID          string
 	ExternalChatType        string
@@ -105,17 +106,29 @@ func (i *TokenIssuer) Issue(ctx context.Context, provider, externalUserID string
 }
 
 func (i *TokenIssuer) IssueUserIdentity(ctx context.Context, provider, externalUserID string) (IssueResult, error) {
+	return i.IssueUserIdentityForConnection(ctx, provider, provider, externalUserID)
+}
+
+func (i *TokenIssuer) IssueUserIdentityForConnection(ctx context.Context, provider, connectionID, externalUserID string) (IssueResult, error) {
+	if connectionID == "" {
+		connectionID = provider
+	}
 	return i.issue(ctx, db.CreateChannelBindTokenParams{
 		Purpose:        PurposeUserIdentity,
 		Provider:       provider,
+		ConnectionID:   connectionID,
 		ExternalUserID: externalUserID,
 	})
 }
 
 func (i *TokenIssuer) IssueChatWorkspace(ctx context.Context, req IssueChatWorkspaceReq) (IssueResult, error) {
+	if req.ConnectionID == "" {
+		req.ConnectionID = req.Provider
+	}
 	return i.issue(ctx, db.CreateChannelBindTokenParams{
 		Purpose:          PurposeChatWorkspace,
 		Provider:         req.Provider,
+		ConnectionID:     req.ConnectionID,
 		ExternalUserID:   req.InitiatorExternalUserID,
 		ExternalChatID:   pgtype.Text{String: req.ExternalChatID, Valid: req.ExternalChatID != ""},
 		ExternalChatType: pgtype.Text{String: req.ExternalChatType, Valid: req.ExternalChatType != ""},
@@ -139,6 +152,7 @@ func (i *TokenIssuer) issue(ctx context.Context, params db.CreateChannelBindToke
 		TokenHash:        params.TokenHash,
 		Purpose:          params.Purpose,
 		Provider:         params.Provider,
+		ConnectionID:     params.ConnectionID,
 		ExternalUserID:   params.ExternalUserID,
 		ExternalChatID:   params.ExternalChatID,
 		ExternalChatType: params.ExternalChatType,

@@ -19,6 +19,7 @@ type IntentRequest struct {
 	DefaultProjectID string
 	Text             string
 	Channel          string
+	ConnectionID     string
 	ChatID           string
 	ChatType         string
 	SenderID         string
@@ -129,7 +130,7 @@ func BuildChatIntentPrompt(req IntentRequest) string {
 	b.WriteString("Return only JSON: {\"intent\":\"<IntentKind>\",\"confidence\":0.0-1.0,\"params\":{...}}\n")
 	b.WriteString("Allowed intents: CreateIssue, AddComment, QueryIssue, SetStatus, SetAssignee, SetPriority, SetLabel, Unsupported, Unknown, ASK_CLARIFY.\n")
 	b.WriteString("Destructive operations such as delete must be Unsupported. Do not execute anything.\n\n")
-	fmt.Fprintf(&b, "Workspace ID: %s\nDefault project ID: %s\nChannel: %s\nChat type: %s\nSender: %s (%s)\n\n", req.WorkspaceID, req.DefaultProjectID, req.Channel, req.ChatType, req.SenderName, req.SenderID)
+	fmt.Fprintf(&b, "Workspace ID: %s\nDefault project ID: %s\nChannel: %s\nConnection ID: %s\nChat type: %s\nSender: %s (%s)\n\n", req.WorkspaceID, req.DefaultProjectID, req.Channel, req.ConnectionID, req.ChatType, req.SenderName, req.SenderID)
 	fmt.Fprintf(&b, "User message:\n%s\n", req.Text)
 	return b.String()
 }

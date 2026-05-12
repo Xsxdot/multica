@@ -65,7 +65,8 @@ func (s *FailureRecordingCardSender) recordFailure(externalUserID string, card p
 		eventKind = "aggregated"
 	}
 	if _, err := s.failures.InsertOutboundFailure(context.Background(), db.InsertOutboundFailureParams{
-		Provider:             s.channel.Name(),
+		Provider:             channelProviderName(s.channel),
+		ConnectionID:         firstNonEmpty(meta.ConnectionID, s.channel.Name()),
 		EventKind:            eventKind,
 		TargetUserID:         meta.TargetUserID,
 		TargetExternalUserID: pgtype.Text{String: externalUserID, Valid: externalUserID != ""},
@@ -78,6 +79,15 @@ func (s *FailureRecordingCardSender) recordFailure(externalUserID string, card p
 			"error", err,
 		)
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 var _ CardSender = (*FailureRecordingCardSender)(nil)

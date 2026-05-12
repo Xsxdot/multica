@@ -24,9 +24,9 @@ func (s *RegistryReplySink) Send(ctx context.Context, evt port.InboundEvent, tex
 	if s == nil || s.registry == nil || text == "" {
 		return nil
 	}
-	ch, err := s.registry.Get(evt.ChannelName)
+	ch, err := s.registry.Get(evt.ConnectionID())
 	if err != nil {
-		return fmt.Errorf("channel %q not in registry: %w", evt.ChannelName, err)
+		return fmt.Errorf("channel connection %q not in registry: %w", evt.ConnectionID(), err)
 	}
 	target := port.TargetChat(evt.ChatID)
 	if evt.ChatType == port.ChatTypeDirect {

@@ -280,7 +280,7 @@ func (s *slashStep) maybeSendReply(ctx context.Context, evt port.InboundEvent, t
 	if !s.cfg.SendReplies || s.cfg.Registry == nil {
 		return
 	}
-	ch, err := s.cfg.Registry.Get(evt.ChannelName)
+	ch, err := s.cfg.Registry.Get(evt.ConnectionID())
 	if err != nil {
 		slog.Warn("slash_expand: channel not found for reply",
 			"event_id", evt.EventID,
@@ -303,9 +303,15 @@ func (s *slashStep) maybeSendReply(ctx context.Context, evt port.InboundEvent, t
 	}
 }
 
-// SlashAliasesFromPreferences extracts channel.feishu.slash_aliases string map
-// from notification preferences JSON (best-effort; never panics).
+// SlashAliasesFromPreferences extracts the legacy feishu slash aliases from
+// notification preferences JSON (best-effort; never panics).
 func SlashAliasesFromPreferences(prefs map[string]any) map[string]string {
+	return SlashAliasesFromPreferencesProvider(prefs, "feishu")
+}
+
+// SlashAliasesFromPreferencesProvider extracts channel.<provider>.slash_aliases
+// from notification preferences JSON (best-effort; never panics).
+func SlashAliasesFromPreferencesProvider(prefs map[string]any, provider string) map[string]string {
 	out := map[string]string{}
 	if prefs == nil {
 		return out
@@ -314,11 +320,11 @@ func SlashAliasesFromPreferences(prefs map[string]any) map[string]string {
 	if !ok {
 		return out
 	}
-	fs, ok := ch["feishu"].(map[string]any)
+	providerPrefs, ok := ch[provider].(map[string]any)
 	if !ok {
 		return out
 	}
-	raw, ok := fs["slash_aliases"].(map[string]any)
+	raw, ok := providerPrefs["slash_aliases"].(map[string]any)
 	if !ok {
 		return out
 	}

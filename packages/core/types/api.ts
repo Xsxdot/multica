@@ -126,12 +126,38 @@ export interface PaginationParams {
 export interface ChannelBinding {
   id: string;
   provider: string;
+  connection_id: string;
   external_chat_id: string;
   chat_type: string;
   external_chat_name: string | null;
+  default_project_id?: string | null;
   is_primary: boolean;
   bound_by_user_id: string;
   created_at: string;
+}
+
+export interface ChannelConnection {
+  id: string;
+  provider: string;
+  display_name: string;
+  enabled: boolean;
+  is_default: boolean;
+  status: string;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  config_schema: ChannelConfigField[];
+}
+
+export interface ChannelConfigField {
+  key: string;
+  label: string;
+  required: boolean;
+  secret: boolean;
+}
+
+export interface ListChannelConnectionsResponse {
+  connections: ChannelConnection[];
 }
 
 export interface ListChannelBindingsResponse {
@@ -150,6 +176,7 @@ export interface CreateChannelUserBindingRequest {
 
 export interface ChannelUserBindingResponse {
   provider: string;
+  connection_id: string;
   external_user_id: string;
   user_id: string;
 }

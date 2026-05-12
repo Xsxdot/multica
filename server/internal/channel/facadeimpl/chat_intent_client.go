@@ -148,7 +148,11 @@ func (c *TaskBackedChatIntentClient) authorizeRequester(ctx context.Context, req
 	if c.access == nil {
 		return "", nil
 	}
-	userID, err := c.access.ResolveUserID(ctx, req.Channel, req.SenderID)
+	connectionID := req.ConnectionID
+	if connectionID == "" {
+		connectionID = req.Channel
+	}
+	userID, err := c.access.ResolveUserID(ctx, connectionID, req.SenderID)
 	if err != nil {
 		return "", fmt.Errorf("resolve channel user: %w", err)
 	}

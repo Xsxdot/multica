@@ -75,7 +75,7 @@ func (s *attachmentStep) Run(ctx context.Context, evt port.InboundEvent) (port.I
 		return evt, DecisionContinue, nil
 	}
 
-	wsID, err := s.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ChannelName, evt.ChatID)
+	wsID, err := s.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil {
 		s.sendReply(ctx, evt, fmt.Sprintf("[%s] 处理请求时出错，请稍后重试。", replyInternalError))
 		return evt, DecisionContinue, nil
@@ -87,7 +87,7 @@ func (s *attachmentStep) Run(ctx context.Context, evt port.InboundEvent) (port.I
 		return evt, DecisionContinue, nil
 	}
 
-	user, err := s.cfg.UserResolver.Resolve(ctx, evt.ChannelName, evt.SenderID)
+	user, err := s.cfg.UserResolver.Resolve(ctx, evt.ConnectionID(), evt.SenderID)
 	if err != nil {
 		s.sendReply(ctx, evt, fmt.Sprintf("[%s] 处理请求时出错，请稍后重试。", replyInternalError))
 		return evt, DecisionContinue, nil
@@ -178,7 +178,7 @@ func (s *attachmentStep) sendReply(ctx context.Context, evt port.InboundEvent, t
 	if s.cfg.Registry == nil {
 		return
 	}
-	ch, err := s.cfg.Registry.Get(evt.ChannelName)
+	ch, err := s.cfg.Registry.Get(evt.ConnectionID())
 	if err != nil {
 		slog.Error("attachment: channel not in registry", "channel", evt.ChannelName, "error", err)
 		return

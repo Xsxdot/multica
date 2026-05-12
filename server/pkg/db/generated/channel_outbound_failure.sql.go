@@ -23,7 +23,7 @@ WHERE id IN (
     LIMIT $1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, provider, event_kind, target_user_id, target_external_user_id, payload, status, attempts, max_attempts, next_retry_at, last_error, last_attempted_at, created_at, updated_at
+RETURNING id, provider, event_kind, target_user_id, target_external_user_id, payload, status, attempts, max_attempts, next_retry_at, last_error, last_attempted_at, created_at, updated_at, connection_id
 `
 
 // Atomically claim up to N pending failures: the UPDATE locks rows via
@@ -63,6 +63,7 @@ func (q *Queries) ClaimPendingOutboundFailures(ctx context.Context, limit int32)
 			&i.LastAttemptedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ConnectionID,
 		); err != nil {
 			return nil, err
 		}
@@ -127,7 +128,7 @@ UPDATE channel_outbound_failure SET
     next_retry_at = now() + $3::interval,
     updated_at = now()
 WHERE id = $1
-RETURNING id, provider, event_kind, target_user_id, target_external_user_id, payload, status, attempts, max_attempts, next_retry_at, last_error, last_attempted_at, created_at, updated_at
+RETURNING id, provider, event_kind, target_user_id, target_external_user_id, payload, status, attempts, max_attempts, next_retry_at, last_error, last_attempted_at, created_at, updated_at, connection_id
 `
 
 type IncrementOutboundFailureAttemptsParams struct {
@@ -156,20 +157,22 @@ func (q *Queries) IncrementOutboundFailureAttempts(ctx context.Context, arg Incr
 		&i.LastAttemptedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ConnectionID,
 	)
 	return i, err
 }
 
 const insertOutboundFailure = `-- name: InsertOutboundFailure :one
 INSERT INTO channel_outbound_failure (
-    provider, event_kind, target_user_id, target_external_user_id,
+    provider, connection_id, event_kind, target_user_id, target_external_user_id,
     payload, status, max_attempts
-) VALUES ($1, $2, $3, $4, $5, 'pending', $6)
-RETURNING id, provider, event_kind, target_user_id, target_external_user_id, payload, status, attempts, max_attempts, next_retry_at, last_error, last_attempted_at, created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+RETURNING id, provider, event_kind, target_user_id, target_external_user_id, payload, status, attempts, max_attempts, next_retry_at, last_error, last_attempted_at, created_at, updated_at, connection_id
 `
 
 type InsertOutboundFailureParams struct {
 	Provider             string      `json:"provider"`
+	ConnectionID         string      `json:"connection_id"`
 	EventKind            string      `json:"event_kind"`
 	TargetUserID         pgtype.UUID `json:"target_user_id"`
 	TargetExternalUserID pgtype.Text `json:"target_external_user_id"`
@@ -180,6 +183,7 @@ type InsertOutboundFailureParams struct {
 func (q *Queries) InsertOutboundFailure(ctx context.Context, arg InsertOutboundFailureParams) (ChannelOutboundFailure, error) {
 	row := q.db.QueryRow(ctx, insertOutboundFailure,
 		arg.Provider,
+		arg.ConnectionID,
 		arg.EventKind,
 		arg.TargetUserID,
 		arg.TargetExternalUserID,
@@ -202,6 +206,7 @@ func (q *Queries) InsertOutboundFailure(ctx context.Context, arg InsertOutboundF
 		&i.LastAttemptedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ConnectionID,
 	)
 	return i, err
 }
@@ -213,7 +218,7 @@ UPDATE channel_outbound_failure SET
     last_attempted_at = now(),
     updated_at = now()
 WHERE id = $1
-RETURNING id, provider, event_kind, target_user_id, target_external_user_id, payload, status, attempts, max_attempts, next_retry_at, last_error, last_attempted_at, created_at, updated_at
+RETURNING id, provider, event_kind, target_user_id, target_external_user_id, payload, status, attempts, max_attempts, next_retry_at, last_error, last_attempted_at, created_at, updated_at, connection_id
 `
 
 type MarkOutboundFailureDeadParams struct {
@@ -240,6 +245,7 @@ func (q *Queries) MarkOutboundFailureDead(ctx context.Context, arg MarkOutboundF
 		&i.LastAttemptedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ConnectionID,
 	)
 	return i, err
 }

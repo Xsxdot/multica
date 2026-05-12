@@ -56,7 +56,7 @@ type dedupResp struct {
 	Err      error
 }
 
-func (f *fakeDedupStore) TryRecordInboundEvent(_ context.Context, provider, eventID string) (bool, error) {
+func (f *fakeDedupStore) TryRecordInboundEvent(_ context.Context, provider, _ string, eventID string) (bool, error) {
 	f.calls = append(f.calls, dedupCall{Provider: provider, EventID: eventID})
 	if len(f.responses) == 0 {
 		return false, errors.New("fakeDedupStore: ran out of fixtures (test bug)")
