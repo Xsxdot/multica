@@ -32,17 +32,22 @@ const (
 type IntentKind string
 
 const (
-	IntentCreateIssue IntentKind = "CreateIssue"
-	IntentAddComment  IntentKind = "AddComment"
-	IntentQueryIssue  IntentKind = "QueryIssue"
-	IntentSetStatus   IntentKind = "SetStatus"
-	IntentDelete      IntentKind = "Delete"
-	IntentSetAssignee IntentKind = "SetAssignee"
-	IntentSetPriority IntentKind = "SetPriority"
-	IntentSetLabel    IntentKind = "SetLabel"
-	IntentUnsupported IntentKind = "Unsupported"
-	IntentUnknown     IntentKind = "Unknown"
-	IntentASKClarify  IntentKind = "ASK_CLARIFY"
+	IntentCreateIssue   IntentKind = "CreateIssue"
+	IntentAddComment    IntentKind = "AddComment"
+	IntentQueryIssue    IntentKind = "QueryIssue"
+	IntentIssueDetail   IntentKind = "IssueDetail"
+	IntentIssueTimeline IntentKind = "IssueTimeline"
+	IntentIssueLogs     IntentKind = "IssueLogs"
+	IntentSetStatus     IntentKind = "SetStatus"
+	IntentDelete        IntentKind = "Delete"
+	IntentSetAssignee   IntentKind = "SetAssignee"
+	IntentSetPriority   IntentKind = "SetPriority"
+	IntentSetLabel      IntentKind = "SetLabel"
+	IntentConfirmAction IntentKind = "ConfirmAction"
+	IntentCancelAction  IntentKind = "CancelAction"
+	IntentUnsupported   IntentKind = "Unsupported"
+	IntentUnknown       IntentKind = "Unknown"
+	IntentASKClarify    IntentKind = "ASK_CLARIFY"
 )
 
 // IntentSource identifies how an Intent was recognised.
@@ -197,9 +202,15 @@ type OutboundMessage struct {
 type OutboundRichMessage struct {
 	Target OutboundTarget
 	// ChatID is the legacy chat target. New call sites should set Target.
-	ChatID string
-	Title  string
-	Body   string
+	ChatID  string
+	Title   string
+	Body    string
+	Actions []OutboundAction
+}
+
+type OutboundAction struct {
+	Label string
+	URL   string
 }
 
 // OutboundCardMessage is kept as the current public name used throughout the

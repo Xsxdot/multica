@@ -30,6 +30,13 @@ type CommentFacade interface {
 	AddComment(ctx context.Context, req AddCommentReq) (Comment, error)
 }
 
+type IssueDigestFacade interface {
+	GetIssueDigest(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDigest, error)
+	GetIssueDetail(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDetail, error)
+	GetIssueTimeline(ctx context.Context, workspaceID pgtype.UUID, identifier string, page, pageSize int) (IssueTimelinePage, error)
+	GetIssueLogs(ctx context.Context, workspaceID pgtype.UUID, identifier string, page, pageSize int) (IssueLogPage, error)
+}
+
 // issueFacade is the unexported concrete implementation of IssueFacade. It is
 // kept unexported so callers wire by the interface contract rather than the
 // struct — that way the implementation can be swapped (e.g. for an
@@ -111,6 +118,30 @@ func (f *commentFacade) AddComment(ctx context.Context, req AddCommentReq) (Comm
 	return f.svc.AddComment(ctx, req)
 }
 
+type issueDigestFacade struct {
+	svc IssueDigestService
+}
+
+func NewIssueDigestFacade(svc IssueDigestService) IssueDigestFacade {
+	return &issueDigestFacade{svc: svc}
+}
+
+func (f *issueDigestFacade) GetIssueDigest(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDigest, error) {
+	return f.svc.GetIssueDigest(ctx, workspaceID, identifier)
+}
+
+func (f *issueDigestFacade) GetIssueDetail(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDetail, error) {
+	return f.svc.GetIssueDetail(ctx, workspaceID, identifier)
+}
+
+func (f *issueDigestFacade) GetIssueTimeline(ctx context.Context, workspaceID pgtype.UUID, identifier string, page, pageSize int) (IssueTimelinePage, error) {
+	return f.svc.GetIssueTimeline(ctx, workspaceID, identifier, page, pageSize)
+}
+
+func (f *issueDigestFacade) GetIssueLogs(ctx context.Context, workspaceID pgtype.UUID, identifier string, page, pageSize int) (IssueLogPage, error) {
+	return f.svc.GetIssueLogs(ctx, workspaceID, identifier, page, pageSize)
+}
+
 // attachmentFacade is the unexported concrete implementation of AttachmentFacade.
 type attachmentFacade struct {
 	svc AttachmentService
@@ -130,7 +161,8 @@ func (f *attachmentFacade) UploadIssueAttachment(ctx context.Context, req Upload
 // error at the implementation site (rather than at every caller) if a method
 // signature drifts from the interface.
 var (
-	_ IssueFacade      = (*issueFacade)(nil)
-	_ CommentFacade    = (*commentFacade)(nil)
-	_ AttachmentFacade = (*attachmentFacade)(nil)
+	_ IssueFacade       = (*issueFacade)(nil)
+	_ CommentFacade     = (*commentFacade)(nil)
+	_ IssueDigestFacade = (*issueDigestFacade)(nil)
+	_ AttachmentFacade  = (*attachmentFacade)(nil)
 )

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -178,6 +179,66 @@ type fakeCommentService struct {
 	addErr    error
 }
 
+type fakeIssueDigestService struct {
+	digest   facade.IssueDigest
+	detail   facade.IssueDetail
+	timeline facade.IssueTimelinePage
+	logs     facade.IssueLogPage
+	err      error
+}
+
+func (f *fakeIssueDigestService) GetIssueDigest(_ context.Context, _ pgtype.UUID, _ string) (facade.IssueDigest, error) {
+	return f.digest, f.err
+}
+
+func (f *fakeIssueDigestService) GetIssueDetail(_ context.Context, _ pgtype.UUID, _ string) (facade.IssueDetail, error) {
+	return f.detail, f.err
+}
+
+func (f *fakeIssueDigestService) GetIssueTimeline(_ context.Context, _ pgtype.UUID, _ string, _, _ int) (facade.IssueTimelinePage, error) {
+	return f.timeline, f.err
+}
+
+func (f *fakeIssueDigestService) GetIssueLogs(_ context.Context, _ pgtype.UUID, _ string, _, _ int) (facade.IssueLogPage, error) {
+	return f.logs, f.err
+}
+
+type fakeActionProposalStore struct {
+	created []inbound.ActionProposalCreateRequest
+	found   inbound.ActionProposal
+	findErr error
+	marked  []string
+}
+
+func (f *fakeActionProposalStore) CreateActionProposal(_ context.Context, req inbound.ActionProposalCreateRequest) (inbound.ActionProposal, error) {
+	f.created = append(f.created, req)
+	expiresAt := req.ExpiresAt
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().Add(10 * time.Minute)
+	}
+	return inbound.ActionProposal{
+		ID:             uuid(0x90),
+		Code:           "ABCD1234",
+		ConnectionID:   req.ConnectionID,
+		ChatID:         req.ChatID,
+		SenderID:       req.SenderID,
+		WorkspaceID:    req.WorkspaceID,
+		InboundEventID: req.InboundEventID,
+		Intent:         req.Intent,
+		Status:         "pending",
+		ExpiresAt:      expiresAt,
+	}, nil
+}
+
+func (f *fakeActionProposalStore) FindActionProposal(_ context.Context, _, _, _, _ string) (inbound.ActionProposal, error) {
+	return f.found, f.findErr
+}
+
+func (f *fakeActionProposalStore) MarkActionProposalStatus(_ context.Context, _ pgtype.UUID, status string) error {
+	f.marked = append(f.marked, status)
+	return nil
+}
+
 func (f *fakeCommentService) AddComment(_ context.Context, req facade.AddCommentReq) (facade.Comment, error) {
 	f.added = append(f.added, req)
 	return f.addReturn, f.addErr
@@ -186,6 +247,7 @@ func (f *fakeCommentService) AddComment(_ context.Context, req facade.AddComment
 type recordingChannel struct {
 	name    string
 	sends   []port.OutboundMessage
+	cards   []port.OutboundCardMessage
 	sendErr error
 }
 
@@ -203,8 +265,9 @@ func (r *recordingChannel) Send(_ context.Context, msg port.OutboundMessage) (po
 	r.sends = append(r.sends, msg)
 	return port.SendResult{PlatformMessageID: "msg-1"}, r.sendErr
 }
-func (r *recordingChannel) SendCard(_ context.Context, _ port.OutboundCardMessage) (port.SendResult, error) {
-	return port.SendResult{}, channel.ErrNotImplemented
+func (r *recordingChannel) SendCard(_ context.Context, msg port.OutboundCardMessage) (port.SendResult, error) {
+	r.cards = append(r.cards, msg)
+	return port.SendResult{PlatformMessageID: "card-1"}, r.sendErr
 }
 
 func uuid(tag byte) pgtype.UUID {
@@ -669,6 +732,128 @@ func TestDispatchStep_SetStatus_HappyPath(t *testing.T) {
 	}
 }
 
+func TestDispatchStep_SetStatus_WithProposalStore_DoesNotMutateBeforeConfirm(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	store := &fakeActionProposalStore{}
+	cfg.ProposalStore = store
+	cfg.IssueDigestFacade = facade.NewIssueDigestFacade(&fakeIssueDigestService{
+		digest: facade.IssueDigest{
+			Issue: facade.IssueDigestIssue{Identifier: "STA-7", Title: "t", Status: "todo", Priority: "medium"},
+		},
+	})
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetStatus, map[string]string{
+		"issue_key": "STA-7",
+		"status":    "done",
+	})
+	evt.RuntimeEventID = "11111111-1111-1111-1111-111111111111"
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(issueSvc.setStatus) != 0 {
+		t.Fatalf("SetIssueStatus called %d times before confirm, want 0", len(issueSvc.setStatus))
+	}
+	if len(store.created) != 1 {
+		t.Fatalf("CreateActionProposal called %d times, want 1", len(store.created))
+	}
+	if !strings.Contains(recCh.sends[0].Text, "ACTION_PROPOSED") || !strings.Contains(recCh.sends[0].Text, "/confirm ABCD1234") {
+		t.Fatalf("proposal reply = %q", recCh.sends[0].Text)
+	}
+	if !strings.Contains(recCh.sends[0].Text, "状态从 todo 改为 done") {
+		t.Fatalf("proposal reply should show current -> target: %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_ConfirmProposal_ExecutesOriginalMutationOnce(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x40), Identifier: "STA-7", Title: "t", Status: "todo"}
+	store := &fakeActionProposalStore{
+		found: inbound.ActionProposal{
+			ID:             uuid(0x91),
+			Code:           "ABCD1234",
+			ConnectionID:   "feishu",
+			ChatID:         "chat-1",
+			SenderID:       "ou_sender1",
+			WorkspaceID:    uuid(0x01),
+			InboundEventID: uuid(0x92),
+			Intent: port.InboundIntent{
+				Kind:   port.IntentSetStatus,
+				Params: map[string]string{"issue_key": "STA-7", "status": "done"},
+				Source: port.SourceRule,
+			},
+			Status:    "pending",
+			ExpiresAt: time.Now().Add(10 * time.Minute),
+		},
+	}
+	cfg.ProposalStore = store
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentConfirmAction, map[string]string{"code": "ABCD1234"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(issueSvc.setStatus) != 1 {
+		t.Fatalf("SetIssueStatus called %d times, want 1", len(issueSvc.setStatus))
+	}
+	if got := issueSvc.setStatus[0].Status; got != "done" {
+		t.Fatalf("status = %q, want done", got)
+	}
+	if len(store.marked) != 1 || store.marked[0] != "confirmed" {
+		t.Fatalf("marked statuses = %#v, want confirmed", store.marked)
+	}
+	if !strings.Contains(recCh.sends[0].Text, "ACTION_CONFIRMED") {
+		t.Fatalf("confirm reply = %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_CancelProposal_DoesNotMutate(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	store := &fakeActionProposalStore{
+		found: inbound.ActionProposal{
+			ID:             uuid(0x91),
+			Code:           "ABCD1234",
+			ConnectionID:   "feishu",
+			ChatID:         "chat-1",
+			SenderID:       "ou_sender1",
+			WorkspaceID:    uuid(0x01),
+			InboundEventID: uuid(0x92),
+			Intent: port.InboundIntent{
+				Kind:   port.IntentSetStatus,
+				Params: map[string]string{"issue_key": "STA-7", "status": "done"},
+				Source: port.SourceRule,
+			},
+			Status:    "pending",
+			ExpiresAt: time.Now().Add(10 * time.Minute),
+		},
+	}
+	cfg.ProposalStore = store
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentCancelAction, map[string]string{"code": "ABCD1234"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(issueSvc.setStatus) != 0 {
+		t.Fatalf("SetIssueStatus called %d times, want 0", len(issueSvc.setStatus))
+	}
+	if len(store.marked) != 1 || store.marked[0] != "cancelled" {
+		t.Fatalf("marked statuses = %#v, want cancelled", store.marked)
+	}
+	if !strings.Contains(recCh.sends[0].Text, "ACTION_CANCELLED") {
+		t.Fatalf("cancel reply = %q", recCh.sends[0].Text)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SetStatus missing params
 // ---------------------------------------------------------------------------
@@ -997,6 +1182,189 @@ func TestDispatchStep_QueryIssue_SpecificIssue(t *testing.T) {
 	}
 	if !strings.Contains(text, "测试用户") {
 		t.Errorf("reply should contain display name: %q", text)
+	}
+}
+
+func TestDispatchStep_QueryIssue_WithDigestFacade_ReturnsWorkSummaryCard(t *testing.T) {
+	t.Parallel()
+
+	cfg, _, _, recCh := buildDispatchConfig()
+	cfg.IssueDigestFacade = facade.NewIssueDigestFacade(&fakeIssueDigestService{
+		digest: facade.IssueDigest{
+			Issue: facade.IssueDigestIssue{
+				ID:         uuid(0x50),
+				Identifier: "STA-2",
+				Title:      "登录页加载慢",
+				Status:     "in_review",
+				Priority:   "high",
+				UpdatedAt:  time.Date(2026, 5, 12, 17, 19, 0, 0, time.UTC),
+			},
+			ProjectName:  "Station",
+			AssigneeName: "张三",
+			RecentEvents: []facade.IssueDigestEvent{
+				{Kind: "comment", ActorName: "李四", Summary: "已补充复现步骤"},
+				{Kind: "activity", ActorName: "张三", Summary: "status_changed"},
+			},
+			AgentSummary: &facade.IssueAgentSummary{
+				AgentName:     "Clawdbot",
+				Status:        "completed",
+				ResultSummary: "PR 已创建",
+			},
+		},
+	})
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentQueryIssue, map[string]string{"issue_key": "STA-2"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(recCh.cards) != 1 {
+		t.Fatalf("expected 1 rich card, got %d", len(recCh.cards))
+	}
+	body := recCh.cards[0].Body
+	for _, want := range []string{"STA-2", "登录页加载慢", "最近动态", "Agent", "下一步", "reviewer"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("digest body missing %q: %q", want, body)
+		}
+	}
+}
+
+func TestDispatchStep_QueryIssue_LocalAppURLDoesNotRenderActions(t *testing.T) {
+	t.Setenv("MULTICA_APP_URL", "http://localhost:3000")
+
+	cfg, _, _, recCh := buildDispatchConfig()
+	cfg.IssueDigestFacade = facade.NewIssueDigestFacade(&fakeIssueDigestService{
+		digest: facade.IssueDigest{
+			Issue: facade.IssueDigestIssue{
+				ID:         uuid(0x50),
+				Identifier: "STA-2",
+				Title:      "登录页加载慢",
+				Status:     "in_progress",
+				Priority:   "high",
+			},
+			WorkspaceSlug: "test-ws",
+		},
+	})
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentQueryIssue, map[string]string{"issue_key": "STA-2"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(recCh.cards) != 1 {
+		t.Fatalf("expected 1 rich card, got %d", len(recCh.cards))
+	}
+	if len(recCh.cards[0].Actions) != 0 {
+		t.Fatalf("local app url should not render actions: %#v", recCh.cards[0].Actions)
+	}
+	if !strings.Contains(recCh.cards[0].Body, "/detail STA-2") {
+		t.Fatalf("body should include chat-native expansion command: %q", recCh.cards[0].Body)
+	}
+}
+
+func TestDispatchStep_IssueDetail_ReturnsChatNativeBody(t *testing.T) {
+	t.Parallel()
+
+	cfg, _, _, recCh := buildDispatchConfig()
+	cfg.IssueDigestFacade = facade.NewIssueDigestFacade(&fakeIssueDigestService{
+		detail: facade.IssueDetail{
+			Digest: facade.IssueDigest{
+				Issue: facade.IssueDigestIssue{
+					ID:          uuid(0x51),
+					Identifier:  "STA-3",
+					Title:       "远程 agent 接入",
+					Description: "补充远程 agent 的设计和实现路径",
+					Status:      "todo",
+					Priority:    "medium",
+				},
+				AssigneeName: "张三",
+				Labels:       []string{"agent", "backend"},
+			},
+			StatusHistory: []facade.IssueDigestEvent{{ActorName: "李四", Summary: "状态变更：backlog -> todo"}},
+		},
+	})
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentIssueDetail, map[string]string{"issue_key": "STA-3"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(recCh.cards) != 1 {
+		t.Fatalf("expected 1 rich card, got %d", len(recCh.cards))
+	}
+	body := recCh.cards[0].Body
+	for _, want := range []string{"STA-3 详情", "描述", "补充远程 agent", "标签", "下一步", "/timeline STA-3"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("detail body missing %q: %q", want, body)
+		}
+	}
+}
+
+func TestDispatchStep_IssueTimeline_ReturnsChatNativeBody(t *testing.T) {
+	t.Parallel()
+
+	cfg, _, _, recCh := buildDispatchConfig()
+	cfg.IssueDigestFacade = facade.NewIssueDigestFacade(&fakeIssueDigestService{
+		timeline: facade.IssueTimelinePage{
+			Issue:    facade.IssueDigestIssue{Identifier: "STA-4", Title: "timeline test", Status: "in_progress"},
+			Page:     2,
+			PageSize: 5,
+			HasMore:  true,
+			Events: []facade.IssueDigestEvent{
+				{ActorName: "张三", Summary: "评论：已更新 PR"},
+				{ActorName: "系统", Summary: "状态变更：todo -> in_progress"},
+			},
+		},
+	})
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentIssueTimeline, map[string]string{"issue_key": "STA-4", "page": "2"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	body := recCh.cards[0].Body
+	for _, want := range []string{"STA-4 动态 第 2 页", "已更新 PR", "状态变更", "/timeline STA-4 3"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("timeline body missing %q: %q", want, body)
+		}
+	}
+}
+
+func TestDispatchStep_IssueLogs_ReturnsChatNativeBody(t *testing.T) {
+	t.Parallel()
+
+	cfg, _, _, recCh := buildDispatchConfig()
+	cfg.IssueDigestFacade = facade.NewIssueDigestFacade(&fakeIssueDigestService{
+		logs: facade.IssueLogPage{
+			Issue:      facade.IssueDigestIssue{Identifier: "STA-5", Title: "logs test", Status: "in_progress"},
+			TaskID:     "task-1",
+			AgentName:  "Clawdbot",
+			TaskStatus: "running",
+			Page:       1,
+			PageSize:   8,
+			HasMore:    true,
+			Messages: []facade.IssueTaskLogEvent{
+				{Seq: 12, Type: "progress", Content: "正在分析失败测试"},
+				{Seq: 11, Type: "tool", Tool: "go test", Content: "1 failing package"},
+			},
+		},
+	})
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentIssueLogs, map[string]string{"issue_key": "STA-5"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	body := recCh.cards[0].Body
+	for _, want := range []string{"STA-5 执行日志", "Clawdbot", "正在分析失败测试", "go test", "/logs STA-5 2"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("logs body missing %q: %q", want, body)
+		}
 	}
 }
 

@@ -122,7 +122,7 @@ func NewCard(titleText, template string) *Card {
 // AddMarkdown appends a markdown element to the card body.
 func (c *Card) AddMarkdown(md string) {
 	c.Elements = append(c.Elements, element{
-		Tag: "markdown",
+		Tag: "div",
 		Text: &textNode{
 			Tag:     "lark_md",
 			Content: md,

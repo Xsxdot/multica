@@ -19,17 +19,22 @@ const (
 type IntentKind string
 
 const (
-	IntentCreateIssue IntentKind = "CreateIssue"
-	IntentAddComment  IntentKind = "AddComment"
-	IntentQueryIssue  IntentKind = "QueryIssue"
-	IntentSetStatus   IntentKind = "SetStatus"
-	IntentSetAssignee IntentKind = "SetAssignee"
-	IntentSetPriority IntentKind = "SetPriority"
-	IntentSetLabel    IntentKind = "SetLabel"
-	IntentDelete      IntentKind = "Delete"
-	IntentUnsupported IntentKind = "Unsupported"
-	IntentUnknown     IntentKind = "Unknown"
-	IntentASKClarify  IntentKind = "ASK_CLARIFY"
+	IntentCreateIssue   IntentKind = "CreateIssue"
+	IntentAddComment    IntentKind = "AddComment"
+	IntentQueryIssue    IntentKind = "QueryIssue"
+	IntentIssueDetail   IntentKind = "IssueDetail"
+	IntentIssueTimeline IntentKind = "IssueTimeline"
+	IntentIssueLogs     IntentKind = "IssueLogs"
+	IntentSetStatus     IntentKind = "SetStatus"
+	IntentSetAssignee   IntentKind = "SetAssignee"
+	IntentSetPriority   IntentKind = "SetPriority"
+	IntentSetLabel      IntentKind = "SetLabel"
+	IntentConfirmAction IntentKind = "ConfirmAction"
+	IntentCancelAction  IntentKind = "CancelAction"
+	IntentDelete        IntentKind = "Delete"
+	IntentUnsupported   IntentKind = "Unsupported"
+	IntentUnknown       IntentKind = "Unknown"
+	IntentASKClarify    IntentKind = "ASK_CLARIFY"
 )
 
 // Intent is the rule engine output attached to an inbound message before

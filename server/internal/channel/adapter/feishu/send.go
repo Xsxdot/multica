@@ -89,7 +89,7 @@ func (a *Adapter) sendCard(ctx context.Context, msg port.OutboundCardMessage) (p
 	if receiveID == "" {
 		return port.SendResult{Retryable: false}, errors.New("feishu: OutboundCardMessage target is empty")
 	}
-	content, err := renderCard(msg.Title, msg.Body)
+	content, err := renderCard(msg.Title, msg.Body, msg.Actions)
 	if err != nil {
 		return port.SendResult{Retryable: false}, fmt.Errorf("feishu: render card: %w", err)
 	}
@@ -109,10 +109,16 @@ func (a *Adapter) sendCard(ctx context.Context, msg port.OutboundCardMessage) (p
 	}, nil
 }
 
-func renderCard(title, body string) (string, error) {
+func renderCard(title, body string, actions []port.OutboundAction) (string, error) {
 	card := feishucard.NewCard(title, "blue")
 	if body != "" {
 		card.AddMarkdown(body)
+	}
+	for _, action := range actions {
+		if action.Label == "" || action.URL == "" {
+			continue
+		}
+		card.AddButton(action.Label, action.URL)
 	}
 	return card.Render()
 }

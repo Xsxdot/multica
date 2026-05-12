@@ -5,7 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
+	"os"
 	"regexp"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -23,6 +29,10 @@ const (
 	replyPriorityChanged    = "PRIORITY_CHANGED"
 	replyLabelAdded         = "LABEL_ADDED"
 	replyLabelRemoved       = "LABEL_REMOVED"
+	replyActionProposed     = "ACTION_PROPOSED"
+	replyActionConfirmed    = "ACTION_CONFIRMED"
+	replyActionCancelled    = "ACTION_CANCELLED"
+	replyActionExpired      = "ACTION_EXPIRED"
 	replyUnsupportedOp      = "UNSUPPORTED_OP"
 	replyUnknown            = "UNKNOWN"
 	replyAskClarify         = "ASK_CLARIFY"
@@ -52,13 +62,15 @@ type ResolvedUser struct {
 }
 
 type DispatchConfig struct {
-	IssueFacade      facade.IssueFacade
-	CommentFacade    facade.CommentFacade
-	ReplySink        ChannelReplySink
-	ChatBinding      ChatBindingLookup
-	UserResolver     UserInfoResolver
-	ProjectValidator ProjectWorkspaceValidator
-	DispatchStore    DispatchCompletionStore
+	IssueFacade       facade.IssueFacade
+	IssueDigestFacade facade.IssueDigestFacade
+	CommentFacade     facade.CommentFacade
+	ReplySink         ChannelReplySink
+	ChatBinding       ChatBindingLookup
+	UserResolver      UserInfoResolver
+	ProjectValidator  ProjectWorkspaceValidator
+	DispatchStore     DispatchCompletionStore
+	ProposalStore     ActionProposalStore
 }
 
 type dispatchStep struct {
@@ -109,23 +121,24 @@ func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inb
 	)
 
 	var reply string
+	var rich *port.OutboundRichMessage
 	var err error
 
 	switch intent.Kind {
-	case port.IntentCreateIssue:
-		reply, err = d.handleCreateIssue(ctx, evt)
-	case port.IntentAddComment:
-		reply, err = d.handleAddComment(ctx, evt)
+	case port.IntentCreateIssue, port.IntentAddComment, port.IntentSetStatus, port.IntentSetAssignee, port.IntentSetPriority, port.IntentSetLabel:
+		reply, err = d.handleMutationIntent(ctx, evt)
 	case port.IntentQueryIssue:
-		reply, err = d.handleQueryIssue(ctx, evt)
-	case port.IntentSetStatus:
-		reply, err = d.handleSetStatus(ctx, evt)
-	case port.IntentSetAssignee:
-		reply, err = d.handleSetAssignee(ctx, evt)
-	case port.IntentSetPriority:
-		reply, err = d.handleSetPriority(ctx, evt)
-	case port.IntentSetLabel:
-		reply, err = d.handleSetLabel(ctx, evt)
+		reply, rich, err = d.handleQueryIssue(ctx, evt)
+	case port.IntentIssueDetail:
+		reply, rich, err = d.handleIssueDetail(ctx, evt)
+	case port.IntentIssueTimeline:
+		reply, rich, err = d.handleIssueTimeline(ctx, evt)
+	case port.IntentIssueLogs:
+		reply, rich, err = d.handleIssueLogs(ctx, evt)
+	case port.IntentConfirmAction:
+		reply, err = d.handleConfirmAction(ctx, evt)
+	case port.IntentCancelAction:
+		reply, err = d.handleCancelAction(ctx, evt)
 	case port.IntentUnsupported:
 		reply = fmt.Sprintf("[%s] 此操作不支持在群内执行，请回 Web 端操作。", replyUnsupportedOp)
 	case port.IntentUnknown:
@@ -151,6 +164,12 @@ func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inb
 		return evt, DecisionContinue, err
 	}
 
+	if rich != nil {
+		if sendErr := d.sendRichReply(ctx, evt, *rich); sendErr != nil {
+			return evt, DecisionContinue, fmt.Errorf("send dispatch reply: %w", sendErr)
+		}
+		return evt, DecisionContinue, nil
+	}
 	if sendErr := d.sendReply(ctx, evt, reply); sendErr != nil {
 		return evt, DecisionContinue, fmt.Errorf("send dispatch reply: %w", sendErr)
 	}
@@ -255,26 +274,128 @@ func (d *dispatchStep) handleAddComment(ctx context.Context, evt port.InboundEve
 	return fmt.Sprintf("[%s] 已在 %s 上添加评论。", replyCommentAdded, issueKey), nil
 }
 
-func (d *dispatchStep) handleQueryIssue(ctx context.Context, evt port.InboundEvent) (string, error) {
+func (d *dispatchStep) handleMutationIntent(ctx context.Context, evt port.InboundEvent) (string, error) {
+	if d.cfg.ProposalStore == nil {
+		return d.executeMutationIntent(ctx, evt)
+	}
+	if msg, ok := validateMutationIntent(evt.Intent); !ok {
+		return msg, nil
+	}
+	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
+	if err != nil {
+		return "", fmt.Errorf("lookup workspace: %w", err)
+	}
+	proposal, err := d.cfg.ProposalStore.CreateActionProposal(ctx, ActionProposalCreateRequest{
+		ConnectionID:   evt.ConnectionID(),
+		ChatID:         evt.ChatID,
+		SenderID:       evt.SenderID,
+		WorkspaceID:    wsID,
+		InboundEventID: parseRuntimeEventID(evt.RuntimeEventID),
+		Intent:         evt.Intent,
+		ExpiresAt:      time.Now().Add(10 * time.Minute),
+	})
+	if err != nil {
+		return "", fmt.Errorf("create action proposal: %w", err)
+	}
+	return formatProposalReply(proposal, d.describeIntentWithCurrent(ctx, wsID, proposal.Intent)), nil
+}
+
+func (d *dispatchStep) executeMutationIntent(ctx context.Context, evt port.InboundEvent) (string, error) {
+	switch evt.Intent.Kind {
+	case port.IntentCreateIssue:
+		return d.handleCreateIssue(ctx, evt)
+	case port.IntentAddComment:
+		return d.handleAddComment(ctx, evt)
+	case port.IntentSetStatus:
+		return d.handleSetStatus(ctx, evt)
+	case port.IntentSetAssignee:
+		return d.handleSetAssignee(ctx, evt)
+	case port.IntentSetPriority:
+		return d.handleSetPriority(ctx, evt)
+	case port.IntentSetLabel:
+		return d.handleSetLabel(ctx, evt)
+	default:
+		return fmt.Sprintf("[%s] 没有可执行的变更。", replyUnknown), nil
+	}
+}
+
+func (d *dispatchStep) handleConfirmAction(ctx context.Context, evt port.InboundEvent) (string, error) {
+	proposal, reply, ok, err := d.loadConfirmableProposal(ctx, evt)
+	if err != nil || !ok {
+		return reply, err
+	}
+	execEvt := evt
+	execEvt.Intent = proposal.Intent
+	execEvt.RuntimeEventID = util.UUIDToString(proposal.InboundEventID)
+	execReply, err := d.executeMutationIntent(ctx, execEvt)
+	if err != nil {
+		return "", err
+	}
+	if err := d.cfg.ProposalStore.MarkActionProposalStatus(ctx, proposal.ID, proposalStatusConfirmed); err != nil {
+		return "", fmt.Errorf("mark proposal confirmed: %w", err)
+	}
+	return fmt.Sprintf("[%s] 已确认并执行。\n%s", replyActionConfirmed, execReply), nil
+}
+
+func (d *dispatchStep) handleCancelAction(ctx context.Context, evt port.InboundEvent) (string, error) {
+	proposal, reply, ok, err := d.loadConfirmableProposal(ctx, evt)
+	if err != nil || !ok {
+		return reply, err
+	}
+	if err := d.cfg.ProposalStore.MarkActionProposalStatus(ctx, proposal.ID, proposalStatusCancelled); err != nil {
+		return "", fmt.Errorf("mark proposal cancelled: %w", err)
+	}
+	return fmt.Sprintf("[%s] 已取消：%s", replyActionCancelled, describeIntent(proposal.Intent)), nil
+}
+
+func (d *dispatchStep) loadConfirmableProposal(ctx context.Context, evt port.InboundEvent) (ActionProposal, string, bool, error) {
+	if d.cfg.ProposalStore == nil {
+		return ActionProposal{}, "", false, fmt.Errorf("proposal store is not configured")
+	}
+	code := strings.ToUpper(strings.TrimSpace(evt.Intent.Params["code"]))
+	if code == "" {
+		return ActionProposal{}, fmt.Sprintf("[%s] 缺少确认码。", replyMissingParam), false, nil
+	}
+	proposal, err := d.cfg.ProposalStore.FindActionProposal(ctx, evt.ConnectionID(), evt.ChatID, evt.SenderID, code)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ActionProposal{}, fmt.Sprintf("[%s] 找不到待确认动作 %s。", replyIssueNotFound, code), false, nil
+		}
+		return ActionProposal{}, "", false, fmt.Errorf("find action proposal: %w", err)
+	}
+	if proposal.Status == proposalStatusConfirmed {
+		return ActionProposal{}, fmt.Sprintf("[%s] 动作 %s 已执行过。", replyActionConfirmed, proposal.Code), false, nil
+	}
+	if proposal.Status == proposalStatusCancelled {
+		return ActionProposal{}, fmt.Sprintf("[%s] 动作 %s 已取消。", replyActionCancelled, proposal.Code), false, nil
+	}
+	if proposal.Status == proposalStatusExpired || time.Now().After(proposal.ExpiresAt) {
+		_ = d.cfg.ProposalStore.MarkActionProposalStatus(ctx, proposal.ID, proposalStatusExpired)
+		return ActionProposal{}, fmt.Sprintf("[%s] 动作 %s 已过期，请重新发起。", replyActionExpired, proposal.Code), false, nil
+	}
+	return proposal, "", true, nil
+}
+
+func (d *dispatchStep) handleQueryIssue(ctx context.Context, evt port.InboundEvent) (string, *port.OutboundRichMessage, error) {
 	issueKey, hasKey := evt.Intent.Params["issue_key"]
 
 	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil {
-		return "", fmt.Errorf("lookup workspace: %w", err)
+		return "", nil, fmt.Errorf("lookup workspace: %w", err)
 	}
 
 	if !hasKey || issueKey == "" {
 		user, err := d.cfg.UserResolver.Resolve(ctx, evt.ConnectionID(), evt.SenderID)
 		if err != nil {
-			return "", fmt.Errorf("resolve user: %w", err)
+			return "", nil, fmt.Errorf("resolve user: %w", err)
 		}
 
 		issues, err := d.cfg.IssueFacade.ListMyTodos(ctx, wsID, user.MulticaUserID)
 		if err != nil {
-			return "", fmt.Errorf("list todos: %w", err)
+			return "", nil, fmt.Errorf("list todos: %w", err)
 		}
 		if len(issues) == 0 {
-			return "你没有待办的 Issue。", nil
+			return "你没有待办的 Issue。", nil, nil
 		}
 		msg := "你的待办：\n"
 		for i, iss := range issues {
@@ -284,16 +405,34 @@ func (d *dispatchStep) handleQueryIssue(ctx context.Context, evt port.InboundEve
 			}
 			msg += fmt.Sprintf("  %s [%s] %s\n", iss.Identifier, iss.Status, iss.Title)
 		}
-		return msg, nil
+		return msg, nil, nil
 	}
 
 	if !ValidIdentifierFormat(issueKey) {
-		return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), nil
+		return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), nil, nil
+	}
+
+	if d.cfg.IssueDigestFacade != nil {
+		digest, err := d.cfg.IssueDigestFacade.GetIssueDigest(ctx, wsID, issueKey)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil, nil
+			}
+			return "", nil, fmt.Errorf("get issue digest: %w", err)
+		}
+		body := FormatIssueDigest(digest)
+		rich := port.OutboundRichMessage{
+			ChatID:  evt.ChatID,
+			Title:   fmt.Sprintf("%s 工作摘要", digest.Issue.Identifier),
+			Body:    body,
+			Actions: digestActions(digest),
+		}
+		return body, &rich, nil
 	}
 
 	issue, err := d.cfg.IssueFacade.GetIssueByIdentifier(ctx, wsID, issueKey)
 	if err != nil {
-		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil
+		return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil, nil
 	}
 
 	msg := fmt.Sprintf("📋 %s [%s] %s",
@@ -303,7 +442,94 @@ func (d *dispatchStep) handleQueryIssue(ctx context.Context, evt port.InboundEve
 		msg += fmt.Sprintf("\n查询者: %s", user.DisplayName)
 	}
 
-	return msg, nil
+	return msg, nil, nil
+}
+
+func (d *dispatchStep) handleIssueDetail(ctx context.Context, evt port.InboundEvent) (string, *port.OutboundRichMessage, error) {
+	issueKey, wsID, msg, ok, err := d.resolveReadOnlyIssueKey(ctx, evt)
+	if err != nil || !ok {
+		return msg, nil, err
+	}
+	if d.cfg.IssueDigestFacade == nil {
+		return fmt.Sprintf("[%s] 详情查询服务未配置。", replyInternalError), nil, nil
+	}
+	detail, err := d.cfg.IssueDigestFacade.GetIssueDetail(ctx, wsID, issueKey)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil, nil
+		}
+		return "", nil, fmt.Errorf("get issue detail: %w", err)
+	}
+	body := FormatIssueDetail(detail)
+	rich := port.OutboundRichMessage{
+		ChatID:  evt.ChatID,
+		Title:   fmt.Sprintf("%s 详情", detail.Digest.Issue.Identifier),
+		Body:    body,
+		Actions: digestActions(detail.Digest),
+	}
+	return body, &rich, nil
+}
+
+func (d *dispatchStep) handleIssueTimeline(ctx context.Context, evt port.InboundEvent) (string, *port.OutboundRichMessage, error) {
+	issueKey, wsID, msg, ok, err := d.resolveReadOnlyIssueKey(ctx, evt)
+	if err != nil || !ok {
+		return msg, nil, err
+	}
+	if d.cfg.IssueDigestFacade == nil {
+		return fmt.Sprintf("[%s] 动态查询服务未配置。", replyInternalError), nil, nil
+	}
+	page := pageParam(evt.Intent.Params["page"])
+	timeline, err := d.cfg.IssueDigestFacade.GetIssueTimeline(ctx, wsID, issueKey, page, 5)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil, nil
+		}
+		return "", nil, fmt.Errorf("get issue timeline: %w", err)
+	}
+	body := FormatIssueTimeline(timeline)
+	rich := port.OutboundRichMessage{
+		ChatID: evt.ChatID,
+		Title:  fmt.Sprintf("%s 动态", timeline.Issue.Identifier),
+		Body:   body,
+	}
+	return body, &rich, nil
+}
+
+func (d *dispatchStep) handleIssueLogs(ctx context.Context, evt port.InboundEvent) (string, *port.OutboundRichMessage, error) {
+	issueKey, wsID, msg, ok, err := d.resolveReadOnlyIssueKey(ctx, evt)
+	if err != nil || !ok {
+		return msg, nil, err
+	}
+	if d.cfg.IssueDigestFacade == nil {
+		return fmt.Sprintf("[%s] 日志查询服务未配置。", replyInternalError), nil, nil
+	}
+	page := pageParam(evt.Intent.Params["page"])
+	logs, err := d.cfg.IssueDigestFacade.GetIssueLogs(ctx, wsID, issueKey, page, 8)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil, nil
+		}
+		return "", nil, fmt.Errorf("get issue logs: %w", err)
+	}
+	body := FormatIssueLogs(logs)
+	rich := port.OutboundRichMessage{
+		ChatID: evt.ChatID,
+		Title:  fmt.Sprintf("%s 执行日志", logs.Issue.Identifier),
+		Body:   body,
+	}
+	return body, &rich, nil
+}
+
+func (d *dispatchStep) resolveReadOnlyIssueKey(ctx context.Context, evt port.InboundEvent) (string, pgtype.UUID, string, bool, error) {
+	issueKey := evt.Intent.Params["issue_key"]
+	if !ValidIdentifierFormat(issueKey) {
+		return issueKey, pgtype.UUID{}, fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), false, nil
+	}
+	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
+	if err != nil {
+		return issueKey, pgtype.UUID{}, "", false, fmt.Errorf("lookup workspace: %w", err)
+	}
+	return issueKey, wsID, "", true, nil
 }
 
 func (d *dispatchStep) handleSetStatus(ctx context.Context, evt port.InboundEvent) (string, error) {
@@ -412,6 +638,353 @@ func (d *dispatchStep) sendReply(ctx context.Context, evt port.InboundEvent, tex
 		Text:   text,
 	})
 	return err
+}
+
+func (d *dispatchStep) sendRichReply(ctx context.Context, evt port.InboundEvent, msg port.OutboundRichMessage) error {
+	if d.cfg.ReplySink == nil {
+		return nil
+	}
+	if msg.Body == "" {
+		msg.Body = msg.Title
+	}
+	if msg.Title == "" {
+		msg.Title = "Multica"
+	}
+	if msg.ChatID == "" {
+		msg.ChatID = evt.ChatID
+	}
+	return d.cfg.ReplySink.SendRich(ctx, evt, msg)
+}
+
+func validateMutationIntent(intent port.InboundIntent) (string, bool) {
+	switch intent.Kind {
+	case port.IntentCreateIssue:
+		if strings.TrimSpace(intent.Params["title"]) == "" {
+			return fmt.Sprintf("[%s] 缺少 Issue 标题，请提供要创建的内容。", replyMissingParam), false
+		}
+	case port.IntentAddComment:
+		if strings.TrimSpace(intent.Params["issue_key"]) == "" || strings.TrimSpace(intent.Params["comment"]) == "" {
+			return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和评论内容。", replyMissingParam), false
+		}
+		if !ValidIdentifierFormat(intent.Params["issue_key"]) {
+			return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), false
+		}
+	case port.IntentSetStatus:
+		if strings.TrimSpace(intent.Params["issue_key"]) == "" || strings.TrimSpace(intent.Params["status"]) == "" {
+			return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和目标状态。", replyMissingParam), false
+		}
+		if !ValidIdentifierFormat(intent.Params["issue_key"]) {
+			return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), false
+		}
+	case port.IntentSetAssignee:
+		if strings.TrimSpace(intent.Params["issue_key"]) == "" || strings.TrimSpace(intent.Params["assignee"]) == "" {
+			return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和指派人。", replyMissingParam), false
+		}
+		if !ValidIdentifierFormat(intent.Params["issue_key"]) {
+			return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), false
+		}
+	case port.IntentSetPriority:
+		if strings.TrimSpace(intent.Params["issue_key"]) == "" || strings.TrimSpace(intent.Params["priority"]) == "" {
+			return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和目标优先级。", replyMissingParam), false
+		}
+		if !ValidIdentifierFormat(intent.Params["issue_key"]) {
+			return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), false
+		}
+	case port.IntentSetLabel:
+		if strings.TrimSpace(intent.Params["issue_key"]) == "" || strings.TrimSpace(intent.Params["label"]) == "" {
+			return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和标签名。", replyMissingParam), false
+		}
+		if !ValidIdentifierFormat(intent.Params["issue_key"]) {
+			return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), false
+		}
+	}
+	return "", true
+}
+
+func formatProposalReply(proposal ActionProposal, description string) string {
+	if strings.TrimSpace(description) == "" {
+		description = describeIntent(proposal.Intent)
+	}
+	return fmt.Sprintf("[%s] 待确认动作，不会立即执行。\n将要执行：%s\n影响对象：%s\n确认：/confirm %s\n取消：/cancel %s\n有效期至：%s",
+		replyActionProposed,
+		description,
+		emptyAs(proposal.Intent.Params["issue_key"], "新 Issue"),
+		proposal.Code,
+		proposal.Code,
+		proposal.ExpiresAt.Format("15:04:05"),
+	)
+}
+
+func (d *dispatchStep) describeIntentWithCurrent(ctx context.Context, wsID pgtype.UUID, intent port.InboundIntent) string {
+	issueKey := intent.Params["issue_key"]
+	if d.cfg.IssueDigestFacade == nil || !ValidIdentifierFormat(issueKey) {
+		return describeIntent(intent)
+	}
+	digest, err := d.cfg.IssueDigestFacade.GetIssueDigest(ctx, wsID, issueKey)
+	if err != nil {
+		return describeIntent(intent)
+	}
+	switch intent.Kind {
+	case port.IntentSetStatus:
+		return fmt.Sprintf("把 %s 状态从 %s 改为 %s", issueKey, emptyAs(digest.Issue.Status, "未知"), intent.Params["status"])
+	case port.IntentSetPriority:
+		return fmt.Sprintf("把 %s 优先级从 %s 改为 %s", issueKey, emptyAs(digest.Issue.Priority, "none"), intent.Params["priority"])
+	case port.IntentSetAssignee:
+		return fmt.Sprintf("把 %s 负责人从 %s 改为 %s", issueKey, emptyAs(digest.AssigneeName, "未指派"), intent.Params["assignee"])
+	default:
+		return describeIntent(intent)
+	}
+}
+
+func describeIntent(intent port.InboundIntent) string {
+	switch intent.Kind {
+	case port.IntentCreateIssue:
+		return fmt.Sprintf("创建 Issue「%s」", intent.Params["title"])
+	case port.IntentAddComment:
+		return fmt.Sprintf("在 %s 添加评论「%s」", intent.Params["issue_key"], truncateDisplay(intent.Params["comment"], 80))
+	case port.IntentSetStatus:
+		return fmt.Sprintf("把 %s 状态改为 %s", intent.Params["issue_key"], intent.Params["status"])
+	case port.IntentSetAssignee:
+		return fmt.Sprintf("把 %s 指派给 %s", intent.Params["issue_key"], intent.Params["assignee"])
+	case port.IntentSetPriority:
+		return fmt.Sprintf("把 %s 优先级改为 %s", intent.Params["issue_key"], intent.Params["priority"])
+	case port.IntentSetLabel:
+		if intent.Params["op"] == "remove" {
+			return fmt.Sprintf("从 %s 去掉标签 %s", intent.Params["issue_key"], intent.Params["label"])
+		}
+		return fmt.Sprintf("给 %s 添加标签 %s", intent.Params["issue_key"], intent.Params["label"])
+	default:
+		return "未知动作"
+	}
+}
+
+func FormatIssueDigest(digest facade.IssueDigest) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "📋 %s [%s] %s\n", digest.Issue.Identifier, digest.Issue.Status, digest.Issue.Title)
+	fmt.Fprintf(&b, "优先级：%s", emptyAs(digest.Issue.Priority, "none"))
+	if digest.ProjectName != "" {
+		fmt.Fprintf(&b, " · 项目：%s", digest.ProjectName)
+	}
+	if digest.AssigneeName != "" {
+		fmt.Fprintf(&b, " · 负责人：%s", digest.AssigneeName)
+	} else if digest.AssigneeType != "" {
+		fmt.Fprintf(&b, " · 负责人：%s", digest.AssigneeType)
+	}
+	if !digest.Issue.UpdatedAt.IsZero() {
+		fmt.Fprintf(&b, " · 更新：%s", digest.Issue.UpdatedAt.Format("01-02 15:04"))
+	}
+	b.WriteString("\n")
+	if len(digest.RecentEvents) > 0 {
+		b.WriteString("\n最近动态：")
+		for _, event := range digest.RecentEvents {
+			actor := emptyAs(event.ActorName, "系统")
+			fmt.Fprintf(&b, "\n- %s：%s", actor, event.Summary)
+		}
+	}
+	if digest.AgentSummary != nil {
+		b.WriteString("\n\nAgent：")
+		agent := emptyAs(digest.AgentSummary.AgentName, "agent")
+		fmt.Fprintf(&b, "%s [%s]", agent, digest.AgentSummary.Status)
+		if digest.AgentSummary.Progress != "" {
+			fmt.Fprintf(&b, "\n- 进度：%s", digest.AgentSummary.Progress)
+		}
+		if digest.AgentSummary.ResultSummary != "" {
+			fmt.Fprintf(&b, "\n- 输出：%s", digest.AgentSummary.ResultSummary)
+		}
+		if digest.AgentSummary.FailureReason != "" {
+			fmt.Fprintf(&b, "\n- 失败原因：%s", digest.AgentSummary.FailureReason)
+		}
+	} else {
+		b.WriteString("\n\nAgent：暂无执行记录")
+	}
+	fmt.Fprintf(&b, "\n\n下一步：%s", nextStepForDigest(digest))
+	fmt.Fprintf(&b, "\n\n展开：/detail %s · /timeline %s · /logs %s", digest.Issue.Identifier, digest.Issue.Identifier, digest.Issue.Identifier)
+	return b.String()
+}
+
+func FormatIssueDetail(detail facade.IssueDetail) string {
+	digest := detail.Digest
+	var b strings.Builder
+	fmt.Fprintf(&b, "📌 %s 详情\n%s [%s]\n", digest.Issue.Identifier, digest.Issue.Title, digest.Issue.Status)
+	fmt.Fprintf(&b, "优先级：%s", emptyAs(digest.Issue.Priority, "none"))
+	if digest.ProjectName != "" {
+		fmt.Fprintf(&b, " · 项目：%s", digest.ProjectName)
+	}
+	if digest.AssigneeName != "" {
+		fmt.Fprintf(&b, " · 负责人：%s", digest.AssigneeName)
+	} else {
+		b.WriteString(" · 负责人：未指派")
+	}
+	if digest.CreatorName != "" {
+		fmt.Fprintf(&b, " · 创建者：%s", digest.CreatorName)
+	}
+	if !digest.Issue.CreatedAt.IsZero() {
+		fmt.Fprintf(&b, "\n创建：%s", digest.Issue.CreatedAt.Format("01-02 15:04"))
+	}
+	if !digest.Issue.UpdatedAt.IsZero() {
+		fmt.Fprintf(&b, " · 更新：%s", digest.Issue.UpdatedAt.Format("01-02 15:04"))
+	}
+	if len(digest.Labels) > 0 {
+		fmt.Fprintf(&b, "\n标签：%s", strings.Join(digest.Labels, ", "))
+	}
+	if digest.Issue.Description != "" {
+		fmt.Fprintf(&b, "\n\n描述：\n%s", truncateDisplay(digest.Issue.Description, 600))
+	} else {
+		b.WriteString("\n\n描述：暂无")
+	}
+	if len(detail.StatusHistory) > 0 {
+		b.WriteString("\n\n状态/指派历史：")
+		for _, event := range detail.StatusHistory {
+			fmt.Fprintf(&b, "\n- %s %s：%s", event.CreatedAt.Format("01-02 15:04"), emptyAs(event.ActorName, "系统"), event.Summary)
+		}
+	}
+	if digest.AgentSummary != nil {
+		fmt.Fprintf(&b, "\n\nAgent：%s [%s]", emptyAs(digest.AgentSummary.AgentName, "agent"), digest.AgentSummary.Status)
+		if digest.AgentSummary.Progress != "" {
+			fmt.Fprintf(&b, "\n- 最近进度：%s", digest.AgentSummary.Progress)
+		}
+		if digest.AgentSummary.ResultSummary != "" {
+			fmt.Fprintf(&b, "\n- 输出：%s", digest.AgentSummary.ResultSummary)
+		}
+		if digest.AgentSummary.FailureReason != "" {
+			fmt.Fprintf(&b, "\n- 失败原因：%s", digest.AgentSummary.FailureReason)
+		}
+	} else {
+		b.WriteString("\n\nAgent：暂无执行记录")
+	}
+	fmt.Fprintf(&b, "\n\n下一步：%s", nextStepForDigest(digest))
+	fmt.Fprintf(&b, "\n\n继续展开：/timeline %s · /logs %s", digest.Issue.Identifier, digest.Issue.Identifier)
+	return b.String()
+}
+
+func FormatIssueTimeline(page facade.IssueTimelinePage) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "🧾 %s 动态 第 %d 页\n%s [%s]", page.Issue.Identifier, page.Page, page.Issue.Title, page.Issue.Status)
+	if len(page.Events) == 0 {
+		b.WriteString("\n\n暂无更多动态。")
+		return b.String()
+	}
+	for _, event := range page.Events {
+		fmt.Fprintf(&b, "\n- %s %s：%s", event.CreatedAt.Format("01-02 15:04"), emptyAs(event.ActorName, "系统"), event.Summary)
+	}
+	if page.HasMore {
+		fmt.Fprintf(&b, "\n\n更多：/timeline %s %d", page.Issue.Identifier, page.Page+1)
+	}
+	return b.String()
+}
+
+func FormatIssueLogs(page facade.IssueLogPage) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "🛠 %s 执行日志 第 %d 页\n%s [%s]", page.Issue.Identifier, page.Page, page.Issue.Title, page.Issue.Status)
+	if page.TaskID == "" {
+		b.WriteString("\n\n暂无 agent 执行记录。")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "\nAgent：%s [%s]", emptyAs(page.AgentName, "agent"), emptyAs(page.TaskStatus, "unknown"))
+	if page.ResultSummary != "" {
+		fmt.Fprintf(&b, "\n输出：%s", page.ResultSummary)
+	}
+	if page.FailureReason != "" {
+		fmt.Fprintf(&b, "\n失败原因：%s", page.FailureReason)
+	}
+	if len(page.Messages) == 0 {
+		b.WriteString("\n\n暂无更多日志。")
+		return b.String()
+	}
+	b.WriteString("\n\n最近日志：")
+	for _, msg := range page.Messages {
+		label := msg.Type
+		if msg.Tool != "" {
+			label += "/" + msg.Tool
+		}
+		fmt.Fprintf(&b, "\n- #%d %s %s：%s", msg.Seq, msg.CreatedAt.Format("01-02 15:04"), emptyAs(label, "message"), msg.Content)
+	}
+	if page.HasMore {
+		fmt.Fprintf(&b, "\n\n更多：/logs %s %d", page.Issue.Identifier, page.Page+1)
+	}
+	return b.String()
+}
+
+func nextStepForDigest(digest facade.IssueDigest) string {
+	switch digest.Issue.Status {
+	case "in_review":
+		return "需要 reviewer 处理；如果已经通过，请确认后改为 done。"
+	case "blocked":
+		return "先补充阻塞原因或解除依赖，再继续推进。"
+	case "todo", "backlog":
+		if digest.AssigneeName == "" && digest.AgentSummary == nil {
+			return "建议先指派负责人，或触发 agent 开始处理。"
+		}
+		return "建议确认负责人/agent 是否已经开始推进。"
+	case "in_progress":
+		if digest.AgentSummary != nil && (digest.AgentSummary.Status == "queued" || digest.AgentSummary.Status == "running" || digest.AgentSummary.Status == "dispatched") {
+			return "agent 正在处理，关注执行日志和最新输出即可。"
+		}
+		return "关注最近动态；如果长时间无更新，建议追问负责人或补充上下文。"
+	case "done":
+		return "已完成；如结果不符合预期，补充评论后重新打开或重跑 agent。"
+	default:
+		return "查看最近动态后决定是否补充评论、指派负责人或触发 agent。"
+	}
+}
+
+func digestActions(digest facade.IssueDigest) []port.OutboundAction {
+	base := strings.TrimRight(os.Getenv("MULTICA_APP_URL"), "/")
+	if !isPublicAppURL(base) || digest.WorkspaceSlug == "" || !digest.Issue.ID.Valid {
+		return nil
+	}
+	issueURL := fmt.Sprintf("%s/%s/issues/%s", base, digest.WorkspaceSlug, util.UUIDToString(digest.Issue.ID))
+	actions := []port.OutboundAction{{Label: "打开 Issue", URL: issueURL}}
+	if digest.AgentSummary != nil && digest.AgentSummary.TaskID != "" {
+		actions = append(actions, port.OutboundAction{Label: "查看执行日志", URL: issueURL + "?tab=activity"})
+	}
+	return actions
+}
+
+func isPublicAppURL(raw string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" || host == "0.0.0.0" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return true
+	}
+	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified())
+}
+
+func pageParam(raw string) int {
+	page, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || page < 1 {
+		return 1
+	}
+	if page > 99 {
+		return 99
+	}
+	return page
+}
+
+func emptyAs(s, fallback string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
+func truncateDisplay(s string, max int) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) <= max {
+		return string(r)
+	}
+	return string(r[:max]) + "..."
 }
 
 func parseRuntimeEventID(id string) pgtype.UUID {

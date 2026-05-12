@@ -74,6 +74,11 @@ func TestSlashStep_BuiltinExpansionsHitRules(t *testing.T) {
 		{"/label STA-68 +bug", "STA-68 加标签 bug"},
 		{"/label STA-68 -bug", "STA-68 去掉标签 bug"},
 		{"/query STA-68", "STA-68 现在状态"},
+		{"/detail STA-68", "查看详情 STA-68"},
+		{"/timeline STA-68", "查看动态 STA-68 1"},
+		{"/timeline STA-68 2", "查看动态 STA-68 2"},
+		{"/logs STA-68", "查看日志 STA-68 1"},
+		{"/logs STA-68 3", "查看日志 STA-68 3"},
 		{"/todo", "我的待办"},
 		{"/create 登录优化", "帮我记一个 登录优化"},
 	}

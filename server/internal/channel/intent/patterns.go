@@ -22,6 +22,49 @@ type rule struct {
 func defaultRules() []rule {
 	key := issueKeyPattern
 	return []rule{
+		{
+			kind: IntentConfirmAction, confidence: 1,
+			re: regexp.MustCompile(`^确认操作\s*([A-Za-z0-9]{4,16})$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"code": strings.ToUpper(sub[1])}
+			},
+		},
+		{
+			kind: IntentCancelAction, confidence: 1,
+			re: regexp.MustCompile(`^取消操作\s*([A-Za-z0-9]{4,16})$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"code": strings.ToUpper(sub[1])}
+			},
+		},
+		{
+			kind: IntentIssueDetail, confidence: 1,
+			re: regexp.MustCompile(`^查看详情\s*(?:\[)?(` + key + `)(?:\])?$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"issue_key": keyParam(sub[1])}
+			},
+		},
+		{
+			kind: IntentIssueTimeline, confidence: 1,
+			re: regexp.MustCompile(`^查看动态\s*(?:\[)?(` + key + `)(?:\])?(?:\s+([1-9][0-9]*))?$`),
+			params: func(sub []string) map[string]string {
+				page := "1"
+				if len(sub) > 2 && sub[2] != "" {
+					page = sub[2]
+				}
+				return map[string]string{"issue_key": keyParam(sub[1]), "page": page}
+			},
+		},
+		{
+			kind: IntentIssueLogs, confidence: 1,
+			re: regexp.MustCompile(`^查看日志\s*(?:\[)?(` + key + `)(?:\])?(?:\s+([1-9][0-9]*))?$`),
+			params: func(sub []string) map[string]string {
+				page := "1"
+				if len(sub) > 2 && sub[2] != "" {
+					page = sub[2]
+				}
+				return map[string]string{"issue_key": keyParam(sub[1]), "page": page}
+			},
+		},
 		// Unsupported — checked before actionable intents so destructive/media
 		// verbs cannot be mistaken for softer commands.
 		{

@@ -16,7 +16,7 @@ const (
 	slashStepName = "slash_expand"
 )
 
-var indirectBuiltin = regexp.MustCompile(`(?i)^(done|status|comment|assign|priority|label|query|todo|create)\s+(.*)$`)
+var indirectBuiltin = regexp.MustCompile(`(?i)^(done|status|comment|assign|priority|label|query|todo|create|confirm|cancel|detail|timeline|logs)\s+(.*)$`)
 
 // slashLabelValueRe matches label tokens allowed by intent rules (patterns.go).
 var slashLabelValueRe = regexp.MustCompile(`^[\w-]+$`)
@@ -241,6 +241,32 @@ func expandBuiltin(cmd, rest string) (string, bool) {
 			return "", false
 		}
 		return fmt.Sprintf("%s 现在状态", key), true
+	case "detail":
+		key, rem := splitFirst(rest)
+		if key == "" || rem != "" || !looksLikeIssueKey(key) {
+			return "", false
+		}
+		return fmt.Sprintf("查看详情 %s", key), true
+	case "timeline":
+		key, tail := splitFirst(rest)
+		page, rem := splitFirst(tail)
+		if key == "" || !looksLikeIssueKey(key) || rem != "" {
+			return "", false
+		}
+		if page == "" {
+			page = "1"
+		}
+		return fmt.Sprintf("查看动态 %s %s", key, page), true
+	case "logs":
+		key, tail := splitFirst(rest)
+		page, rem := splitFirst(tail)
+		if key == "" || !looksLikeIssueKey(key) || rem != "" {
+			return "", false
+		}
+		if page == "" {
+			page = "1"
+		}
+		return fmt.Sprintf("查看日志 %s %s", key, page), true
 	case "todo":
 		if strings.TrimSpace(rest) != "" {
 			return "", false
@@ -252,6 +278,18 @@ func expandBuiltin(cmd, rest string) (string, bool) {
 			return "", false
 		}
 		return "帮我记一个 " + title, true
+	case "confirm":
+		code, rem := splitFirst(rest)
+		if code == "" || rem != "" {
+			return "", false
+		}
+		return fmt.Sprintf("确认操作 %s", strings.ToUpper(code)), true
+	case "cancel":
+		code, rem := splitFirst(rest)
+		if code == "" || rem != "" {
+			return "", false
+		}
+		return fmt.Sprintf("取消操作 %s", strings.ToUpper(code)), true
 	default:
 		return "", false
 	}
@@ -271,8 +309,13 @@ func slashHelpText() string {
 /priority <issue> <级别> — 改优先级
 /label <issue> +<标签> / -<标签> — 加/去标签
 /query <issue> — 查状态
+/detail <issue> — 查完整详情
+/timeline <issue> [页码] — 展开动态
+/logs <issue> [页码] — 展开执行日志
 /todo — 我的待办
-/create <标题> — 创建 Issue`
+/create <标题> — 创建 Issue
+/confirm <code> — 确认待执行动作
+/cancel <code> — 取消待执行动作`
 }
 
 func (s *slashStep) maybeSendReply(ctx context.Context, evt port.InboundEvent, text string) {

@@ -137,7 +137,7 @@ func BuildChatIntentPrompt(req IntentRequest) string {
 	var b strings.Builder
 	b.WriteString("You are resolving a Multica channel chat message into one safe structured intent.\n")
 	b.WriteString("Return only JSON: {\"intent\":\"<IntentKind>\",\"confidence\":0.0-1.0,\"params\":{...}}\n")
-	b.WriteString("Allowed intents: CreateIssue, AddComment, QueryIssue, SetStatus, SetAssignee, SetPriority, SetLabel, Unsupported, Unknown, ASK_CLARIFY.\n")
+	b.WriteString("Allowed intents: CreateIssue, AddComment, QueryIssue, IssueDetail, IssueTimeline, IssueLogs, SetStatus, SetAssignee, SetPriority, SetLabel, ConfirmAction, CancelAction, Unsupported, Unknown, ASK_CLARIFY.\n")
 	b.WriteString("Destructive operations such as delete must be Unsupported. Do not execute anything.\n\n")
 	b.WriteString("Rules:\n")
 	b.WriteString("- If the message contains an issue key such as sta-1 or STA-1, return it as uppercase params.issue_key.\n")
@@ -273,8 +273,9 @@ func fallbackIntent(kind IntentKind) Intent {
 
 func isValidIntentKind(k IntentKind) bool {
 	switch k {
-	case IntentCreateIssue, IntentAddComment, IntentQueryIssue,
+	case IntentCreateIssue, IntentAddComment, IntentQueryIssue, IntentIssueDetail, IntentIssueTimeline, IntentIssueLogs,
 		IntentSetStatus, IntentSetAssignee, IntentSetPriority, IntentSetLabel,
+		IntentConfirmAction, IntentCancelAction,
 		IntentUnsupported, IntentUnknown, IntentASKClarify:
 		return true
 	default:
@@ -288,6 +289,8 @@ func intentHasRequiredParams(in Intent) bool {
 		return strings.TrimSpace(in.Params["title"]) != ""
 	case IntentAddComment:
 		return strings.TrimSpace(in.Params["issue_key"]) != "" && strings.TrimSpace(in.Params["comment"]) != ""
+	case IntentIssueDetail, IntentIssueTimeline, IntentIssueLogs:
+		return strings.TrimSpace(in.Params["issue_key"]) != ""
 	case IntentSetStatus:
 		return strings.TrimSpace(in.Params["issue_key"]) != "" && strings.TrimSpace(in.Params["status"]) != ""
 	case IntentSetAssignee:
@@ -298,6 +301,8 @@ func intentHasRequiredParams(in Intent) bool {
 		return strings.TrimSpace(in.Params["issue_key"]) != "" &&
 			strings.TrimSpace(in.Params["label"]) != "" &&
 			(in.Params["op"] == "add" || in.Params["op"] == "remove")
+	case IntentConfirmAction, IntentCancelAction:
+		return strings.TrimSpace(in.Params["code"]) != ""
 	default:
 		return true
 	}

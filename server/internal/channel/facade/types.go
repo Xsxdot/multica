@@ -12,6 +12,7 @@ package facade
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -85,4 +86,80 @@ type UploadIssueAttachmentReq struct {
 // Same single-direction dependency contract as IssueFacade (DESIGN §3.2).
 type AttachmentFacade interface {
 	UploadIssueAttachment(ctx context.Context, req UploadIssueAttachmentReq) (Attachment, error)
+}
+
+type IssueDigest struct {
+	Issue         IssueDigestIssue
+	ProjectName   string
+	AssigneeName  string
+	AssigneeType  string
+	CreatorName   string
+	CreatorType   string
+	WorkspaceSlug string
+	Labels        []string
+	RecentEvents  []IssueDigestEvent
+	AgentSummary  *IssueAgentSummary
+}
+
+type IssueDigestIssue struct {
+	ID          pgtype.UUID
+	WorkspaceID pgtype.UUID
+	Identifier  string
+	Title       string
+	Description string
+	Status      string
+	Priority    string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type IssueDigestEvent struct {
+	Kind      string
+	ActorName string
+	Summary   string
+	CreatedAt time.Time
+}
+
+type IssueAgentSummary struct {
+	TaskID        string
+	AgentName     string
+	Status        string
+	Progress      string
+	ResultSummary string
+	FailureReason string
+	UpdatedAt     time.Time
+}
+
+type IssueDetail struct {
+	Digest        IssueDigest
+	StatusHistory []IssueDigestEvent
+}
+
+type IssueTimelinePage struct {
+	Issue    IssueDigestIssue
+	Events   []IssueDigestEvent
+	Page     int
+	PageSize int
+	HasMore  bool
+}
+
+type IssueLogPage struct {
+	Issue         IssueDigestIssue
+	TaskID        string
+	AgentName     string
+	TaskStatus    string
+	ResultSummary string
+	FailureReason string
+	Messages      []IssueTaskLogEvent
+	Page          int
+	PageSize      int
+	HasMore       bool
+}
+
+type IssueTaskLogEvent struct {
+	Seq       int32
+	Type      string
+	Tool      string
+	Content   string
+	CreatedAt time.Time
 }

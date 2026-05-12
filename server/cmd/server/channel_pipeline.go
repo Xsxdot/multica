@@ -36,6 +36,7 @@ type channelInboundRuntimeComponents struct {
 func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipelineOptions) channelInboundRuntimeComponents {
 	queries := db.New(pool)
 	issueSvc := facadeimpl.NewIssueService(pool)
+	issueDigestSvc := facadeimpl.NewIssueDigestService(pool)
 	commentSvc := facadeimpl.NewCommentService(queries, issueSvc)
 	bindings := inbound.NewDBChatBindingLookup(pool)
 	userResolver := inbound.NewDBUserInfoResolver(pool)
@@ -93,13 +94,15 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 	}
 	postSteps = append(postSteps,
 		inbound.NewDispatchStep(inbound.DispatchConfig{
-			IssueFacade:      facade.NewIssueFacade(issueSvc),
-			CommentFacade:    facade.NewCommentFacade(commentSvc),
-			ReplySink:        replySink,
-			ChatBinding:      bindings,
-			UserResolver:     userResolver,
-			ProjectValidator: inbound.NewDBProjectWorkspaceValidator(pool),
-			DispatchStore:    inbound.NewDBDispatchCompletionStore(pool),
+			IssueFacade:       facade.NewIssueFacade(issueSvc),
+			IssueDigestFacade: facade.NewIssueDigestFacade(issueDigestSvc),
+			CommentFacade:     facade.NewCommentFacade(commentSvc),
+			ReplySink:         replySink,
+			ChatBinding:       bindings,
+			UserResolver:      userResolver,
+			ProjectValidator:  inbound.NewDBProjectWorkspaceValidator(pool),
+			DispatchStore:     inbound.NewDBDispatchCompletionStore(pool),
+			ProposalStore:     inbound.NewDBActionProposalStore(pool),
 		}),
 		inbound.NewReplyStep(),
 	)

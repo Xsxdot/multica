@@ -44,3 +44,10 @@ type CommentService interface {
 type AttachmentService interface {
 	UploadIssueAttachment(ctx context.Context, req UploadIssueAttachmentReq) (Attachment, error)
 }
+
+type IssueDigestService interface {
+	GetIssueDigest(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDigest, error)
+	GetIssueDetail(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDetail, error)
+	GetIssueTimeline(ctx context.Context, workspaceID pgtype.UUID, identifier string, page, pageSize int) (IssueTimelinePage, error)
+	GetIssueLogs(ctx context.Context, workspaceID pgtype.UUID, identifier string, page, pageSize int) (IssueLogPage, error)
+}

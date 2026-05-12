@@ -128,6 +128,9 @@ function BindingCard({
           <span>·</span>
           <span className="truncate">Agent: {agentSummary}</span>
         </div>
+        <div className="mt-1 text-xs text-muted-foreground">
+          Work assistant mode: issue summaries answer directly; changes require text confirmation.
+        </div>
       </div>
       <div className="flex flex-wrap items-center justify-end gap-2">
         {canManage && (
@@ -508,11 +511,16 @@ function BindingSettingsDialog({
         <DialogHeader>
           <DialogTitle>Channel binding settings</DialogTitle>
           <DialogDescription>
-            Update listen scope, default project, and optional fixed agent for this chat.
+            Configure this chat as a work assistant entry point.
           </DialogDescription>
         </DialogHeader>
         {binding ? (
           <div className="space-y-4">
+            <div className="rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+              Queries return a work summary with status, recent activity, agent execution, and next step.
+              Mutating requests create a confirmation code before any issue is changed. Group notifications still
+              follow each member&apos;s channel notification preferences.
+            </div>
             <div className="grid gap-2">
               <Label htmlFor="edit-binding-project">Default project</Label>
               <NativeSelect
