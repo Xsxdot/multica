@@ -3,6 +3,7 @@ package inbound
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -17,7 +18,7 @@ const (
 	chatListenModeAll          = "all"
 )
 
-// chatBindingContextSource loads primary workspace binding settings for a chat.
+// chatBindingContextSource loads workspace binding settings for a chat.
 type chatBindingContextSource interface {
 	LookupChatContext(ctx context.Context, connectionID, chatID string) (ChatBindingContext, error)
 }
@@ -60,7 +61,7 @@ func (s *chatSettingsFilterStep) Run(ctx context.Context, evt port.InboundEvent)
 	row, err := s.src.LookupChatContext(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		slog.Warn("chat-settings-filter: binding lookup failed", "error", err)
-		return evt, DecisionContinue, nil
+		return evt, DecisionContinue, fmt.Errorf("chat-settings-filter: %w", err)
 	}
 	if row.WorkspaceID == "" {
 		// Unbound group: drop normal chatter; /bind was handled earlier.

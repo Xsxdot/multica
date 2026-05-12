@@ -1,6 +1,10 @@
 package handler
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/channel/binding"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -80,6 +85,48 @@ func createNonOwnerTestUser(t *testing.T, role string) string {
 		_, _ = testPool.Exec(t.Context(), `DELETE FROM "user" WHERE id = $1`, userID)
 	})
 	return userID
+}
+
+func channelBindingRequestAsUser(userID, method, path string, body any) *http.Request {
+	var buf bytes.Buffer
+	if body != nil {
+		_ = json.NewEncoder(&buf).Encode(body)
+	}
+	req := httptest.NewRequest(method, path, &buf)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-ID", userID)
+	req.Header.Set("X-Workspace-ID", testWorkspaceID)
+	return req
+}
+
+func seedChatWorkspaceBindToken(t *testing.T, connectionID, externalUserID, externalChatID string) (plaintext string, tokenHash []byte) {
+	t.Helper()
+	ctx := t.Context()
+	raw := make([]byte, 32)
+	n := time.Now().UnixNano()
+	for i := range raw {
+		raw[i] = byte((n >> uint((i%8)*8)) & 0xff)
+	}
+	plaintext = base64.RawURLEncoding.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(plaintext))
+	tokenHash = sum[:]
+	_, err := testHandler.Queries.CreateChannelBindToken(ctx, db.CreateChannelBindTokenParams{
+		TokenHash:        tokenHash,
+		Purpose:          binding.PurposeChatWorkspace,
+		Provider:         "feishu",
+		ConnectionID:     connectionID,
+		ExternalUserID:   externalUserID,
+		ExternalChatID:   pgtype.Text{String: externalChatID, Valid: true},
+		ExternalChatType: pgtype.Text{String: "group", Valid: true},
+		ExpiresAt:        pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("CreateChannelBindToken: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM channel_bind_token WHERE token_hash = $1`, tokenHash)
+	})
+	return plaintext, tokenHash
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +349,139 @@ func TestCreateChannelBinding_ProviderMismatch(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateChannelBinding_ExistingChatForbiddenWhenNotBindingManager(t *testing.T) {
+	memberID := createNonOwnerTestUser(t, "member")
+	connID := fmt.Sprintf("conn-create-existing-%d", time.Now().UnixNano())
+	chatID := fmt.Sprintf("oc_create_existing_%d", time.Now().UnixNano())
+	extUser := fmt.Sprintf("ou_member_ext_%s", memberID)
+
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO channel_connection (id, provider, display_name, enabled, is_default, config, secret_config, status)
+		VALUES ($1, 'feishu', 'TestConn', true, false, '{}', '{}', 'connected')
+	`, connID); err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(t.Context(), `DELETE FROM channel_chat_binding WHERE connection_id = $1`, connID)
+		_, _ = testPool.Exec(t.Context(), `DELETE FROM channel_user_binding WHERE connection_id = $1`, connID)
+		_, _ = testPool.Exec(t.Context(), `DELETE FROM channel_connection WHERE id = $1`, connID)
+	})
+
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO channel_chat_binding (
+			provider, connection_id, external_chat_id, chat_type, workspace_id,
+			is_primary, bound_by_user_id, external_chat_name, listen_mode, default_project_id, agent_id
+		) VALUES ('feishu', $1, $2, 'group', $3::uuid, true, $4::uuid, 'Test', 'mentions', NULL, NULL)
+	`, connID, chatID, testWorkspaceID, testUserID); err != nil {
+		t.Fatalf("binding: %v", err)
+	}
+
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO channel_user_binding (provider, connection_id, external_user_id, user_id)
+		VALUES ('feishu', $1, $2, $3::uuid)
+		ON CONFLICT (connection_id, external_user_id) DO UPDATE SET user_id = EXCLUDED.user_id
+	`, connID, extUser, memberID); err != nil {
+		t.Fatalf("user binding: %v", err)
+	}
+
+	plaintext, tokenHash := seedChatWorkspaceBindToken(t, connID, extUser, chatID)
+
+	w := httptest.NewRecorder()
+	req := channelBindingRequestAsUser(memberID, "POST", "/api/workspaces/"+testWorkspaceID+"/channel-bindings", map[string]any{
+		"token":           plaintext,
+		"provider":        "feishu",
+		"connection_id":   connID,
+		"listen_mode":     "all",
+	})
+	req = withURLParam(req, "id", testWorkspaceID)
+	testHandler.CreateChannelBinding(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+
+	row, err := testHandler.Queries.GetChannelChatBindingByProviderAndChatID(t.Context(), db.GetChannelChatBindingByProviderAndChatIDParams{
+		ConnectionID:   connID,
+		ExternalChatID: chatID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ListenMode != "mentions" {
+		t.Errorf("listen_mode = %q, want unchanged mentions", row.ListenMode)
+	}
+
+	tok, err := testHandler.Queries.GetChannelBindToken(t.Context(), tokenHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.ConsumedAt.Valid {
+		t.Fatal("token should not be consumed on 403")
+	}
+}
+
+func TestCreateChannelBinding_ExistingChatUpdatesWhenBindingManager(t *testing.T) {
+	connID := fmt.Sprintf("conn-create-mgr-%d", time.Now().UnixNano())
+	chatID := fmt.Sprintf("oc_create_mgr_%d", time.Now().UnixNano())
+	extUser := "ou_owner_ext"
+
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO channel_connection (id, provider, display_name, enabled, is_default, config, secret_config, status)
+		VALUES ($1, 'feishu', 'TestConn2', true, false, '{}', '{}', 'connected')
+	`, connID); err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(t.Context(), `DELETE FROM channel_chat_binding WHERE connection_id = $1`, connID)
+		_, _ = testPool.Exec(t.Context(), `DELETE FROM channel_user_binding WHERE connection_id = $1`, connID)
+		_, _ = testPool.Exec(t.Context(), `DELETE FROM channel_connection WHERE id = $1`, connID)
+	})
+
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO channel_chat_binding (
+			provider, connection_id, external_chat_id, chat_type, workspace_id,
+			is_primary, bound_by_user_id, external_chat_name, listen_mode, default_project_id, agent_id
+		) VALUES ('feishu', $1, $2, 'group', $3::uuid, true, $4::uuid, 'Test', 'mentions', NULL, NULL)
+	`, connID, chatID, testWorkspaceID, testUserID); err != nil {
+		t.Fatalf("binding: %v", err)
+	}
+
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO channel_user_binding (provider, connection_id, external_user_id, user_id)
+		VALUES ('feishu', $1, $2, $3::uuid)
+		ON CONFLICT (connection_id, external_user_id) DO UPDATE SET user_id = EXCLUDED.user_id
+	`, connID, extUser, testUserID); err != nil {
+		t.Fatalf("user binding: %v", err)
+	}
+
+	plaintext, _ := seedChatWorkspaceBindToken(t, connID, extUser, chatID)
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/workspaces/"+testWorkspaceID+"/channel-bindings", map[string]any{
+		"token":           plaintext,
+		"provider":        "feishu",
+		"connection_id":   connID,
+		"listen_mode":     "all",
+	})
+	req = withURLParam(req, "id", testWorkspaceID)
+	testHandler.CreateChannelBinding(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	row, err := testHandler.Queries.GetChannelChatBindingByProviderAndChatID(t.Context(), db.GetChannelChatBindingByProviderAndChatIDParams{
+		ConnectionID:   connID,
+		ExternalChatID: chatID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ListenMode != "all" {
+		t.Errorf("listen_mode = %q, want all", row.ListenMode)
 	}
 }
 

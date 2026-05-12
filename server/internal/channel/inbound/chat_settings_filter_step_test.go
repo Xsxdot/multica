@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -122,6 +123,21 @@ func TestChatSettingsFilterStep(t *testing.T) {
 		_, d, err := step.Run(ctx, evt)
 		if err != nil || d != DecisionContinue {
 			t.Fatalf("d=%v err=%v", d, err)
+		}
+	})
+
+	t.Run("lookup_error_returns_error", func(t *testing.T) {
+		want := errors.New("db unavailable")
+		step := NewChatSettingsFilterStep(stubChatBindingLookup{err: want})
+		evt := port.InboundEvent{
+			Type:         port.EventTypeMessageReceived,
+			ChatType:     port.ChatTypeGroup,
+			Text:         "hello",
+			BotMentioned: false,
+		}
+		_, _, err := step.Run(ctx, evt)
+		if !errors.Is(err, want) {
+			t.Fatalf("err = %v, want %v", err, want)
 		}
 	})
 }

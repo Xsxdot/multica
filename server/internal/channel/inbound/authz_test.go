@@ -413,29 +413,27 @@ func TestAuthzStep_Name(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TC-authz-5: multi-binding — primary chat resolves workspace, non-primary
-// returns AuthzNotPrimary (or WS_NOT_BOUND depending on implementation)
+// TC-authz-5: any chat binding row (including non-primary) resolves workspace
+// for inbound authz.
 // ---------------------------------------------------------------------------
 
-func TestAuthzStep_PrimaryChat_BoundToWorkspace(t *testing.T) {
+func TestAuthzStep_BoundChat_UsesWorkspaceLookup(t *testing.T) {
 	t.Parallel()
 
 	store := &fakeAuthzStore{
-		primaryWsID:      pgtype.UUID{Bytes: [16]byte{1}, Valid: true},
-		primaryWsIDFound: true,
+		wsID:      pgtype.UUID{Bytes: [16]byte{1}, Valid: true},
+		wsIDFound: true,
 	}
 	step := inbound.NewAuthzStep(inbound.AuthzConfig{Store: store})
 
 	evt := port.InboundEvent{
 		ChannelName: "feishu",
-		EventID:     "evt-primary",
-		ChatID:      "chat-primary",
+		EventID:     "evt-bound",
+		ChatID:      "chat-bound",
 		SenderID:    "user-1",
 	}
 
 	_, _, err := step.Run(context.Background(), evt)
-	// Identity unresolved triggers first (T8 not wired), but the lookup
-	// should have succeeded — this test verifies the store method is called.
 	if err == nil {
 		t.Fatal("Run: expected error (identity unresolved), got nil")
 	}
@@ -446,40 +444,6 @@ func TestAuthzStep_PrimaryChat_BoundToWorkspace(t *testing.T) {
 	}
 	if authzErr.Code != inbound.AuthzIdentityUnresolved {
 		t.Errorf("code = %q, want %q", authzErr.Code, inbound.AuthzIdentityUnresolved)
-	}
-}
-
-func TestAuthzStep_NonPrimaryChat_ReturnsNotPrimary(t *testing.T) {
-	t.Parallel()
-
-	store := &fakeAuthzStore{
-		primaryWsIDFound: false, // non-primary chat has no primary binding
-		primaryWsIDErr:   pgx.ErrNoRows,
-	}
-	step := inbound.NewAuthzStep(inbound.AuthzConfig{Store: store})
-
-	evt := port.InboundEvent{
-		ChannelName: "feishu",
-		EventID:     "evt-non-primary",
-		ChatID:      "chat-non-primary",
-		SenderID:    "user-1",
-	}
-
-	_, _, err := step.Run(context.Background(), evt)
-	if err == nil {
-		t.Fatal("Run: expected error, got nil")
-	}
-
-	var authzErr *inbound.AuthzError
-	if !errors.As(err, &authzErr) {
-		t.Fatalf("err type = %T, want *inbound.AuthzError", err)
-	}
-	// When non-primary, the chat IS bound but not primary — should return
-	// WS_NOT_BOUND (or a new NOT_PRIMARY code). The key assertion is that
-	// it does NOT return IDENTITY_UNRESOLVED (which would mean the lookup
-	// succeeded and we moved to identity check).
-	if authzErr.Code != inbound.AuthzWsNotBound {
-		t.Errorf("code = %q, want %q", authzErr.Code, inbound.AuthzWsNotBound)
 	}
 }
 

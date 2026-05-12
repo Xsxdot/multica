@@ -165,7 +165,7 @@ SELECT
     listen_mode,
     COALESCE(agent_id::text, '') AS agent_id
 FROM channel_chat_binding
-WHERE connection_id = $1 AND external_chat_id = $2 AND is_primary = TRUE
+WHERE connection_id = $1 AND external_chat_id = $2
 `
 
 type GetChannelChatBindingContextForInboundParams struct {

@@ -11,7 +11,7 @@ import (
 )
 
 type IntentWorkspaceLookup interface {
-	LookupPrimaryWorkspaceID(ctx context.Context, channelName, chatID string) (pgtype.UUID, error)
+	LookupWorkspaceID(ctx context.Context, channelName, chatID string) (pgtype.UUID, error)
 }
 
 type intentResolveStep struct {
@@ -72,7 +72,7 @@ func (s *intentResolveStep) lookupWorkspaceID(ctx context.Context, evt port.Inbo
 	if s.workspace == nil {
 		return ""
 	}
-	wsID, err := s.workspace.LookupPrimaryWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
+	wsID, err := s.workspace.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil || !wsID.Valid {
 		return ""
 	}

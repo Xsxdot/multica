@@ -36,7 +36,7 @@ type fakeWorkspaceLookup struct {
 	err error
 }
 
-func (f fakeWorkspaceLookup) LookupPrimaryWorkspaceID(context.Context, string, string) (pgtype.UUID, error) {
+func (f fakeWorkspaceLookup) LookupWorkspaceID(context.Context, string, string) (pgtype.UUID, error) {
 	return f.id, f.err
 }
 

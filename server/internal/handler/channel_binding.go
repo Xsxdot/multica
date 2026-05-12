@@ -239,6 +239,48 @@ func canManageBinding(binding db.ChannelChatBinding, member db.Member) bool {
 		member.Role == "owner" || member.Role == "admin"
 }
 
+// mergeAndPersistExistingChatBindingSettings applies create-request fields to a
+// chat binding that already exists for the same workspace. Requires
+// canManageBinding; otherwise responds 403 and returns ok=false.
+func (h *Handler) mergeAndPersistExistingChatBindingSettings(
+	w http.ResponseWriter,
+	r *http.Request,
+	qtx *db.Queries,
+	member db.Member,
+	existing db.ChannelChatBinding,
+	req CreateChannelBindingRequest,
+	defaultProjectID pgtype.UUID,
+	listenM string,
+) (db.ChannelChatBinding, bool) {
+	if !canManageBinding(existing, member) {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return db.ChannelChatBinding{}, false
+	}
+	defProj := existing.DefaultProjectID
+	if req.DefaultProjectID != nil {
+		if strings.TrimSpace(*req.DefaultProjectID) == "" {
+			defProj = pgtype.UUID{Valid: false}
+		} else {
+			defProj = defaultProjectID
+		}
+	}
+	agentOut, ok := h.resolveBindingAgentID(w, r, member.WorkspaceID, req.AgentID, existing.AgentID, true)
+	if !ok {
+		return db.ChannelChatBinding{}, false
+	}
+	updated, updateErr := qtx.UpdateChannelChatBindingSettings(r.Context(), db.UpdateChannelChatBindingSettingsParams{
+		ID:               existing.ID,
+		DefaultProjectID: defProj,
+		ListenMode:       listenM,
+		AgentID:          agentOut,
+	})
+	if updateErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update binding settings")
+		return db.ChannelChatBinding{}, false
+	}
+	return updated, true
+}
+
 func bindingToResponse(b db.ChannelChatBinding) ChannelBindingResponse {
 	listen := b.ListenMode
 	if listen == "" {
@@ -827,26 +869,8 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	})
 	if err == nil {
 		if existing.WorkspaceID == member.WorkspaceID {
-			defProj := existing.DefaultProjectID
-			if req.DefaultProjectID != nil {
-				if strings.TrimSpace(*req.DefaultProjectID) == "" {
-					defProj = pgtype.UUID{Valid: false}
-				} else {
-					defProj = defaultProjectID
-				}
-			}
-			agentOut, ok := h.resolveBindingAgentID(w, r, member.WorkspaceID, req.AgentID, existing.AgentID, true)
+			updated, ok := h.mergeAndPersistExistingChatBindingSettings(w, r, qtx, member, existing, req, defaultProjectID, listenM)
 			if !ok {
-				return
-			}
-			updated, updateErr := qtx.UpdateChannelChatBindingSettings(r.Context(), db.UpdateChannelChatBindingSettingsParams{
-				ID:               existing.ID,
-				DefaultProjectID: defProj,
-				ListenMode:       listenM,
-				AgentID:          agentOut,
-			})
-			if updateErr != nil {
-				writeError(w, http.StatusInternalServerError, "failed to update binding settings")
 				return
 			}
 			existing = updated
@@ -886,26 +910,8 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	})
 	if err == nil {
 		if existing.WorkspaceID == member.WorkspaceID {
-			defProj := existing.DefaultProjectID
-			if req.DefaultProjectID != nil {
-				if strings.TrimSpace(*req.DefaultProjectID) == "" {
-					defProj = pgtype.UUID{Valid: false}
-				} else {
-					defProj = defaultProjectID
-				}
-			}
-			agentOut, ok := h.resolveBindingAgentID(w, r, member.WorkspaceID, req.AgentID, existing.AgentID, true)
+			updated, ok := h.mergeAndPersistExistingChatBindingSettings(w, r, qtx, member, existing, req, defaultProjectID, listenM)
 			if !ok {
-				return
-			}
-			updated, updateErr := qtx.UpdateChannelChatBindingSettings(r.Context(), db.UpdateChannelChatBindingSettingsParams{
-				ID:               existing.ID,
-				DefaultProjectID: defProj,
-				ListenMode:       listenM,
-				AgentID:          agentOut,
-			})
-			if updateErr != nil {
-				writeError(w, http.StatusInternalServerError, "failed to update binding settings")
 				return
 			}
 			existing = updated

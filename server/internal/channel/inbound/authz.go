@@ -92,19 +92,15 @@ type ReplySender interface {
 // so the authz Step stays free of pgx / sqlc types.
 type AuthzStore interface {
 	// LookupWorkspaceID returns the workspace_id bound to the given
-	// (connectionID, chat_id) pair. connectionID is the configured channel
-	// connection id used by binding tables and the registry. If no binding
-	// exists it returns pgx.ErrNoRows.
-	//
-	// Deprecated: Use LookupPrimaryWorkspaceID for inbound command
-	// processing. LookupWorkspaceID is kept for backward compat with
-	// dispatch and other callers that need ANY binding (not just primary).
+	// (connectionID, chat_id) pair for this chat's channel_chat_binding row.
+	// connectionID is the configured channel connection id used by binding
+	// tables and the registry. If no binding exists it returns pgx.ErrNoRows.
 	LookupWorkspaceID(ctx context.Context, connectionID, chatID string) (pgtype.UUID, error)
 
 	// LookupPrimaryWorkspaceID returns the workspace_id of the PRIMARY
-	// binding for the given (connectionID, chat_id) pair. Only primary
-	// bindings process inbound commands; non-primary bindings receive
-	// notifications only.
+	// binding for the given (connectionID, chat_id) pair. Optional; callers
+	// that need primary-only semantics may use it. Inbound authz uses
+	// LookupWorkspaceID so non-primary chat bindings still process commands.
 	LookupPrimaryWorkspaceID(ctx context.Context, connectionID, chatID string) (pgtype.UUID, error)
 
 	// IsWorkspaceMember returns true if (userID, workspaceID) exists in
@@ -167,14 +163,13 @@ func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inboun
 	}
 
 	// --- 1. Chat binding (TC-authz-1) ---
-	// Use LookupPrimaryWorkspaceID so only primary bindings process inbound commands.
-	// Non-primary bindings return WS_NOT_BOUND (they receive notifications only).
-	wsID, err := s.cfg.Store.LookupPrimaryWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
+	// Use LookupWorkspaceID so any binding for this chat grants workspace context.
+	wsID, err := s.cfg.Store.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return s.reject(ctx, evt, AuthzWsNotBound)
 		}
-		return evt, DecisionContinue, fmt.Errorf("authz: lookup primary workspace: %w", err)
+		return evt, DecisionContinue, fmt.Errorf("authz: lookup workspace: %w", err)
 	}
 
 	// --- 2. Identity resolution (fail-closed) ---

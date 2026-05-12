@@ -262,4 +262,62 @@ describe("IntegrationsTab", () => {
       expect(deleteMock).toHaveBeenCalledWith("ws-1", "bind-1");
     });
   });
+
+  it("saves binding settings from dialog via updateChannelBinding", async () => {
+    const updateMock = vi.fn().mockResolvedValue({});
+    (api.updateChannelBinding as ReturnType<typeof vi.fn>).mockImplementation(updateMock);
+    const bindingRow = {
+      id: "bind-1",
+      provider: "feishu",
+      connection_id: "feishu-conn",
+      external_chat_id: "oc_xxx",
+      external_chat_name: "Test Group",
+      chat_type: "group",
+      listen_mode: "mentions",
+      is_primary: true,
+      bound_by_user_id: "user-1",
+      created_at: "2026-05-06T00:00:00Z",
+      default_project_id: null,
+      agent_id: null,
+    };
+    (useQuery as ReturnType<typeof vi.fn>).mockImplementation((opts: { queryKey?: readonly unknown[] }) => {
+      const key = opts.queryKey ?? [];
+      if (key[0] === "workspaces" && key[2] === "channel-bindings") {
+        return { data: { bindings: [bindingRow] }, isLoading: false };
+      }
+      if (key[0] === "workspaces" && key[2] === "agents") {
+        return { data: [{ id: "agent-1", name: "Agent One", archived_at: null }], isLoading: false };
+      }
+      if (key[0] === "settings" && key[1] === "integrations" && key[3] === "projects") {
+        return { data: { projects: [{ id: "proj-1", name: "Project One" }] }, isLoading: false };
+      }
+      return defaultUseQuery(opts);
+    });
+    (useMutation as ReturnType<typeof vi.fn>).mockImplementation((opts: { mutationFn?: (vars: unknown) => Promise<unknown> }) => ({
+      mutate: (vars: unknown, callbacks?: { onSettled?: () => void }) => {
+        void opts?.mutationFn?.(vars).finally(() => callbacks?.onSettled?.());
+      },
+      mutateAsync: opts?.mutationFn ?? vi.fn(),
+      isPending: false,
+    }));
+
+    const user = userEvent.setup();
+    render(<IntegrationsTab />);
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+
+    await user.selectOptions(screen.getByLabelText(/Default project/i), "proj-1");
+    await user.selectOptions(screen.getByLabelText(/Listen scope/i), "all");
+    await user.selectOptions(screen.getByLabelText(/Agent \(optional\)/i), "agent-1");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(updateMock).toHaveBeenCalledWith("ws-1", "bind-1", {
+        default_project_id: "proj-1",
+        listen_mode: "all",
+        agent_id: "agent-1",
+      });
+    });
+  });
 });
