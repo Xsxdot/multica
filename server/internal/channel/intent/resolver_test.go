@@ -60,6 +60,82 @@ func TestChatIntentResolver_ValidJSON(t *testing.T) {
 	}
 }
 
+func TestNormalizeChatIntentResult_QueryIssueFallback(t *testing.T) {
+	t.Parallel()
+
+	raw := `{"intent":"QueryIssue","confidence":0.92,"params":{}}`
+	cases := []struct {
+		name    string
+		text    string
+		want    in.IntentKind
+		wantKey string
+	}{
+		{
+			name:    "unique issue key is filled and uppercased",
+			text:    "sta-1 这个 issue 怎么样了",
+			want:    in.IntentQueryIssue,
+			wantKey: "STA-1",
+		},
+		{
+			name: "todo list keeps empty query params",
+			text: "看一下待办",
+			want: in.IntentQueryIssue,
+		},
+		{
+			name: "invalid issue key asks clarify",
+			text: "STA-0 这个 issue 怎么样了",
+			want: in.IntentASKClarify,
+		},
+		{
+			name: "multiple issue keys asks clarify",
+			text: "STA-1 和 STA-2 怎么样",
+			want: in.IntentASKClarify,
+		},
+		{
+			name: "specific issue without key asks clarify",
+			text: "这个 issue 怎么样了",
+			want: in.IntentASKClarify,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := in.NormalizeChatIntentResultForText(raw, tc.text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Matched {
+				t.Fatal("expected matched result")
+			}
+			if got.Intent.Kind != tc.want {
+				t.Fatalf("kind = %q, want %q", got.Intent.Kind, tc.want)
+			}
+			if got.Intent.Params["issue_key"] != tc.wantKey {
+				t.Fatalf("issue_key = %q, want %q", got.Intent.Params["issue_key"], tc.wantKey)
+			}
+		})
+	}
+}
+
+func TestNormalizeChatIntentResult_ExplicitIssueKeyUppercased(t *testing.T) {
+	t.Parallel()
+
+	got, err := in.NormalizeChatIntentResultForText(
+		`{"intent":"QueryIssue","confidence":0.92,"params":{"issue_key":"sta-1"}}`,
+		"sta-1 状态怎么样",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Intent.Kind != in.IntentQueryIssue {
+		t.Fatalf("kind = %q, want QueryIssue", got.Intent.Kind)
+	}
+	if got.Intent.Params["issue_key"] != "STA-1" {
+		t.Fatalf("issue_key = %q, want STA-1", got.Intent.Params["issue_key"])
+	}
+}
+
 func TestChatIntentResolver_SafeDowngrades(t *testing.T) {
 	t.Parallel()
 

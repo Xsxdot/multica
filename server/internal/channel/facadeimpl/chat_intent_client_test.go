@@ -1,8 +1,10 @@
 package facadeimpl
 
 import (
+	"encoding/json"
 	"testing"
 
+	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -25,6 +27,22 @@ func TestChannelIntentOutput_EmptyIsError(t *testing.T) {
 
 	if _, err := channelIntentOutput(db.AgentTaskQueue{Result: []byte(`{"output":""}`)}); err == nil {
 		t.Fatal("expected empty output error")
+	}
+}
+
+func TestChannelIntentTaskMessage(t *testing.T) {
+	t.Parallel()
+
+	contextJSON, err := json.Marshal(service.ChannelIntentContext{
+		Type:    service.ChannelIntentContextType,
+		Message: "sta-1 这个 issue 怎么样了",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := channelIntentTaskMessage(db.AgentTaskQueue{Context: contextJSON})
+	if got != "sta-1 这个 issue 怎么样了" {
+		t.Fatalf("message = %q", got)
 	}
 }
 

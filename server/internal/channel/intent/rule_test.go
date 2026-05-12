@@ -20,8 +20,10 @@ func TestRuleMatcher_Corpus_Table(t *testing.T) {
 		{"帮我记一个 登录页加载慢", in.IntentCreateIssue, map[string]string{"title": "登录页加载慢"}},
 		{"创建一个 Issue：导出报错 500", in.IntentCreateIssue, map[string]string{"title": "导出报错 500"}},
 		{"在 [STA-2] 上加一条评论：已找产品确认", in.IntentAddComment, map[string]string{"issue_key": "STA-2", "comment": "已找产品确认"}},
+		{"在 [sta-2] 上加一条评论：已找产品确认", in.IntentAddComment, map[string]string{"issue_key": "STA-2", "comment": "已找产品确认"}},
 		{"STA-12 评论：请补一下截图", in.IntentAddComment, map[string]string{"issue_key": "STA-12", "comment": "请补一下截图"}},
 		{"[STA-2] 到哪了？", in.IntentQueryIssue, map[string]string{"issue_key": "STA-2"}},
+		{"sta-1 这个 issue 怎么样了", in.IntentQueryIssue, map[string]string{"issue_key": "STA-1"}},
 		{"STA-5 现在状态", in.IntentQueryIssue, map[string]string{"issue_key": "STA-5"}},
 		{"我的待办", in.IntentQueryIssue, map[string]string{}},
 		{"把 [STA-2] 标成 done", in.IntentSetStatus, map[string]string{"issue_key": "STA-2", "status": "done"}},
@@ -90,6 +92,7 @@ func TestRuleMatcher_AddComment_Variants(t *testing.T) {
 		{"在 [BUG-1] 上加一条评论：复现步骤见附件", "BUG-1"},
 		{"在[STA-99]上评论：LGTM", "STA-99"},
 		{"STA-3 评论：需要设计稿", "STA-3"},
+		{"sta-3 评论：需要设计稿", "STA-3"},
 		{"XY-42 评论：ping", "XY-42"},
 		{"ZZ-1 评论：hello：world", "ZZ-1"},
 	}
@@ -114,6 +117,11 @@ func TestRuleMatcher_QueryIssue_Variants(t *testing.T) {
 		{"[STA-2] 到哪了", "STA-2"},
 		{"STA-9 到哪了？", "STA-9"},
 		{"AB-3 现在状态", "AB-3"},
+		{"sta-1 这个 issue 怎么样了", "STA-1"},
+		{"STA-1 怎么样", "STA-1"},
+		{"STA-1 什么情况", "STA-1"},
+		{"STA-1 进展怎么样", "STA-1"},
+		{"STA-1 状态怎么样", "STA-1"},
 	}
 	for _, tc := range variants {
 		got, ok := m.Match(tc.text)
@@ -124,8 +132,11 @@ func TestRuleMatcher_QueryIssue_Variants(t *testing.T) {
 			t.Errorf("%q issue_key=%q want %q", tc.text, got.Params["issue_key"], tc.wantKey)
 		}
 	}
-	if got, ok := m.Match("我的待办"); !ok || got.Kind != in.IntentQueryIssue {
-		t.Fatal("我的待办 should be QueryIssue")
+	for _, text := range []string{"我的待办", "待办列表", "看一下待办", "我有哪些待办"} {
+		got, ok := m.Match(text)
+		if !ok || got.Kind != in.IntentQueryIssue || len(got.Params) != 0 {
+			t.Fatalf("%q should be empty-param QueryIssue, got ok=%v kind=%q params=%#v", text, ok, got.Kind, got.Params)
+		}
 	}
 }
 
@@ -139,6 +150,7 @@ func TestRuleMatcher_SetStatus_Variants(t *testing.T) {
 		{"把 [STA-2] 标成 todo", "todo"},
 		{"把STA-3标成blocked", "blocked"},
 		{"STA-9 完成了", "done"},
+		{"sta-9 完成了", "done"},
 		{"AB-1 改成 done", "done"},
 		{"CD-2 改成 in_review", "in_review"},
 	}
@@ -164,6 +176,7 @@ func TestRuleMatcher_SetAssignee_Variants(t *testing.T) {
 		{"把 [STA-2] 指派给 @张三", "STA-2", "张三"},
 		{"把STA-3指派给李四", "STA-3", "李四"},
 		{"STA-9 指派给 @王五", "STA-9", "王五"},
+		{"sta-9 指派给 @王五", "STA-9", "王五"},
 	}
 	for _, tc := range variants {
 		got, ok := m.Match(tc.text)
@@ -271,7 +284,6 @@ func TestRuleMatcher_NoHit_Negatives(t *testing.T) {
 		"给 STA-2 发个文件",
 		// todo-ish but not exact
 		"我的待办清单",
-		"看一下待办",
 		// whitespace-only handled via TrimSpace → empty
 		"   ",
 	}

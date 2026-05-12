@@ -1,9 +1,16 @@
 package intent
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // issueKey matches workspace-scoped keys like STA-2 (≥2 letter prefix).
-const issueKeyPattern = `[A-Z]{2,}-\d+`
+const issueKeyPattern = `[A-Za-z]{2,}-\d+`
+
+func keyParam(raw string) string {
+	return strings.ToUpper(strings.TrimSpace(raw))
+}
 
 type rule struct {
 	kind       IntentKind
@@ -21,49 +28,49 @@ func defaultRules() []rule {
 			kind: IntentUnsupported, confidence: 1,
 			re: regexp.MustCompile(`^删除\s*(?:\[)?(` + key + `)(?:\])?$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1]}
+				return map[string]string{"issue_key": keyParam(sub[1])}
 			},
 		},
 		{
 			kind: IntentUnsupported, confidence: 1,
 			re: regexp.MustCompile(`^上传.+图(?:给\s*)?(?:\[)?(` + key + `)(?:\])?`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1]}
+				return map[string]string{"issue_key": keyParam(sub[1])}
 			},
 		},
 		{
 			kind: IntentAddComment, confidence: 1,
 			re: regexp.MustCompile(`^在\s*(?:\[)?(` + key + `)(?:\])?\s*上(?:加一条)?评论\s*[:：]\s*(.+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "comment": sub[2]}
+				return map[string]string{"issue_key": keyParam(sub[1]), "comment": sub[2]}
 			},
 		},
 		{
 			kind: IntentAddComment, confidence: 1,
 			re: regexp.MustCompile(`^(` + key + `)\s*评论\s*[:：]\s*(.+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "comment": sub[2]}
+				return map[string]string{"issue_key": keyParam(sub[1]), "comment": sub[2]}
 			},
 		},
 		{
 			kind: IntentSetStatus, confidence: 1,
 			re: regexp.MustCompile(`^把\s*(?:\[)?(` + key + `)(?:\])?\s*标成\s*([\w-]+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "status": sub[2]}
+				return map[string]string{"issue_key": keyParam(sub[1]), "status": sub[2]}
 			},
 		},
 		{
 			kind: IntentSetStatus, confidence: 1,
 			re: regexp.MustCompile(`^(` + key + `)\s*完成了$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "status": "done"}
+				return map[string]string{"issue_key": keyParam(sub[1]), "status": "done"}
 			},
 		},
 		{
 			kind: IntentSetStatus, confidence: 1,
 			re: regexp.MustCompile(`^(` + key + `)\s*改成\s*([\w_]+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "status": sub[2]}
+				return map[string]string{"issue_key": keyParam(sub[1]), "status": sub[2]}
 			},
 		},
 		// SetAssignee
@@ -71,14 +78,14 @@ func defaultRules() []rule {
 			kind: IntentSetAssignee, confidence: 1,
 			re: regexp.MustCompile(`^把\s*(?:\[)?(` + key + `)(?:\])?\s*指派给\s*@?(.+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "assignee": sub[2]}
+				return map[string]string{"issue_key": keyParam(sub[1]), "assignee": sub[2]}
 			},
 		},
 		{
 			kind: IntentSetAssignee, confidence: 1,
 			re: regexp.MustCompile(`^(` + key + `)\s*指派给\s*@?(.+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "assignee": sub[2]}
+				return map[string]string{"issue_key": keyParam(sub[1]), "assignee": sub[2]}
 			},
 		},
 		// SetPriority
@@ -86,14 +93,14 @@ func defaultRules() []rule {
 			kind: IntentSetPriority, confidence: 1,
 			re: regexp.MustCompile(`^把\s*(?:\[)?(` + key + `)(?:\])?\s*改优先级\s*([\w_]+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "priority": sub[2]}
+				return map[string]string{"issue_key": keyParam(sub[1]), "priority": sub[2]}
 			},
 		},
 		{
 			kind: IntentSetPriority, confidence: 1,
 			re: regexp.MustCompile(`^(` + key + `)\s*改优先级\s*([\w_]+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "priority": sub[2]}
+				return map[string]string{"issue_key": keyParam(sub[1]), "priority": sub[2]}
 			},
 		},
 		// SetLabel (add/remove)
@@ -101,47 +108,47 @@ func defaultRules() []rule {
 			kind: IntentSetLabel, confidence: 1,
 			re: regexp.MustCompile(`^把\s*(?:\[)?(` + key + `)(?:\])?\s*加标签\s*([\w-]+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "label": sub[2], "op": "add"}
+				return map[string]string{"issue_key": keyParam(sub[1]), "label": sub[2], "op": "add"}
 			},
 		},
 		{
 			kind: IntentSetLabel, confidence: 1,
 			re: regexp.MustCompile(`^(` + key + `)\s*加标签\s*([\w-]+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "label": sub[2], "op": "add"}
+				return map[string]string{"issue_key": keyParam(sub[1]), "label": sub[2], "op": "add"}
 			},
 		},
 		{
 			kind: IntentSetLabel, confidence: 1,
 			re: regexp.MustCompile(`^把\s*(?:\[)?(` + key + `)(?:\])?\s*去掉标签\s*([\w-]+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "label": sub[2], "op": "remove"}
+				return map[string]string{"issue_key": keyParam(sub[1]), "label": sub[2], "op": "remove"}
 			},
 		},
 		{
 			kind: IntentSetLabel, confidence: 1,
 			re: regexp.MustCompile(`^(` + key + `)\s*去掉标签\s*([\w-]+)$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1], "label": sub[2], "op": "remove"}
+				return map[string]string{"issue_key": keyParam(sub[1]), "label": sub[2], "op": "remove"}
 			},
 		},
 		{
 			kind: IntentQueryIssue, confidence: 1,
 			re: regexp.MustCompile(`^(?:\[)?(` + key + `)(?:\])?\s*到哪了[？?]?$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1]}
+				return map[string]string{"issue_key": keyParam(sub[1])}
 			},
 		},
 		{
 			kind: IntentQueryIssue, confidence: 1,
-			re: regexp.MustCompile(`^(` + key + `)\s*现在状态$`),
+			re: regexp.MustCompile(`^(?:\[)?(` + key + `)(?:\])?\s*(?:这个\s*(?i:issue)\s*)?(?:怎么样了?|什么情况|进展(?:怎么样|如何)?|状态(?:怎么样|如何)?|现在状态)[？?]?$`),
 			params: func(sub []string) map[string]string {
-				return map[string]string{"issue_key": sub[1]}
+				return map[string]string{"issue_key": keyParam(sub[1])}
 			},
 		},
 		{
 			kind: IntentQueryIssue, confidence: 1,
-			re: regexp.MustCompile(`^我的待办$`),
+			re: regexp.MustCompile(`^(?:我的待办|待办列表|看一下待办|我有哪些待办)$`),
 			params: func(_ []string) map[string]string {
 				return map[string]string{}
 			},

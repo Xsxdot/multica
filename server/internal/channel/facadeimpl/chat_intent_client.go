@@ -119,7 +119,7 @@ func (c *TaskBackedChatIntentClient) ParseIntentResult(ctx context.Context, task
 		if err != nil {
 			return chintent.IntentResult{}, true, err
 		}
-		result, err := chintent.NormalizeChatIntentResult(output)
+		result, err := chintent.NormalizeChatIntentResultForText(output, channelIntentTaskMessage(task))
 		if err != nil {
 			return chintent.IntentResult{
 				Matched: true,
@@ -281,6 +281,14 @@ func channelIntentOutput(task db.AgentTaskQueue) (string, error) {
 		return "", fmt.Errorf("channel intent task completed without output")
 	}
 	return output, nil
+}
+
+func channelIntentTaskMessage(task db.AgentTaskQueue) string {
+	var payload service.ChannelIntentContext
+	if err := json.Unmarshal(task.Context, &payload); err != nil {
+		return ""
+	}
+	return payload.Message
 }
 
 var (

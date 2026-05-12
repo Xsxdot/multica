@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -13,22 +14,27 @@ const (
 	minChatConfidence  = 0.7
 )
 
+var (
+	legalIssueKeyRe = regexp.MustCompile(`(?i)\b[A-Z]{2,5}-[1-9][0-9]*\b`)
+	issueLikeKeyRe  = regexp.MustCompile(`(?i)\b[A-Z]+-\d+\b`)
+)
+
 // IntentRequest is the stable input every resolver sees.
 type IntentRequest struct {
 	WorkspaceID      string
 	DefaultProjectID string
 	// AgentID, when non-empty, forces channel intent to use that agent only
 	// (no fallback to another agent if unavailable).
-	AgentID          string
-	Text             string
-	Channel          string
-	ConnectionID     string
-	ChatID           string
-	ChatType         string
-	SenderID         string
-	SenderName       string
-	InboundEventID   string
-	SourceHint       IntentSource
+	AgentID        string
+	Text           string
+	Channel        string
+	ConnectionID   string
+	ChatID         string
+	ChatType       string
+	SenderID       string
+	SenderName     string
+	InboundEventID string
+	SourceHint     IntentSource
 }
 
 // IntentResult is a resolver's answer. Matched=false lets the chain continue.
@@ -114,7 +120,7 @@ func (r *ChatIntentResolver) Resolve(ctx context.Context, req IntentRequest) (In
 		return IntentResult{Matched: true, Intent: fallbackIntent(IntentUnknown)}, nil
 	}
 
-	result, err := NormalizeChatIntentResult(raw)
+	result, err := NormalizeChatIntentResultForRequest(raw, req)
 	if err != nil {
 		return IntentResult{Matched: true, Intent: fallbackIntent(IntentUnknown)}, nil
 	}
@@ -133,6 +139,10 @@ func BuildChatIntentPrompt(req IntentRequest) string {
 	b.WriteString("Return only JSON: {\"intent\":\"<IntentKind>\",\"confidence\":0.0-1.0,\"params\":{...}}\n")
 	b.WriteString("Allowed intents: CreateIssue, AddComment, QueryIssue, SetStatus, SetAssignee, SetPriority, SetLabel, Unsupported, Unknown, ASK_CLARIFY.\n")
 	b.WriteString("Destructive operations such as delete must be Unsupported. Do not execute anything.\n\n")
+	b.WriteString("Rules:\n")
+	b.WriteString("- If the message contains an issue key such as sta-1 or STA-1, return it as uppercase params.issue_key.\n")
+	b.WriteString("- QueryIssue without params.issue_key is only for todo-list requests such as 我的待办, 待办列表, 看一下待办, 我有哪些待办.\n")
+	b.WriteString("- If the user appears to ask about a specific issue but the issue key or action is unclear, return ASK_CLARIFY instead of QueryIssue.\n\n")
 	fmt.Fprintf(&b, "Workspace ID: %s\nDefault project ID: %s\nChannel: %s\nConnection ID: %s\nChat type: %s\nSender: %s (%s)\n\n", req.WorkspaceID, req.DefaultProjectID, req.Channel, req.ConnectionID, req.ChatType, req.SenderName, req.SenderID)
 	fmt.Fprintf(&b, "User message:\n%s\n", req.Text)
 	return b.String()
@@ -160,10 +170,21 @@ func parseChatIntent(raw string) (Intent, error) {
 	if params == nil {
 		params = map[string]string{}
 	}
+	if issueKey := strings.TrimSpace(params["issue_key"]); issueKey != "" {
+		params["issue_key"] = keyParam(issueKey)
+	}
 	return Intent{Kind: kind, Confidence: resp.Confidence, Params: params, Source: SourceChat}, nil
 }
 
 func NormalizeChatIntentResult(raw string) (IntentResult, error) {
+	return NormalizeChatIntentResultForText(raw, "")
+}
+
+func NormalizeChatIntentResultForRequest(raw string, req IntentRequest) (IntentResult, error) {
+	return NormalizeChatIntentResultForText(raw, req.Text)
+}
+
+func NormalizeChatIntentResultForText(raw string, sourceText string) (IntentResult, error) {
 	in, err := parseChatIntent(raw)
 	if err != nil {
 		return IntentResult{}, err
@@ -171,11 +192,79 @@ func NormalizeChatIntentResult(raw string) (IntentResult, error) {
 	if in.Confidence < minChatConfidence {
 		return IntentResult{Matched: true, Intent: fallbackIntent(IntentASKClarify)}, nil
 	}
+	in = refineChatIntentWithSourceText(in, sourceText)
 	if !intentHasRequiredParams(in) {
 		return IntentResult{Matched: true, Intent: fallbackIntent(IntentASKClarify)}, nil
 	}
 	in.Source = SourceChat
 	return IntentResult{Matched: true, Intent: in}, nil
+}
+
+func refineChatIntentWithSourceText(in Intent, sourceText string) Intent {
+	if in.Kind != IntentQueryIssue {
+		return in
+	}
+	if in.Params == nil {
+		in.Params = map[string]string{}
+	}
+	if issueKey := strings.TrimSpace(in.Params["issue_key"]); issueKey != "" {
+		in.Params["issue_key"] = keyParam(issueKey)
+		return in
+	}
+
+	text := strings.TrimSpace(sourceText)
+	if text == "" {
+		return in
+	}
+	keys := extractIssueKeys(text)
+	issueLikes := extractIssueLikeKeys(text)
+	if len(keys) == 1 && len(issueLikes) == 1 {
+		in.Params["issue_key"] = keys[0]
+		return in
+	}
+	if len(keys) > 0 || len(issueLikes) > 0 || !isTodoListQuery(text) {
+		return fallbackIntent(IntentASKClarify)
+	}
+	return in
+}
+
+func extractIssueKeys(text string) []string {
+	return uniqueNormalizedMatches(legalIssueKeyRe.FindAllString(text, -1))
+}
+
+func extractIssueLikeKeys(text string) []string {
+	return uniqueNormalizedMatches(issueLikeKeyRe.FindAllString(text, -1))
+}
+
+func uniqueNormalizedMatches(matches []string) []string {
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(matches))
+	out := make([]string, 0, len(matches))
+	for _, match := range matches {
+		key := keyParam(match)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	return out
+}
+
+func isTodoListQuery(text string) bool {
+	compact := strings.ToLower(strings.Join(strings.Fields(text), ""))
+	compact = strings.Trim(compact, "？?！!.。")
+	switch compact {
+	case "我的待办", "待办列表", "看一下待办", "我有哪些待办":
+		return true
+	default:
+		return false
+	}
 }
 
 func fallbackIntent(kind IntentKind) Intent {
