@@ -69,13 +69,14 @@ func (s *userIdentityBindStep) Run(ctx context.Context, evt port.InboundEvent) (
 }
 
 type chatBindCommandStep struct {
-	gateway   port.ChannelGateway
-	replySink ChannelReplySink
-	issuer    *binding.TokenIssuer
+	gateway     port.ChannelGateway
+	replySink   ChannelReplySink
+	issuer      *binding.TokenIssuer
+	chatBinding ChatBindingLookup
 }
 
-func NewChatBindCommandStep(gateway port.ChannelGateway, replySink ChannelReplySink, issuer *binding.TokenIssuer) Step {
-	return &chatBindCommandStep{gateway: gateway, replySink: replySink, issuer: issuer}
+func NewChatBindCommandStep(gateway port.ChannelGateway, replySink ChannelReplySink, issuer *binding.TokenIssuer, chatBinding ChatBindingLookup) Step {
+	return &chatBindCommandStep{gateway: gateway, replySink: replySink, issuer: issuer, chatBinding: chatBinding}
 }
 
 func (*chatBindCommandStep) Name() string { return "chat-bind-command" }
@@ -100,14 +101,30 @@ func (s *chatBindCommandStep) Run(ctx context.Context, evt port.InboundEvent) (p
 	}
 
 	chatInfo := port.ChatInfo{ID: evt.ChatID, Type: evt.ChatType}
-	if info, err := s.gateway.GetChatInfo(ctx, evt.ConnectionID(), evt.ChatID); err == nil {
-		chatInfo = info
+	if s.gateway != nil {
+		if info, err := s.gateway.GetChatInfo(ctx, evt.ConnectionID(), evt.ChatID); err == nil {
+			chatInfo = info
+		}
 	}
 	if chatInfo.ID == "" {
 		chatInfo.ID = evt.ChatID
 	}
 	if chatInfo.Type == "" {
 		chatInfo.Type = evt.ChatType
+	}
+
+	if s.chatBinding != nil {
+		if _, err := s.chatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), chatInfo.ID); err == nil {
+			if err := s.replySink.SendText(ctx, evt, port.OutboundMessage{
+				Target: port.TargetChat(evt.ChatID),
+				Text:   "当前会话已绑定到 Multica 工作区，无需重复绑定。",
+			}); err != nil {
+				return evt, DecisionContinue, fmt.Errorf("chat-bind-command: send already-bound notice: %w", err)
+			}
+			return evt, DecisionSkip, nil
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return evt, DecisionContinue, fmt.Errorf("chat-bind-command: check existing chat binding: %w", err)
+		}
 	}
 
 	token, err := s.issuer.IssueChatWorkspace(ctx, binding.IssueChatWorkspaceReq{

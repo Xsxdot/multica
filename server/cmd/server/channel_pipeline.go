@@ -63,7 +63,7 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 	pre := inbound.NewPipeline(
 		inbound.NewNormalizeStep(),
 		inbound.NewUserIdentityBindStep(pool, replySink, issuer),
-		inbound.NewChatBindCommandStep(opt.Gateway, replySink, issuer),
+		inbound.NewChatBindCommandStep(opt.Gateway, replySink, issuer, bindings),
 		inbound.NewChatSettingsFilterStep(inbound.NewDBInboundEventStore(pool)),
 		inbound.NewSlashStep(inbound.SlashConfig{ReplySink: replySink}),
 	)

@@ -164,7 +164,12 @@ export function IntegrationsTab() {
   const wsId = useWorkspaceId();
   const { data: providersData } = useQuery(channelProviderListOptions());
   const { data: connectionsData } = useQuery(channelConnectionListOptions());
-  const { data: bindingsData, isLoading } = useQuery(channelBindingListOptions(wsId));
+  const {
+    data: bindingsData,
+    isLoading,
+    isError: bindingsIsError,
+    error: bindingsError,
+  } = useQuery(channelBindingListOptions(wsId));
   const { data: bindProjectsData } = useQuery({
     queryKey: ["settings", "integrations", wsId, "projects"],
     queryFn: () => api.listProjects({ workspace_id: wsId }),
@@ -379,11 +384,17 @@ export function IntegrationsTab() {
       <section className="space-y-4">
         <div className="flex items-center gap-2">
           <Link2 className="h-4 w-4 text-muted-foreground" />
-          <h2 className="text-sm font-semibold">Channel Bindings ({bindings.length})</h2>
+          <h2 className="text-sm font-semibold">
+            Channel Bindings{bindingsIsError ? "" : ` (${bindings.length})`}
+          </h2>
         </div>
 
         {isLoading ? (
           <p className="text-sm text-muted-foreground">Loading...</p>
+        ) : bindingsIsError ? (
+          <p className="text-sm text-destructive">
+            {bindingsError instanceof Error ? bindingsError.message : "Failed to load channel bindings"}
+          </p>
         ) : bindings.length > 0 ? (
           <div className="overflow-hidden rounded-xl ring-1 ring-foreground/10">
             {bindings.map((b, i) => {
