@@ -194,6 +194,8 @@ type ChannelChatBinding struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	DefaultProjectID pgtype.UUID        `json:"default_project_id"`
 	ConnectionID     string             `json:"connection_id"`
+	ListenMode       string             `json:"listen_mode"`
+	AgentID          pgtype.UUID        `json:"agent_id"`
 }
 
 type ChannelConnection struct {

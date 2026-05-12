@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link2, Star, Trash2, MessageCircle, Plug, Plus, Settings, FlaskConical } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Badge } from "@multica/ui/components/ui/badge";
@@ -36,9 +36,18 @@ import {
   channelBindingListOptions,
   channelConnectionListOptions,
   channelProviderListOptions,
+  agentListOptions,
 } from "@multica/core/workspace/queries";
 import { api } from "@multica/core/api";
-import type { ChannelBinding, ChannelConnection, ChannelProvider } from "@multica/core/types";
+import type {
+  Agent,
+  ChannelBinding,
+  ChannelConnection,
+  ChannelListenMode,
+  ChannelProvider,
+  PatchChannelBindingRequest,
+  Project,
+} from "@multica/core/types";
 
 function providerLabel(value: string) {
   if (!value) return "Channel";
@@ -52,6 +61,10 @@ function providerLabel(value: string) {
 function connectionLabel(binding: ChannelBinding, connections: Map<string, ChannelConnection>) {
   const connection = connections.get(binding.connection_id);
   return connection?.display_name || providerLabel(binding.provider);
+}
+
+function listenModeLabel(mode: string | undefined) {
+  return mode === "all" ? "所有消息" : "仅 @ 机器人";
 }
 
 type ConnectionDraft = {
@@ -83,6 +96,9 @@ function BindingCard({
   onSetPrimary,
   onUnbind,
   connectionName,
+  listenSummary,
+  agentSummary,
+  onEditSettings,
 }: {
   binding: ChannelBinding;
   canManage: boolean;
@@ -90,6 +106,9 @@ function BindingCard({
   onSetPrimary: () => void;
   onUnbind: () => void;
   connectionName: string;
+  listenSummary: string;
+  agentSummary: string;
+  onEditSettings: () => void;
 }) {
   return (
     <div className="flex items-center gap-3 px-4 py-3">
@@ -100,13 +119,23 @@ function BindingCard({
         <div className="text-sm font-medium truncate">
           {binding.external_chat_name ?? binding.external_chat_id}
         </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           <span>{connectionName}</span>
           <span>·</span>
           <span className="capitalize">{binding.chat_type}</span>
+          <span>·</span>
+          <span>{listenSummary}</span>
+          <span>·</span>
+          <span className="truncate">Agent: {agentSummary}</span>
         </div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {canManage && (
+          <Button variant="outline" size="sm" disabled={busy} onClick={onEditSettings} title="Edit binding settings">
+            <Settings className="h-3.5 w-3.5 mr-1" />
+            Edit
+          </Button>
+        )}
         {binding.is_primary ? (
           <Badge variant="default">
             <Star className="h-3 w-3 mr-1" />
@@ -114,24 +143,13 @@ function BindingCard({
           </Badge>
         ) : (
           canManage && (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={busy}
-              onClick={onSetPrimary}
-            >
+            <Button variant="outline" size="sm" disabled={busy} onClick={onSetPrimary}>
               Set as Primary
             </Button>
           )
         )}
         {canManage && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            disabled={busy}
-            onClick={onUnbind}
-            title="Unbind"
-          >
+          <Button variant="ghost" size="icon-sm" disabled={busy} onClick={onUnbind} title="Unbind">
             <Trash2 className="h-4 w-4 text-muted-foreground" />
           </Button>
         )}
@@ -147,12 +165,23 @@ export function IntegrationsTab() {
   const { data: providersData } = useQuery(channelProviderListOptions());
   const { data: connectionsData } = useQuery(channelConnectionListOptions());
   const { data: bindingsData, isLoading } = useQuery(channelBindingListOptions(wsId));
+  const { data: bindProjectsData } = useQuery({
+    queryKey: ["settings", "integrations", wsId, "projects"],
+    queryFn: () => api.listProjects({ workspace_id: wsId }),
+    enabled: !!wsId,
+  });
+  const { data: bindAgents = [] } = useQuery({
+    ...agentListOptions(wsId),
+    enabled: !!wsId,
+  });
   const connections = connectionsData?.connections ?? [];
   const canManageConnections = connectionsData?.can_manage ?? false;
   const connectionByID = new Map(connections.map((connection) => [connection.id, connection]));
   const bindings = bindingsData?.bindings ?? [];
+  const bindProjects = bindProjectsData?.projects ?? [];
 
   const [actionBindingId, setActionBindingId] = useState<string | null>(null);
+  const [editBinding, setEditBinding] = useState<ChannelBinding | null>(null);
   const [draft, setDraft] = useState<ConnectionDraft | null>(null);
   const providers = providersData?.providers ?? [];
   const providerByID = new Map(providers.map((provider) => [provider.provider, provider]));
@@ -176,6 +205,19 @@ export function IntegrationsTab() {
     },
     onError: (e: Error) => {
       toast.error(e.message || "Failed to update primary binding");
+    },
+  });
+
+  const updateBindingMutation = useMutation({
+    mutationFn: ({ bindingId, patch }: { bindingId: string; patch: PatchChannelBindingRequest }) =>
+      api.updateChannelBinding(wsId, bindingId, patch),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: workspaceKeys.channelBindings(wsId) });
+      toast.success("Binding settings saved");
+      setEditBinding(null);
+    },
+    onError: (e: Error) => {
+      toast.error(e.message || "Failed to update binding settings");
     },
   });
 
@@ -344,23 +386,46 @@ export function IntegrationsTab() {
           <p className="text-sm text-muted-foreground">Loading...</p>
         ) : bindings.length > 0 ? (
           <div className="overflow-hidden rounded-xl ring-1 ring-foreground/10">
-            {bindings.map((b, i) => (
-              <div key={b.id} className={i > 0 ? "border-t border-border/50" : ""}>
-                <BindingCard
-                  binding={b}
-                  canManage={canManageBinding(b)}
-                  busy={actionBindingId === b.id}
-                  onSetPrimary={() => handleSetPrimary(b)}
-                  onUnbind={() => handleUnbind(b)}
-                  connectionName={connectionLabel(b, connectionByID)}
-                />
-              </div>
-            ))}
+            {bindings.map((b, i) => {
+              const agentSummary = b.agent_id
+                ? bindAgents.find((a) => a.id === b.agent_id)?.name ?? b.agent_id
+                : "自动选择";
+              return (
+                <div key={b.id} className={i > 0 ? "border-t border-border/50" : ""}>
+                  <BindingCard
+                    binding={b}
+                    canManage={canManageBinding(b)}
+                    busy={actionBindingId === b.id || updateBindingMutation.isPending}
+                    onSetPrimary={() => handleSetPrimary(b)}
+                    onUnbind={() => handleUnbind(b)}
+                    connectionName={connectionLabel(b, connectionByID)}
+                    listenSummary={listenModeLabel(b.listen_mode)}
+                    agentSummary={agentSummary}
+                    onEditSettings={() => setEditBinding(b)}
+                  />
+                </div>
+              );
+            })}
           </div>
         ) : (
           <p className="text-sm text-muted-foreground">No integrations yet.</p>
         )}
       </section>
+
+      <BindingSettingsDialog
+        binding={editBinding}
+        open={!!editBinding}
+        onOpenChange={(open) => {
+          if (!open) setEditBinding(null);
+        }}
+        projects={bindProjects}
+        agents={bindAgents.filter((a) => !a.archived_at)}
+        busy={updateBindingMutation.isPending}
+        onSave={(patch) => {
+          if (!editBinding) return;
+          updateBindingMutation.mutate({ bindingId: editBinding.id, patch });
+        }}
+      />
 
       {canManageConnections ? (
         <ConnectionDialog
@@ -395,6 +460,114 @@ export function IntegrationsTab() {
         </AlertDialogContent>
       </AlertDialog>
     </div>
+  );
+}
+
+function BindingSettingsDialog({
+  binding,
+  open,
+  onOpenChange,
+  projects,
+  agents,
+  busy,
+  onSave,
+}: {
+  binding: ChannelBinding | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  projects: Project[];
+  agents: Agent[];
+  busy: boolean;
+  onSave: (patch: PatchChannelBindingRequest) => void;
+}) {
+  const [defaultProjectId, setDefaultProjectId] = useState("");
+  const [listenMode, setListenMode] = useState<ChannelListenMode>("mentions");
+  const [agentId, setAgentId] = useState("");
+
+  useEffect(() => {
+    if (!binding) return;
+    setDefaultProjectId(binding.default_project_id ?? "");
+    setListenMode((binding.listen_mode as ChannelListenMode) || "mentions");
+    setAgentId(binding.agent_id ?? "");
+  }, [binding]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Channel binding settings</DialogTitle>
+          <DialogDescription>
+            Update listen scope, default project, and optional fixed agent for this chat.
+          </DialogDescription>
+        </DialogHeader>
+        {binding ? (
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <Label htmlFor="edit-binding-project">Default project</Label>
+              <NativeSelect
+                id="edit-binding-project"
+                value={defaultProjectId}
+                disabled={busy}
+                onChange={(e) => setDefaultProjectId(e.target.value)}
+              >
+                <option value="">None</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.title}
+                  </option>
+                ))}
+              </NativeSelect>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-binding-listen">Listen scope</Label>
+              <NativeSelect
+                id="edit-binding-listen"
+                value={listenMode}
+                disabled={busy}
+                onChange={(e) => setListenMode(e.target.value as ChannelListenMode)}
+              >
+                <option value="mentions">Mentions only (@ bot)</option>
+                <option value="all">All messages</option>
+              </NativeSelect>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-binding-agent">Agent (optional)</Label>
+              <NativeSelect
+                id="edit-binding-agent"
+                value={agentId}
+                disabled={busy}
+                onChange={(e) => setAgentId(e.target.value)}
+              >
+                <option value="">Auto-select</option>
+                {agents.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </NativeSelect>
+            </div>
+            <DialogFooter>
+              <Button variant="secondary" type="button" disabled={busy} onClick={() => onOpenChange(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  onSave({
+                    default_project_id: defaultProjectId === "" ? null : defaultProjectId,
+                    listen_mode: listenMode,
+                    agent_id: agentId === "" ? "" : agentId,
+                  })
+                }
+              >
+                Save
+              </Button>
+            </DialogFooter>
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
   );
 }
 

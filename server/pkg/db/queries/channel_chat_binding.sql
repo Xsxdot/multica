@@ -11,16 +11,40 @@ WHERE id = $1;
 SELECT * FROM channel_chat_binding
 WHERE connection_id = $1 AND external_chat_id = $2;
 
+-- name: GetChannelChatBindingContextForInbound :one
+SELECT
+    workspace_id::text AS workspace_id,
+    COALESCE(default_project_id::text, '') AS default_project_id,
+    listen_mode,
+    COALESCE(agent_id::text, '') AS agent_id
+FROM channel_chat_binding
+WHERE connection_id = $1 AND external_chat_id = $2 AND is_primary = TRUE;
+
 -- name: CreateChannelChatBinding :one
 INSERT INTO channel_chat_binding (
     provider, connection_id, external_chat_id, chat_type, workspace_id,
-    is_primary, bound_by_user_id, external_chat_name, default_project_id
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, sqlc.narg('default_project_id'))
+    is_primary, bound_by_user_id, external_chat_name, default_project_id,
+    listen_mode, agent_id
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8,
+    sqlc.narg('default_project_id'),
+    $9,
+    sqlc.narg('agent_id')
+)
 RETURNING *;
 
 -- name: UpdateChannelChatBindingDefaultProject :one
 UPDATE channel_chat_binding SET
     default_project_id = sqlc.narg('default_project_id'),
+    updated_at = now()
+WHERE id = $1
+RETURNING *;
+
+-- name: UpdateChannelChatBindingSettings :one
+UPDATE channel_chat_binding SET
+    default_project_id = $2,
+    listen_mode = $3,
+    agent_id = $4,
     updated_at = now()
 WHERE id = $1
 RETURNING *;

@@ -17,13 +17,13 @@ import (
 )
 
 type userIdentityBindStep struct {
-	pool    *pgxpool.Pool
-	gateway port.ChannelGateway
-	issuer  *binding.TokenIssuer
+	pool      *pgxpool.Pool
+	replySink ChannelReplySink
+	issuer    *binding.TokenIssuer
 }
 
-func NewUserIdentityBindStep(pool *pgxpool.Pool, gateway port.ChannelGateway, issuer *binding.TokenIssuer) Step {
-	return &userIdentityBindStep{pool: pool, gateway: gateway, issuer: issuer}
+func NewUserIdentityBindStep(pool *pgxpool.Pool, replySink ChannelReplySink, issuer *binding.TokenIssuer) Step {
+	return &userIdentityBindStep{pool: pool, replySink: replySink, issuer: issuer}
 }
 
 func (*userIdentityBindStep) Name() string { return "identity-bind" }
@@ -45,17 +45,17 @@ func (s *userIdentityBindStep) Run(ctx context.Context, evt port.InboundEvent) (
 	if err != nil {
 		return evt, DecisionContinue, fmt.Errorf("identity-bind: issue token: %w", err)
 	}
-	if s.gateway == nil {
-		return evt, DecisionContinue, errors.New("identity-bind: channel gateway is not configured")
+	if s.replySink == nil {
+		return evt, DecisionContinue, errors.New("identity-bind: reply sink is not configured")
 	}
 	body := fmt.Sprintf("点击绑定 Multica 账号（10 分钟内有效）: %s", ChannelBindURL("user", token.Plaintext, evt.ChannelName, evt.ConnectionID()))
-	if _, err := s.gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
+	if err := s.replySink.SendText(ctx, evt, port.OutboundMessage{
 		Target: port.TargetUser(evt.SenderID),
 		Text:   body,
 	}); err != nil {
 		if evt.ChatType == port.ChatTypeGroup {
 			notice := "请先和机器人私聊或开启机器人私聊权限后，在群聊里重新发送 /bind。"
-			if _, sendErr := s.gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
+			if sendErr := s.replySink.SendText(ctx, evt, port.OutboundMessage{
 				Target: port.TargetChat(evt.ChatID),
 				Text:   notice,
 			}); sendErr != nil {
@@ -69,12 +69,13 @@ func (s *userIdentityBindStep) Run(ctx context.Context, evt port.InboundEvent) (
 }
 
 type chatBindCommandStep struct {
-	gateway port.ChannelGateway
-	issuer  *binding.TokenIssuer
+	gateway   port.ChannelGateway
+	replySink ChannelReplySink
+	issuer    *binding.TokenIssuer
 }
 
-func NewChatBindCommandStep(gateway port.ChannelGateway, issuer *binding.TokenIssuer) Step {
-	return &chatBindCommandStep{gateway: gateway, issuer: issuer}
+func NewChatBindCommandStep(gateway port.ChannelGateway, replySink ChannelReplySink, issuer *binding.TokenIssuer) Step {
+	return &chatBindCommandStep{gateway: gateway, replySink: replySink, issuer: issuer}
 }
 
 func (*chatBindCommandStep) Name() string { return "chat-bind-command" }
@@ -84,12 +85,12 @@ func (s *chatBindCommandStep) Run(ctx context.Context, evt port.InboundEvent) (p
 		return evt, DecisionContinue, nil
 	}
 
-	if s.gateway == nil {
-		return evt, DecisionContinue, errors.New("chat-bind-command: channel gateway is not configured")
+	if s.replySink == nil {
+		return evt, DecisionContinue, errors.New("chat-bind-command: reply sink is not configured")
 	}
 
 	if evt.ChatType == port.ChatTypeDirect {
-		if _, err := s.gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
+		if err := s.replySink.SendText(ctx, evt, port.OutboundMessage{
 			Target: port.TargetUser(evt.SenderID),
 			Text:   "请在群聊里发送 /bind 绑定当前会话。",
 		}); err != nil {
@@ -122,14 +123,14 @@ func (s *chatBindCommandStep) Run(ctx context.Context, evt port.InboundEvent) (p
 	}
 
 	body := fmt.Sprintf("点击绑定当前会话到 Multica 工作区（10 分钟内有效）: %s", ChannelBindURL("chat", token.Plaintext, evt.ChannelName, evt.ConnectionID()))
-	if _, err := s.gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
+	if err := s.replySink.SendText(ctx, evt, port.OutboundMessage{
 		Target: port.TargetUser(evt.SenderID),
 		Text:   body,
 	}); err == nil {
 		return evt, DecisionSkip, nil
 	}
 
-	if _, err := s.gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
+	if err := s.replySink.SendText(ctx, evt, port.OutboundMessage{
 		Target: port.TargetChat(evt.ChatID),
 		Text:   body,
 	}); err != nil {

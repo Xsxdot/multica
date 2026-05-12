@@ -90,7 +90,7 @@ import type {
   ListChannelBindingsResponse,
   CreateChannelBindingRequest,
   CreateChannelUserBindingRequest,
-  SetPrimaryChannelBindingRequest,
+  PatchChannelBindingRequest,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import { type Logger, noopLogger } from "../logger";
@@ -1301,10 +1301,14 @@ export class ApiClient {
     await this.fetch(`/api/workspaces/${workspaceId}/channel-bindings/${bindingId}`, { method: "DELETE" });
   }
 
-  async setPrimaryChannelBinding(workspaceId: string, bindingId: string, data: SetPrimaryChannelBindingRequest): Promise<ChannelBinding> {
+  async updateChannelBinding(workspaceId: string, bindingId: string, data: PatchChannelBindingRequest): Promise<ChannelBinding> {
     return this.fetch(`/api/workspaces/${workspaceId}/channel-bindings/${bindingId}`, {
       method: "PATCH",
       body: JSON.stringify(data),
     });
+  }
+
+  async setPrimaryChannelBinding(workspaceId: string, bindingId: string, data: { is_primary: boolean }): Promise<ChannelBinding> {
+    return this.updateChannelBinding(workspaceId, bindingId, data);
   }
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -81,6 +82,10 @@ type FailureStore interface {
 	DeleteOutboundFailure(ctx context.Context, id pgtype.UUID) error
 }
 
+type ConnectionScopedFailureStore interface {
+	ClaimPendingOutboundFailuresForConnections(ctx context.Context, arg db.ClaimPendingOutboundFailuresForConnectionsParams) ([]db.ChannelOutboundFailure, error)
+}
+
 // RetryWorker polls channel_outbound_failure for pending rows and retries
 // them. It distinguishes retryable (5xx / network) from non-retryable
 // errors: retryable failures get exponential backoff (30s → 2m → 10min)
@@ -90,9 +95,10 @@ type FailureStore interface {
 // across replicas use atomic UPDATE ... FOR UPDATE SKIP LOCKED in the
 // claim query to avoid contention.
 type RetryWorker struct {
-	store  FailureStore
-	sender RetrySender
-	active func() bool
+	store            FailureStore
+	sender           RetrySender
+	active           func() bool
+	readyConnections func() []string
 }
 
 // NewRetryWorker creates a RetryWorker. Call Run to start it.
@@ -118,8 +124,19 @@ func (w *RetryWorker) SetActiveFunc(active func() bool) {
 	w.active = active
 }
 
-func (w *RetryWorker) isActive() bool {
-	return w.active == nil || w.active()
+// SetReadyConnectionsFunc limits failure claims to live connection ids.
+func (w *RetryWorker) SetReadyConnectionsFunc(readyConnections func() []string) {
+	w.readyConnections = readyConnections
+}
+
+func (w *RetryWorker) readyConnectionIDs() []string {
+	if w.active != nil && !w.active() {
+		return []string{}
+	}
+	if w.readyConnections == nil {
+		return nil
+	}
+	return normalizeRetryConnectionIDs(w.readyConnections())
 }
 
 // RetryWorkerEnabled reports whether the retry worker should start.
@@ -139,9 +156,7 @@ func (w *RetryWorker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if w.isActive() {
-				w.processBatch(ctx)
-			}
+			w.processBatch(ctx)
 		}
 	}
 }
@@ -161,11 +176,12 @@ func (w *RetryWorker) Run(ctx context.Context) {
 // rows where status='dead' AND created_at < now()-7d, which we never
 // touch from this worker.
 func (w *RetryWorker) processBatch(ctx context.Context) {
-	if !w.isActive() {
+	readyConnectionIDs := w.readyConnectionIDs()
+	if readyConnectionIDs != nil && len(readyConnectionIDs) == 0 {
 		return
 	}
 
-	failures, err := w.store.ClaimPendingOutboundFailures(ctx, RetryBatchSize)
+	failures, err := w.claimPendingFailures(ctx, readyConnectionIDs)
 	if err != nil {
 		channelmetrics.M.RecordOutboundRetry("unknown", "claim_error")
 		slog.Error("retry worker: claim failed", "error", err)
@@ -175,6 +191,37 @@ func (w *RetryWorker) processBatch(ctx context.Context) {
 		channelmetrics.M.RecordOutboundRetry(f.Provider, "claimed")
 		w.processOne(ctx, f)
 	}
+}
+
+func (w *RetryWorker) claimPendingFailures(ctx context.Context, readyConnectionIDs []string) ([]db.ChannelOutboundFailure, error) {
+	if readyConnectionIDs == nil {
+		return w.store.ClaimPendingOutboundFailures(ctx, RetryBatchSize)
+	}
+	scoped, ok := w.store.(ConnectionScopedFailureStore)
+	if !ok {
+		return nil, errors.New("retry worker: store does not support connection-scoped claim")
+	}
+	return scoped.ClaimPendingOutboundFailuresForConnections(ctx, db.ClaimPendingOutboundFailuresForConnectionsParams{
+		ConnectionIds: readyConnectionIDs,
+		ClaimLimit:    RetryBatchSize,
+	})
+}
+
+func normalizeRetryConnectionIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 // processOne handles a single failure record.

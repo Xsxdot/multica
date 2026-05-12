@@ -29,9 +29,6 @@ export type ChannelEventKey = "issues" | "comments" | "mentions";
 
 export type ChannelPreferences = Record<string, ChannelNotificationPreferences | undefined>;
 
-export type FeishuChannelPreferences = ChannelNotificationPreferences;
-export type FeishuEventKey = ChannelEventKey;
-
 export interface NotificationPreferences {
   assignments?: NotificationGroupValue;
   status_changes?: NotificationGroupValue;
@@ -61,11 +58,4 @@ export function isChannelEventEnabled(
 ): boolean {
   const value = prefs?.channel?.[connectionId]?.[key];
   return value !== false;
-}
-
-export function isFeishuEventEnabled(
-  prefs: NotificationPreferences | undefined | null,
-  key: FeishuEventKey,
-): boolean {
-  return isChannelEventEnabled(prefs, "feishu", key);
 }

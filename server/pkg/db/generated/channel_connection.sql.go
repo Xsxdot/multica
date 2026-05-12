@@ -11,6 +11,36 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const bootstrapChannelConnection = `-- name: BootstrapChannelConnection :exec
+INSERT INTO channel_connection (
+    id, provider, display_name, enabled, is_default, config, secret_config, status
+) VALUES (
+    $1, $2, $3, true, $4, $5, $6, 'configured'
+)
+ON CONFLICT (id) DO NOTHING
+`
+
+type BootstrapChannelConnectionParams struct {
+	ID           string `json:"id"`
+	Provider     string `json:"provider"`
+	DisplayName  string `json:"display_name"`
+	IsDefault    bool   `json:"is_default"`
+	Config       []byte `json:"config"`
+	SecretConfig []byte `json:"secret_config"`
+}
+
+func (q *Queries) BootstrapChannelConnection(ctx context.Context, arg BootstrapChannelConnectionParams) error {
+	_, err := q.db.Exec(ctx, bootstrapChannelConnection,
+		arg.ID,
+		arg.Provider,
+		arg.DisplayName,
+		arg.IsDefault,
+		arg.Config,
+		arg.SecretConfig,
+	)
+	return err
+}
+
 const createChannelConnection = `-- name: CreateChannelConnection :one
 INSERT INTO channel_connection (
     id, provider, display_name, enabled, is_default, config, secret_config, status

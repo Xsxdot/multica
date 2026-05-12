@@ -79,7 +79,7 @@ func (c *TaskBackedChatIntentClient) StartIntent(ctx context.Context, req chinte
 			return "", fmt.Errorf("lookup existing channel intent task: %w", err)
 		}
 	}
-	agent, err := c.selectAgent(ctx, workspaceID)
+	agent, err := c.selectAgent(ctx, workspaceID, req)
 	if err != nil {
 		return "", err
 	}
@@ -169,7 +169,37 @@ func (c *TaskBackedChatIntentClient) authorizeRequester(ctx context.Context, req
 	return util.UUIDToString(userID), nil
 }
 
-func (c *TaskBackedChatIntentClient) selectAgent(ctx context.Context, workspaceID pgtype.UUID) (db.Agent, error) {
+const errBoundChannelAgentUnavailable = "指定 agent 当前不可用或不支持群聊语义处理。"
+
+func (c *TaskBackedChatIntentClient) selectAgent(ctx context.Context, workspaceID pgtype.UUID, req chintent.IntentRequest) (db.Agent, error) {
+	if aid := strings.TrimSpace(req.AgentID); aid != "" {
+		agentUUID, err := util.ParseUUID(aid)
+		if err != nil {
+			return db.Agent{}, errors.New(errBoundChannelAgentUnavailable)
+		}
+		agent, err := c.queries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{
+			ID:          agentUUID,
+			WorkspaceID: workspaceID,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return db.Agent{}, errors.New(errBoundChannelAgentUnavailable)
+			}
+			return db.Agent{}, fmt.Errorf("load bound agent: %w", err)
+		}
+		if agent.ArchivedAt.Valid {
+			return db.Agent{}, errors.New(errBoundChannelAgentUnavailable)
+		}
+		if !agent.RuntimeID.Valid {
+			return db.Agent{}, errors.New(errBoundChannelAgentUnavailable)
+		}
+		runtime, err := c.queries.GetAgentRuntime(ctx, agent.RuntimeID)
+		if err != nil || runtime.Status != "online" || !runtimeSupportsChannelIntent(runtime) {
+			return db.Agent{}, errors.New(errBoundChannelAgentUnavailable)
+		}
+		return agent, nil
+	}
+
 	agents, err := c.queries.ListAgents(ctx, workspaceID)
 	if err != nil {
 		return db.Agent{}, fmt.Errorf("list agents: %w", err)

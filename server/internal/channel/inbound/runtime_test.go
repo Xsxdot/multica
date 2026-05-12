@@ -272,8 +272,13 @@ type recordingReplySink struct {
 	replies []string
 }
 
-func (s *recordingReplySink) Send(_ context.Context, _ port.InboundEvent, text string) error {
-	s.replies = append(s.replies, text)
+func (s *recordingReplySink) SendText(_ context.Context, _ port.InboundEvent, msg port.OutboundMessage) error {
+	s.replies = append(s.replies, msg.Text)
+	return nil
+}
+
+func (s *recordingReplySink) SendRich(_ context.Context, _ port.InboundEvent, msg port.OutboundRichMessage) error {
+	s.replies = append(s.replies, msg.Body)
 	return nil
 }
 

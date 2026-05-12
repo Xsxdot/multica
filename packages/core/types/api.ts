@@ -123,6 +123,8 @@ export interface PaginationParams {
 }
 
 // Channel Bindings
+export type ChannelListenMode = "mentions" | "all";
+
 export interface ChannelBinding {
   id: string;
   provider: string;
@@ -131,6 +133,8 @@ export interface ChannelBinding {
   chat_type: string;
   external_chat_name: string | null;
   default_project_id?: string | null;
+  listen_mode: ChannelListenMode;
+  agent_id?: string | null;
   is_primary: boolean;
   bound_by_user_id: string;
   created_at: string;
@@ -201,6 +205,8 @@ export interface CreateChannelBindingRequest {
   provider: string;
   connection_id?: string;
   default_project_id?: string | null;
+  listen_mode?: ChannelListenMode;
+  agent_id?: string | null;
 }
 
 export interface CreateChannelUserBindingRequest {
@@ -216,6 +222,10 @@ export interface ChannelUserBindingResponse {
   user_id: string;
 }
 
-export interface SetPrimaryChannelBindingRequest {
-  is_primary: boolean;
+export interface PatchChannelBindingRequest {
+  is_primary?: boolean;
+  default_project_id?: string | null;
+  listen_mode?: ChannelListenMode;
+  /** Send empty string to clear a previously configured agent. */
+  agent_id?: string | null;
 }

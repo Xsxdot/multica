@@ -117,15 +117,17 @@ func (m *mockRetrySender) SendCard(_ context.Context, provider string, externalU
 // --- Mock FailureStore ---
 
 type mockFailureStore struct {
-	claimed        []db.ChannelOutboundFailure
-	claimErr       error
-	claimCalls     int
-	incrementCalls []db.IncrementOutboundFailureAttemptsParams
-	markDeadCalls  []db.MarkOutboundFailureDeadParams
-	deleteCalls    []pgtype.UUID
-	incrementErr   error
-	markDeadErr    error
-	deleteErr      error
+	claimed             []db.ChannelOutboundFailure
+	claimErr            error
+	claimCalls          int
+	scopedClaimCalls    int
+	scopedConnectionIDs []string
+	incrementCalls      []db.IncrementOutboundFailureAttemptsParams
+	markDeadCalls       []db.MarkOutboundFailureDeadParams
+	deleteCalls         []pgtype.UUID
+	incrementErr        error
+	markDeadErr         error
+	deleteErr           error
 }
 
 func (m *mockFailureStore) ClaimPendingOutboundFailures(_ context.Context, _ int32) ([]db.ChannelOutboundFailure, error) {
@@ -135,6 +137,17 @@ func (m *mockFailureStore) ClaimPendingOutboundFailures(_ context.Context, _ int
 	}
 	result := m.claimed
 	m.claimed = nil // one-shot
+	return result, nil
+}
+
+func (m *mockFailureStore) ClaimPendingOutboundFailuresForConnections(_ context.Context, arg db.ClaimPendingOutboundFailuresForConnectionsParams) ([]db.ChannelOutboundFailure, error) {
+	m.scopedClaimCalls++
+	m.scopedConnectionIDs = append([]string(nil), arg.ConnectionIds...)
+	if m.claimErr != nil {
+		return nil, m.claimErr
+	}
+	result := m.claimed
+	m.claimed = nil
 	return result, nil
 }
 
@@ -163,6 +176,7 @@ func makeFailure(id [16]byte, attempts int32, maxAttempts int32, provider string
 	return db.ChannelOutboundFailure{
 		ID:                   pgtype.UUID{Bytes: id, Valid: true},
 		Provider:             provider,
+		ConnectionID:         provider + "-conn",
 		TargetExternalUserID: pgtype.Text{String: externalUserID, Valid: true},
 		Payload:              payload,
 		Status:               "pending",
@@ -188,6 +202,45 @@ func TestRetryWorker_InactiveDoesNotClaimFailures(t *testing.T) {
 	}
 	if len(sender.calls) != 0 {
 		t.Fatalf("sender calls = %d, want 0 when worker is inactive", len(sender.calls))
+	}
+}
+
+func TestRetryWorker_ReadyConnectionsFilterClaims(t *testing.T) {
+	store := &mockFailureStore{
+		claimed: []db.ChannelOutboundFailure{makeFailure(testID1, 0, 3, "feishu", "ou_user1")},
+	}
+	sender := &mockRetrySender{}
+	worker := NewRetryWorkerWithStore(store, sender)
+	worker.SetReadyConnectionsFunc(func() []string { return []string{"conn-a", "conn-a", " "} })
+
+	worker.processBatch(context.Background())
+
+	if store.claimCalls != 0 {
+		t.Fatalf("legacy claim calls = %d, want 0", store.claimCalls)
+	}
+	if store.scopedClaimCalls != 1 {
+		t.Fatalf("scoped claim calls = %d, want 1", store.scopedClaimCalls)
+	}
+	if got, want := strings.Join(store.scopedConnectionIDs, ","), "conn-a"; got != want {
+		t.Fatalf("scoped connection ids = %q, want %q", got, want)
+	}
+}
+
+func TestRetryWorker_NoReadyConnectionsDoesNotClaim(t *testing.T) {
+	store := &mockFailureStore{
+		claimed: []db.ChannelOutboundFailure{makeFailure(testID1, 0, 3, "feishu", "ou_user1")},
+	}
+	sender := &mockRetrySender{}
+	worker := NewRetryWorkerWithStore(store, sender)
+	worker.SetReadyConnectionsFunc(func() []string { return nil })
+
+	worker.processBatch(context.Background())
+
+	if store.claimCalls != 0 || store.scopedClaimCalls != 0 {
+		t.Fatalf("claim calls = %d/%d, want 0/0", store.claimCalls, store.scopedClaimCalls)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("sender calls = %d, want 0", len(sender.calls))
 	}
 }
 

@@ -35,6 +35,27 @@ func normaliseEvent(channelName, botUserID string, raw RawEvent) (port.InboundEv
 	}
 }
 
+// feishuMention is the mention object Feishu attaches to im.message.receive_v1.
+type feishuMention struct {
+	Key  string `json:"key"`
+	ID   struct {
+		OpenID string `json:"open_id"`
+	} `json:"id"`
+	Name string `json:"name"`
+}
+
+func feishuBotMentioned(mentions []feishuMention, botUserID string) bool {
+	if botUserID == "" {
+		return false
+	}
+	for _, m := range mentions {
+		if m.ID.OpenID == botUserID {
+			return true
+		}
+	}
+	return false
+}
+
 // feishuMessageReceive mirrors the (subset of the) im.message.receive_v1
 // schema the adapter actually reads. We deliberately decode only the fields
 // we use — Feishu adds new optional fields regularly, and a strict full-shape
@@ -56,13 +77,7 @@ type feishuMessageReceive struct {
 			ChatType    string `json:"chat_type"`
 			MessageType string `json:"message_type"`
 			Content     string `json:"content"`
-			Mentions    []struct {
-				Key  string `json:"key"`
-				ID   struct {
-					OpenID string `json:"open_id"`
-				} `json:"id"`
-				Name string `json:"name"`
-			} `json:"mentions"`
+			Mentions    []feishuMention `json:"mentions"`
 		} `json:"message"`
 	} `json:"event"`
 }
@@ -118,6 +133,7 @@ func normaliseMessageReceive(channelName, botUserID string, raw RawEvent) (port.
 		MessageID:   ev.Event.Message.MessageID,
 		RawPayload:  append(json.RawMessage(nil), raw.Payload...),
 	}
+	base.BotMentioned = chatType == port.ChatTypeDirect || feishuBotMentioned(ev.Event.Message.Mentions, botUserID)
 
 	switch msgType {
 	case "text":
@@ -163,13 +179,7 @@ func normaliseMessageReceive(channelName, botUserID string, raw RawEvent) (port.
 // The leftover whitespace after removal is collapsed (multiple spaces →
 // single space) and trimmed at both ends so commonly-typed messages like
 // "@Bot   hi" produce "hi" rather than "   hi" or "  hi".
-func stripBotMentions(text string, mentions []struct {
-	Key  string `json:"key"`
-	ID   struct {
-		OpenID string `json:"open_id"`
-	} `json:"id"`
-	Name string `json:"name"`
-}, botUserID string) string {
+func stripBotMentions(text string, mentions []feishuMention, botUserID string) string {
 	if botUserID == "" {
 		// Defensive: if we don't know who the bot is, removing every
 		// "@_user_*" marker would also strip mentions of real users.

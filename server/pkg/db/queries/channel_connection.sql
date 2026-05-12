@@ -11,6 +11,14 @@ ORDER BY provider ASC, created_at ASC;
 SELECT * FROM channel_connection
 WHERE id = $1;
 
+-- name: BootstrapChannelConnection :exec
+INSERT INTO channel_connection (
+    id, provider, display_name, enabled, is_default, config, secret_config, status
+) VALUES (
+    $1, $2, $3, true, $4, $5, $6, 'configured'
+)
+ON CONFLICT (id) DO NOTHING;
+
 -- name: CreateChannelConnection :one
 INSERT INTO channel_connection (
     id, provider, display_name, enabled, is_default, config, secret_config, status

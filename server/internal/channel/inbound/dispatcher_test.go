@@ -222,11 +222,12 @@ func buildDispatchConfig() (inbound.DispatchConfig, *fakeIssueService, *fakeComm
 	recCh := &recordingChannel{name: "feishu"}
 	reg := channel.NewRegistry()
 	_ = reg.Register(recCh)
+	gw := gateway.NewRegistryGateway(reg)
 
 	cfg := inbound.DispatchConfig{
 		IssueFacade:   facade.NewIssueFacade(issueSvc),
 		CommentFacade: facade.NewCommentFacade(commentSvc),
-		Gateway:       gateway.NewRegistryGateway(reg),
+		ReplySink:     inbound.NewGatewayReplySink(gw),
 		ChatBinding:   &fakeChatBinding{wsID: uuid(0x01)},
 		UserResolver:  &fakeUserResolver{user: inbound.ResolvedUser{MulticaUserID: uuid(0x02), DisplayName: "测试用户"}},
 	}
@@ -1140,11 +1141,12 @@ func TestDispatchStep_SendFailure_DoesNotAbortPipeline(t *testing.T) {
 
 func TestDispatchStep_ChannelNotInRegistry_DoesNotAbort(t *testing.T) {
 	t.Parallel()
+	gw := gateway.NewRegistryGateway(channel.NewRegistry())
 
 	cfg := inbound.DispatchConfig{
 		IssueFacade:   facade.NewIssueFacade(&fakeIssueService{}),
 		CommentFacade: facade.NewCommentFacade(&fakeCommentService{}),
-		Gateway:       gateway.NewRegistryGateway(channel.NewRegistry()),
+		ReplySink:     inbound.NewGatewayReplySink(gw),
 		ChatBinding:   &fakeChatBinding{wsID: uuid(0x01)},
 		UserResolver:  &fakeUserResolver{user: inbound.ResolvedUser{MulticaUserID: uuid(0x02)}},
 	}

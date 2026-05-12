@@ -23,7 +23,7 @@ var slashLabelValueRe = regexp.MustCompile(`^[\w-]+$`)
 
 // SlashConfig configures slash command expansion and optional direct replies.
 type SlashConfig struct {
-	Gateway     port.ChannelGateway
+	ReplySink   ChannelReplySink
 	SendReplies bool
 	// Aliases maps slash subcommand (no leading /, case-insensitive) to an
 	// expansion template. Templates may be natural-language (applied after
@@ -276,10 +276,10 @@ func slashHelpText() string {
 }
 
 func (s *slashStep) maybeSendReply(ctx context.Context, evt port.InboundEvent, text string) {
-	if !s.cfg.SendReplies || s.cfg.Gateway == nil {
+	if !s.cfg.SendReplies || s.cfg.ReplySink == nil {
 		return
 	}
-	if _, err := s.cfg.Gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
+	if err := s.cfg.ReplySink.SendText(ctx, evt, port.OutboundMessage{
 		ChatID: evt.ChatID,
 		Text:   text,
 	}); err != nil {
@@ -292,15 +292,9 @@ func (s *slashStep) maybeSendReply(ctx context.Context, evt port.InboundEvent, t
 	}
 }
 
-// SlashAliasesFromPreferences extracts the legacy feishu slash aliases from
-// notification preferences JSON (best-effort; never panics).
-func SlashAliasesFromPreferences(prefs map[string]any) map[string]string {
-	return SlashAliasesFromPreferencesProvider(prefs, "feishu")
-}
-
-// SlashAliasesFromPreferencesProvider extracts channel.<provider>.slash_aliases
+// SlashAliasesFromPreferencesConnection extracts channel.<connection_id>.slash_aliases
 // from notification preferences JSON (best-effort; never panics).
-func SlashAliasesFromPreferencesProvider(prefs map[string]any, provider string) map[string]string {
+func SlashAliasesFromPreferencesConnection(prefs map[string]any, connectionID string) map[string]string {
 	out := map[string]string{}
 	if prefs == nil {
 		return out
@@ -309,11 +303,11 @@ func SlashAliasesFromPreferencesProvider(prefs map[string]any, provider string) 
 	if !ok {
 		return out
 	}
-	providerPrefs, ok := ch[provider].(map[string]any)
+	connectionPrefs, ok := ch[connectionID].(map[string]any)
 	if !ok {
 		return out
 	}
-	raw, ok := providerPrefs["slash_aliases"].(map[string]any)
+	raw, ok := connectionPrefs["slash_aliases"].(map[string]any)
 	if !ok {
 		return out
 	}

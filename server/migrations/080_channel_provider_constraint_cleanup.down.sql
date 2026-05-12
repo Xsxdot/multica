@@ -1,0 +1,2 @@
+-- Intentionally no-op. Provider allowlists are not restored because channel
+-- tables are connection-scoped and must accept every registered provider.

@@ -54,7 +54,7 @@ type ResolvedUser struct {
 type DispatchConfig struct {
 	IssueFacade      facade.IssueFacade
 	CommentFacade    facade.CommentFacade
-	Gateway          port.ChannelGateway
+	ReplySink        ChannelReplySink
 	ChatBinding      ChatBindingLookup
 	UserResolver     UserInfoResolver
 	ProjectValidator ProjectWorkspaceValidator
@@ -404,10 +404,10 @@ func (d *dispatchStep) resolveIssueAndUser(ctx context.Context, evt port.Inbound
 }
 
 func (d *dispatchStep) sendReply(ctx context.Context, evt port.InboundEvent, text string) error {
-	if d.cfg.Gateway == nil {
+	if d.cfg.ReplySink == nil {
 		return nil
 	}
-	_, err := d.cfg.Gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
+	err := d.cfg.ReplySink.SendText(ctx, evt, port.OutboundMessage{
 		ChatID: evt.ChatID,
 		Text:   text,
 	})

@@ -2,6 +2,8 @@ package manager
 
 import (
 	"context"
+	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,6 +94,66 @@ func TestDBConnectionsSupportsMultipleConnectionsForSameProvider(t *testing.T) {
 	}
 	if _, ok := got[0].config.Values["env_only"]; ok {
 		t.Fatalf("dbConnections leaked env-only config into DB-backed connection: %#v", got[0].config.Values)
+	}
+}
+
+func TestSplitConnectionValuesUsesProviderSchema(t *testing.T) {
+	config, secrets, err := splitConnectionValues([]provider.ConfigField{
+		{Key: "app_id"},
+		{Key: "app_secret", Secret: true},
+	}, map[string]string{
+		"app_id":     "app-1",
+		"app_secret": "secret-1",
+		"optional":   "value",
+	})
+	if err != nil {
+		t.Fatalf("splitConnectionValues: %v", err)
+	}
+	if config["app_id"] != "app-1" || config["optional"] != "value" {
+		t.Fatalf("config = %#v", config)
+	}
+	if secrets["app_secret"] != "secret-1" {
+		t.Fatalf("secrets = %#v", secrets)
+	}
+	if _, ok := config["app_secret"]; ok {
+		t.Fatalf("secret field leaked into public config: %#v", config)
+	}
+}
+
+func TestEnvBootstrapAllowedDefaults(t *testing.T) {
+	mgr := New(Config{})
+
+	t.Setenv("CHANNEL_ENV_BOOTSTRAP", "")
+	t.Setenv("APP_ENV", "production")
+	if mgr.envBootstrapAllowed() {
+		t.Fatal("production should not bootstrap env connections by default")
+	}
+
+	t.Setenv("CHANNEL_ENV_BOOTSTRAP", "")
+	t.Setenv("APP_ENV", "development")
+	if !mgr.envBootstrapAllowed() {
+		t.Fatal("non-production should bootstrap env connections by default")
+	}
+
+	t.Setenv("CHANNEL_ENV_BOOTSTRAP", "true")
+	t.Setenv("APP_ENV", "production")
+	if !mgr.envBootstrapAllowed() {
+		t.Fatal("explicit CHANNEL_ENV_BOOTSTRAP=true should override production default")
+	}
+}
+
+func TestReadyConnectionIDsReturnsOnlyLiveConnections(t *testing.T) {
+	readyA := &atomic.Bool{}
+	readyB := &atomic.Bool{}
+	readyA.Store(true)
+	mgr := New(Config{})
+	mgr.ready["conn-b"] = readyB
+	mgr.ready["conn-a"] = readyA
+	mgr.ready["conn-nil"] = nil
+
+	got := mgr.readyConnectionIDs()
+	if !reflect.DeepEqual(got, []string{"conn-a"}) {
+		t.Fatalf("readyConnectionIDs = %#v, want [conn-a]", got)
 	}
 }
 

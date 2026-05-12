@@ -74,13 +74,6 @@ func IsChannelEventEnabled(prefs map[string]any, connectionID, key string) bool 
 	return b
 }
 
-// IsFeishuEventEnabled is kept for older call-sites and tests. New channel
-// code should use IsChannelEventEnabled with the provider key from the
-// connection.
-func IsFeishuEventEnabled(prefs map[string]any, key string) bool {
-	return IsChannelEventEnabled(prefs, "feishu", key)
-}
-
 // validatePreferences checks that every key in the incoming preferences map is
 // valid. Flat keys must have string values ("all"/"muted"). The special
 // "channel" key must be an object whose sub-keys are recognised channel

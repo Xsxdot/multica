@@ -93,7 +93,7 @@ func TestSlashStep_Help_SkipAndReply(t *testing.T) {
 	t.Parallel()
 	cfg, _, _, recCh := buildDispatchConfig()
 	step := inbound.NewSlashStep(inbound.SlashConfig{
-		Gateway:     cfg.Gateway,
+		ReplySink:   cfg.ReplySink,
 		SendReplies: true,
 	})
 	for _, text := range []string{"/", "/help", "/HELP"} {
@@ -211,17 +211,17 @@ func TestSlashStep_CustomAliasPlaceholders(t *testing.T) {
 	assertRuleHit(t, evt.Text)
 }
 
-func TestSlashAliasesFromPreferences(t *testing.T) {
+func TestSlashAliasesFromPreferencesConnection(t *testing.T) {
 	t.Parallel()
 	raw := map[string]any{
 		"channel": map[string]any{
-			"feishu": map[string]any{
+			"conn-a": map[string]any{
 				"issues":        true,
 				"slash_aliases": map[string]any{"finish": "done {issue_key}"},
 			},
 		},
 	}
-	got := inbound.SlashAliasesFromPreferences(raw)
+	got := inbound.SlashAliasesFromPreferencesConnection(raw, "conn-a")
 	if got["finish"] != "done {issue_key}" {
 		t.Fatalf("got %#v", got)
 	}
@@ -285,7 +285,7 @@ func TestPipeline_SlashHelp_StopsBeforeIntent(t *testing.T) {
 		inbound.NewDedupStep(store),
 		inbound.NewIdentityBindStep(),
 		inbound.NewSlashStep(inbound.SlashConfig{
-			Gateway:     cfg.Gateway,
+			ReplySink:   cfg.ReplySink,
 			SendReplies: true,
 		}),
 		ruleIntentStep{},

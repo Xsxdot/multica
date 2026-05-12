@@ -19,17 +19,29 @@ import (
 func createTestBinding(t *testing.T, workspaceID, provider, externalChatID, chatType string, isPrimary bool, boundByUserID string) string {
 	t.Helper()
 
+	connID := fmt.Sprintf("conn-test-binding-%d", time.Now().UnixNano())
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO channel_connection (id, provider, display_name, enabled, is_default, config, secret_config, status)
+		VALUES ($1, $2, $3, true, false, '{}', '{}', 'connected')
+	`, connID, provider, "Test "+connID); err != nil {
+		t.Fatalf("failed to create channel connection: %v", err)
+	}
+
 	wsUUID := parseUUID(workspaceID)
 	userUUID := parseUUID(boundByUserID)
 
 	binding, err := testHandler.Queries.CreateChannelChatBinding(t.Context(), db.CreateChannelChatBindingParams{
 		Provider:         provider,
+		ConnectionID:     connID,
 		ExternalChatID:   externalChatID,
 		ChatType:         chatType,
 		WorkspaceID:      wsUUID,
 		IsPrimary:        isPrimary,
 		BoundByUserID:    userUUID,
 		ExternalChatName: pgtype.Text{String: "Test Chat " + externalChatID, Valid: true},
+		ListenMode:       "mentions",
+		DefaultProjectID: pgtype.UUID{Valid: false},
+		AgentID:          pgtype.UUID{Valid: false},
 	})
 	if err != nil {
 		t.Fatalf("failed to create test binding: %v", err)
@@ -37,6 +49,7 @@ func createTestBinding(t *testing.T, workspaceID, provider, externalChatID, chat
 
 	t.Cleanup(func() {
 		testHandler.Queries.DeleteChannelChatBinding(t.Context(), binding.ID)
+		_, _ = testPool.Exec(t.Context(), `DELETE FROM channel_connection WHERE id = $1`, connID)
 	})
 
 	return uuidToString(binding.ID)

@@ -83,12 +83,14 @@ func buildAttachmentStepConfig() (inbound.AttachmentConfig, *fakeAttachmentUploa
 	recCh := &recordingChannel{name: "feishu"}
 	reg := channel.NewRegistry()
 	_ = reg.Register(recCh)
+	gw := gateway.NewRegistryGateway(reg)
 
 	cfg := inbound.AttachmentConfig{
 		Storage:           uploader,
 		AttachmentQuerier: querier,
 		FileDownloader:    downloader,
-		Gateway:           gateway.NewRegistryGateway(reg),
+		Gateway:           gw,
+		ReplySink:         inbound.NewGatewayReplySink(gw),
 		ChatBinding:       &fakeChatBinding{wsID: pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}},
 		UserResolver:      &fakeUserResolver{user: inbound.ResolvedUser{MulticaUserID: pgtype.UUID{Bytes: [16]byte{0x02}, Valid: true}, DisplayName: "测试用户"}},
 		IssueFacade:       facade.NewIssueFacade(&fakeIssueService{}),
@@ -199,12 +201,14 @@ func TestAttachmentStep_ImageWithIdentifier_HappyPath(t *testing.T) {
 	recCh := &recordingChannel{name: "feishu"}
 	reg := channel.NewRegistry()
 	_ = reg.Register(recCh)
+	gw := gateway.NewRegistryGateway(reg)
 
 	cfg := inbound.AttachmentConfig{
 		Storage:           uploader,
 		AttachmentQuerier: querier,
 		FileDownloader:    downloader,
-		Gateway:           gateway.NewRegistryGateway(reg),
+		Gateway:           gw,
+		ReplySink:         inbound.NewGatewayReplySink(gw),
 		ChatBinding:       &fakeChatBinding{wsID: pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}},
 		UserResolver:      &fakeUserResolver{user: inbound.ResolvedUser{MulticaUserID: pgtype.UUID{Bytes: [16]byte{0x02}, Valid: true}}},
 		IssueFacade:       facade.NewIssueFacade(issueSvc),
@@ -306,12 +310,14 @@ func TestAttachmentStep_FileWithIdentifier_HappyPath(t *testing.T) {
 	recCh := &recordingChannel{name: "feishu"}
 	reg := channel.NewRegistry()
 	_ = reg.Register(recCh)
+	gw := gateway.NewRegistryGateway(reg)
 
 	cfg := inbound.AttachmentConfig{
 		Storage:           uploader,
 		AttachmentQuerier: querier,
 		FileDownloader:    downloader,
-		Gateway:           gateway.NewRegistryGateway(reg),
+		Gateway:           gw,
+		ReplySink:         inbound.NewGatewayReplySink(gw),
 		ChatBinding:       &fakeChatBinding{wsID: pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}},
 		UserResolver:      &fakeUserResolver{user: inbound.ResolvedUser{MulticaUserID: pgtype.UUID{Bytes: [16]byte{0x02}, Valid: true}}},
 		IssueFacade:       facade.NewIssueFacade(issueSvc),
@@ -364,12 +370,14 @@ func TestAttachmentStep_DownloadFailure_ErrorReply(t *testing.T) {
 	recCh := &recordingChannel{name: "feishu"}
 	reg := channel.NewRegistry()
 	_ = reg.Register(recCh)
+	gw := gateway.NewRegistryGateway(reg)
 
 	cfg := inbound.AttachmentConfig{
 		Storage:           &fakeAttachmentUploader{},
 		AttachmentQuerier: &fakeAttachmentQuerier{},
 		FileDownloader:    downloader,
-		Gateway:           gateway.NewRegistryGateway(reg),
+		Gateway:           gw,
+		ReplySink:         inbound.NewGatewayReplySink(gw),
 		ChatBinding:       &fakeChatBinding{wsID: pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}},
 		UserResolver:      &fakeUserResolver{user: inbound.ResolvedUser{MulticaUserID: pgtype.UUID{Bytes: [16]byte{0x02}, Valid: true}}},
 		IssueFacade:       facade.NewIssueFacade(issueSvc),
@@ -412,12 +420,14 @@ func TestAttachmentStep_UploadFailure_ErrorReply(t *testing.T) {
 	recCh := &recordingChannel{name: "feishu"}
 	reg := channel.NewRegistry()
 	_ = reg.Register(recCh)
+	gw := gateway.NewRegistryGateway(reg)
 
 	cfg := inbound.AttachmentConfig{
 		Storage:           uploader,
 		AttachmentQuerier: &fakeAttachmentQuerier{},
 		FileDownloader:    downloader,
-		Gateway:           gateway.NewRegistryGateway(reg),
+		Gateway:           gw,
+		ReplySink:         inbound.NewGatewayReplySink(gw),
 		ChatBinding:       &fakeChatBinding{wsID: pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}},
 		UserResolver:      &fakeUserResolver{user: inbound.ResolvedUser{MulticaUserID: pgtype.UUID{Bytes: [16]byte{0x02}, Valid: true}}},
 		IssueFacade:       facade.NewIssueFacade(issueSvc),
@@ -456,12 +466,14 @@ func TestAttachmentStep_IssueNotFound_ErrorReply(t *testing.T) {
 	recCh := &recordingChannel{name: "feishu"}
 	reg := channel.NewRegistry()
 	_ = reg.Register(recCh)
+	gw := gateway.NewRegistryGateway(reg)
 
 	cfg := inbound.AttachmentConfig{
 		Storage:           &fakeAttachmentUploader{},
 		AttachmentQuerier: &fakeAttachmentQuerier{},
 		FileDownloader:    downloader,
-		Gateway:           gateway.NewRegistryGateway(reg),
+		Gateway:           gw,
+		ReplySink:         inbound.NewGatewayReplySink(gw),
 		ChatBinding:       &fakeChatBinding{wsID: pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}},
 		UserResolver:      &fakeUserResolver{user: inbound.ResolvedUser{MulticaUserID: pgtype.UUID{Bytes: [16]byte{0x02}, Valid: true}}},
 		IssueFacade:       facade.NewIssueFacade(issueSvc),
@@ -505,12 +517,14 @@ func TestAttachmentStep_MultipleAttachments_Processed(t *testing.T) {
 	recCh := &recordingChannel{name: "feishu"}
 	reg := channel.NewRegistry()
 	_ = reg.Register(recCh)
+	gw := gateway.NewRegistryGateway(reg)
 
 	cfg := inbound.AttachmentConfig{
 		Storage:           uploader,
 		AttachmentQuerier: querier,
 		FileDownloader:    downloader,
-		Gateway:           gateway.NewRegistryGateway(reg),
+		Gateway:           gw,
+		ReplySink:         inbound.NewGatewayReplySink(gw),
 		ChatBinding:       &fakeChatBinding{wsID: pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}},
 		UserResolver:      &fakeUserResolver{user: inbound.ResolvedUser{MulticaUserID: pgtype.UUID{Bytes: [16]byte{0x02}, Valid: true}}},
 		IssueFacade:       facade.NewIssueFacade(issueSvc),

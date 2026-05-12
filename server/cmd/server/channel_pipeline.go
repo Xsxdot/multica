@@ -45,6 +45,7 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 	if len(opts) > 0 {
 		opt = opts[0]
 	}
+	replySink := inbound.NewGatewayReplySink(opt.Gateway)
 
 	ruleResolvers := []chintent.IntentResolver{
 		chintent.NewRuleResolver(chintent.NewRuleMatcher()),
@@ -61,16 +62,17 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 
 	pre := inbound.NewPipeline(
 		inbound.NewNormalizeStep(),
-		inbound.NewUserIdentityBindStep(pool, opt.Gateway, issuer),
-		inbound.NewChatBindCommandStep(opt.Gateway, issuer),
-		inbound.NewSlashStep(inbound.SlashConfig{Gateway: opt.Gateway}),
+		inbound.NewUserIdentityBindStep(pool, replySink, issuer),
+		inbound.NewChatBindCommandStep(opt.Gateway, replySink, issuer),
+		inbound.NewChatSettingsFilterStep(inbound.NewDBInboundEventStore(pool)),
+		inbound.NewSlashStep(inbound.SlashConfig{ReplySink: replySink}),
 	)
 	pre.SetObserver(opt.Observer)
 
 	postSteps := []inbound.Step{
 		inbound.NewAuthzStep(inbound.AuthzConfig{
 			Store:        bindings,
-			Gateway:      opt.Gateway,
+			ReplySink:    replySink,
 			SendReplies:  true,
 			RejectAsSkip: true,
 		}),
@@ -81,6 +83,7 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 			AttachmentQuerier: facade.NewAttachmentFacade(facadeimpl.NewAttachmentService(queries)),
 			FileDownloader:    opt.FileDownloader,
 			Gateway:           opt.Gateway,
+			ReplySink:         replySink,
 			ChatBinding:       bindings,
 			UserResolver:      userResolver,
 			IssueFacade:       facade.NewIssueFacade(issueSvc),
@@ -92,7 +95,7 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 		inbound.NewDispatchStep(inbound.DispatchConfig{
 			IssueFacade:      facade.NewIssueFacade(issueSvc),
 			CommentFacade:    facade.NewCommentFacade(commentSvc),
-			Gateway:          opt.Gateway,
+			ReplySink:        replySink,
 			ChatBinding:      bindings,
 			UserResolver:     userResolver,
 			ProjectValidator: inbound.NewDBProjectWorkspaceValidator(pool),

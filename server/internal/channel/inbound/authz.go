@@ -124,8 +124,8 @@ type AuthzStore interface {
 // AuthzConfig holds the dependencies for the authz Step. All fields
 // are required unless noted otherwise.
 type AuthzConfig struct {
-	Store   AuthzStore
-	Gateway port.ChannelGateway
+	Store     AuthzStore
+	ReplySink ChannelReplySink
 	// SendReplies controls whether the authz step sends the rejection
 	// reply directly via the channel gateway. When false (e.g. in
 	// tests), the step only returns the error and the caller is
@@ -230,18 +230,18 @@ func (s *authzStep) reject(ctx context.Context, evt port.InboundEvent, code Auth
 }
 
 // maybeSendReply delivers the reply text to the originating chat when
-// SendReplies is enabled and the channel gateway is available. Errors are
+// SendReplies is enabled and the reply sink is available. Errors are
 // logged at Warn level but not propagated because the authz rejection takes
 // precedence.
 func (s *authzStep) maybeSendReply(ctx context.Context, evt port.InboundEvent, text string) {
-	if !s.cfg.SendReplies || s.cfg.Gateway == nil {
+	if !s.cfg.SendReplies || s.cfg.ReplySink == nil {
 		return
 	}
 	target := port.TargetChat(evt.ChatID)
 	if evt.ChatType == port.ChatTypeDirect {
 		target = port.TargetUser(evt.SenderID)
 	}
-	if _, err := s.cfg.Gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
+	if err := s.cfg.ReplySink.SendText(ctx, evt, port.OutboundMessage{
 		Target: target,
 		ChatID: evt.ChatID,
 		Text:   text,

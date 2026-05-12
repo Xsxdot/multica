@@ -8,8 +8,11 @@ import { useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "@multica/core/api";
 import { useAuthStore } from "@multica/core/auth";
 import { paths } from "@multica/core/paths";
-import { workspaceListOptions } from "@multica/core/workspace/queries";
+import { workspaceListOptions, agentListOptions } from "@multica/core/workspace/queries";
+import type { ChannelListenMode } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
+import { Label } from "@multica/ui/components/ui/label";
+import { NativeSelect } from "@multica/ui/components/ui/native-select";
 
 type BindState = "idle" | "binding" | "success" | "error";
 
@@ -46,12 +49,19 @@ function BindPageContent() {
   });
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
   const selectedWorkspace = workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
+  const [listenMode, setListenMode] = useState<ChannelListenMode>("mentions");
+  const [agentId, setAgentId] = useState("");
+  const [defaultProjectId, setDefaultProjectId] = useState("");
   const { data: projectsData, isLoading: projectsLoading } = useQuery({
     queryKey: ["channel-bind-projects", selectedWorkspaceId],
     queryFn: () => api.listProjects({ workspace_id: selectedWorkspaceId ?? undefined }),
     enabled: !!user && effectiveKind === "chat" && !!selectedWorkspaceId,
   });
   const projects = projectsData?.projects ?? [];
+  const { data: agents = [] } = useQuery({
+    ...agentListOptions(selectedWorkspaceId ?? ""),
+    enabled: !!user && effectiveKind === "chat" && !!selectedWorkspaceId,
+  });
   const [state, setState] = useState<BindState>("idle");
   const [message, setMessage] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
@@ -68,6 +78,13 @@ function BindPageContent() {
   useEffect(() => {
     if (!isLoading && !user) router.replace(loginHref);
   }, [isLoading, loginHref, router, user]);
+
+  useEffect(() => {
+    if (!selectedWorkspaceId) return;
+    setListenMode("mentions");
+    setAgentId("");
+    setDefaultProjectId("");
+  }, [selectedWorkspaceId]);
 
   useEffect(() => {
     if (isLoading || !user || !token || effectiveKind !== "user") return;
@@ -160,19 +177,26 @@ function BindPageContent() {
   }
 
   if (effectiveKind === "chat") {
-    const bindChat = (workspace: { id: string; slug: string; name: string }, defaultProjectId: string | null) => {
-      const projectKey = defaultProjectId ?? "none";
-      const bindingKey = `${user.id}:${effectiveProvider}:${effectiveConnectionId}:${token}:${workspace.id}:${projectKey}:${retryNonce}`;
+    const activeAgents = agents.filter((a) => !a.archived_at);
+
+    const submitChatBinding = (workspace: { id: string; slug: string; name: string }) => {
+      const projKey = defaultProjectId === "" ? "none" : defaultProjectId;
+      const bindingKey = `${user.id}:${effectiveProvider}:${effectiveConnectionId}:${token}:${workspace.id}:${projKey}:${listenMode}:${agentId}:${retryNonce}`;
       if (bindingKeyRef.current === bindingKey) return;
       bindingKeyRef.current = bindingKey;
       setState("binding");
+      const payload: Parameters<typeof api.createChannelBinding>[1] = {
+        token,
+        provider: effectiveProvider,
+        connection_id: effectiveConnectionId,
+        default_project_id: defaultProjectId === "" ? null : defaultProjectId,
+        listen_mode: listenMode,
+      };
+      if (agentId) {
+        payload.agent_id = agentId;
+      }
       api
-        .createChannelBinding(workspace.id, {
-          token,
-          provider: effectiveProvider,
-          connection_id: effectiveConnectionId,
-          default_project_id: defaultProjectId,
-        })
+        .createChannelBinding(workspace.id, payload)
         .then(() => {
           setState("success");
           setMessage(`${connectionName} 会话已绑定到 ${workspace.name}。回到原会话发送指令即可使用。`);
@@ -188,29 +212,61 @@ function BindPageContent() {
       return (
         <BindShell
           icon={projectsLoading ? <Loader2 className="size-5 animate-spin" /> : <MessageCircle className="size-5" />}
-          title="选择默认项目"
-          description={`为 ${selectedWorkspace.name} 选择这个 ${connectionName} 会话的默认项目。也可以不设置默认项目。`}
+          title="会话绑定设置"
+          description={`将 ${connectionName} 会话绑定到 ${selectedWorkspace.name}。可选择默认项目、监听范围以及固定用于语义理解的 Agent。`}
           action={
-            <div className="space-y-2">
-              <Button
-                className="w-full justify-start"
-                variant="secondary"
-                disabled={state === "binding"}
-                onClick={() => bindChat(selectedWorkspace, null)}
-              >
-                无默认项目
-              </Button>
-              {projects.map((project) => (
-                <Button
-                  key={project.id}
-                  className="w-full justify-start"
-                  variant="secondary"
-                  disabled={state === "binding"}
-                  onClick={() => bindChat(selectedWorkspace, project.id)}
+            <div className="space-y-4">
+              <div className="grid gap-2">
+                <Label htmlFor="bind-default-project">默认项目</Label>
+                <NativeSelect
+                  id="bind-default-project"
+                  value={defaultProjectId}
+                  disabled={state === "binding" || projectsLoading}
+                  onChange={(e) => setDefaultProjectId(e.target.value)}
                 >
-                  {project.title}
-                </Button>
-              ))}
+                  <option value="">无默认项目</option>
+                  {projects.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.title}
+                    </option>
+                  ))}
+                </NativeSelect>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="bind-listen-mode">监听范围</Label>
+                <NativeSelect
+                  id="bind-listen-mode"
+                  value={listenMode}
+                  disabled={state === "binding"}
+                  onChange={(e) => setListenMode(e.target.value as ChannelListenMode)}
+                >
+                  <option value="mentions">仅 @ 机器人时处理</option>
+                  <option value="all">处理群内所有消息</option>
+                </NativeSelect>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="bind-agent">指定 Agent（可选）</Label>
+                <NativeSelect
+                  id="bind-agent"
+                  value={agentId}
+                  disabled={state === "binding"}
+                  onChange={(e) => setAgentId(e.target.value)}
+                >
+                  <option value="">未指定（自动选择）</option>
+                  {activeAgents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
+                </NativeSelect>
+              </div>
+              <Button
+                className="w-full"
+                disabled={state === "binding"}
+                onClick={() => submitChatBinding(selectedWorkspace)}
+              >
+                完成绑定
+              </Button>
               <Button
                 className="w-full justify-start"
                 variant="ghost"

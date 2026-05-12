@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 const (
@@ -85,6 +86,8 @@ type ExpiredWaitingUserEvent struct {
 type ChatBindingContext struct {
 	WorkspaceID      string
 	DefaultProjectID string
+	ListenMode       string
+	AgentID          string
 }
 
 type InboundEventStore interface {
@@ -552,14 +555,39 @@ LIMIT $1
 	return out, rows.Err()
 }
 
-func (s *DBInboundEventStore) LookupChatContext(ctx context.Context, channelName, chatID string) (ChatBindingContext, error) {
-	var out ChatBindingContext
-	err := s.pool.QueryRow(ctx, `
-SELECT workspace_id::text, COALESCE(default_project_id::text, '')
-FROM channel_chat_binding
-WHERE connection_id = $1 AND external_chat_id = $2
-`, channelName, chatID).Scan(&out.WorkspaceID, &out.DefaultProjectID)
-	return out, err
+func (s *DBInboundEventStore) LookupChatContext(ctx context.Context, connectionID, chatID string) (ChatBindingContext, error) {
+	q := db.New(s.pool)
+	row, err := q.GetChannelChatBindingContextForInbound(ctx, db.GetChannelChatBindingContextForInboundParams{
+		ConnectionID:   connectionID,
+		ExternalChatID: chatID,
+	})
+	if err != nil {
+		return ChatBindingContext{}, err
+	}
+	listen := row.ListenMode
+	if listen == "" {
+		listen = "mentions"
+	}
+	return ChatBindingContext{
+		WorkspaceID:      row.WorkspaceID,
+		DefaultProjectID: sqlcOptionalString(row.DefaultProjectID),
+		ListenMode:       listen,
+		AgentID:          sqlcOptionalString(row.AgentID),
+	}, nil
+}
+
+func sqlcOptionalString(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch x := v.(type) {
+	case string:
+		return x
+	case []byte:
+		return string(x)
+	default:
+		return fmt.Sprint(x)
+	}
 }
 
 func (s *DBInboundEventStore) RequeueStaleProcessing(ctx context.Context, olderThan time.Duration) (int64, error) {

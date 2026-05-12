@@ -75,6 +75,63 @@ func (q *Queries) ClaimPendingOutboundFailures(ctx context.Context, limit int32)
 	return items, nil
 }
 
+const claimPendingOutboundFailuresForConnections = `-- name: ClaimPendingOutboundFailuresForConnections :many
+UPDATE channel_outbound_failure SET
+    next_retry_at = now() + interval '5 minutes',
+    updated_at = now()
+WHERE id IN (
+    SELECT id FROM channel_outbound_failure
+    WHERE status = 'pending'
+      AND next_retry_at <= now()
+      AND connection_id = ANY($1::text[])
+    ORDER BY next_retry_at ASC
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, provider, event_kind, target_user_id, target_external_user_id, payload, status, attempts, max_attempts, next_retry_at, last_error, last_attempted_at, created_at, updated_at, connection_id
+`
+
+type ClaimPendingOutboundFailuresForConnectionsParams struct {
+	ConnectionIds []string `json:"connection_ids"`
+	ClaimLimit    int32    `json:"claim_limit"`
+}
+
+func (q *Queries) ClaimPendingOutboundFailuresForConnections(ctx context.Context, arg ClaimPendingOutboundFailuresForConnectionsParams) ([]ChannelOutboundFailure, error) {
+	rows, err := q.db.Query(ctx, claimPendingOutboundFailuresForConnections, arg.ConnectionIds, arg.ClaimLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ChannelOutboundFailure{}
+	for rows.Next() {
+		var i ChannelOutboundFailure
+		if err := rows.Scan(
+			&i.ID,
+			&i.Provider,
+			&i.EventKind,
+			&i.TargetUserID,
+			&i.TargetExternalUserID,
+			&i.Payload,
+			&i.Status,
+			&i.Attempts,
+			&i.MaxAttempts,
+			&i.NextRetryAt,
+			&i.LastError,
+			&i.LastAttemptedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ConnectionID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const cleanupExpiredBindTokens = `-- name: CleanupExpiredBindTokens :exec
 DELETE FROM channel_bind_token
 WHERE (consumed_at IS NOT NULL AND consumed_at < now() - interval '1 day')

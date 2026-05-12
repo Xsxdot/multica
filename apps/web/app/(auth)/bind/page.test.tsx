@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { authStateRef, mockCreateChannelBinding, mockCreateChannelUserBinding, mockGetBindPreview, mockListProjects, routerPush, routerReplace, searchParamsState } =
+const { authStateRef, mockCreateChannelBinding, mockCreateChannelUserBinding, mockGetBindPreview, mockListProjects, mockListAgents, routerPush, routerReplace, searchParamsState } =
   vi.hoisted(() => ({
     authStateRef: {
       state: {
@@ -14,6 +14,7 @@ const { authStateRef, mockCreateChannelBinding, mockCreateChannelUserBinding, mo
     mockCreateChannelUserBinding: vi.fn(),
     mockGetBindPreview: vi.fn(),
     mockListProjects: vi.fn(),
+    mockListAgents: vi.fn(),
     routerPush: vi.fn(),
     routerReplace: vi.fn(),
     searchParamsState: { params: new URLSearchParams({ token: "bind-token", provider: "feishu" }) },
@@ -46,6 +47,12 @@ vi.mock("@tanstack/react-query", () => ({
     if (options.queryKey?.[0] === "channel-bind-projects") {
       return {
         data: mockListProjects(),
+        isLoading: false,
+      };
+    }
+    if (options.queryKey?.[0] === "workspaces" && options.queryKey?.[2] === "agents") {
+      return {
+        data: mockListAgents(),
         isLoading: false,
       };
     }
@@ -84,6 +91,7 @@ vi.mock("@multica/core/api", () => {
       createChannelUserBinding: mockCreateChannelUserBinding,
       getChannelBindTokenPreview: mockGetBindPreview,
       listProjects: mockListProjects,
+      listAgents: mockListAgents,
     },
   };
 });
@@ -98,6 +106,7 @@ describe("BindPage", () => {
     searchParamsState.params = new URLSearchParams({ token: "bind-token", provider: "feishu" });
     mockGetBindPreview.mockReturnValue(userPreview());
     mockListProjects.mockReturnValue({ projects: [] });
+    mockListAgents.mockReturnValue([]);
     mockCreateChannelUserBinding.mockResolvedValue({
       provider: "feishu",
       external_user_id: "ou_1",
@@ -131,12 +140,14 @@ describe("BindPage", () => {
     mockListProjects.mockReturnValue({
       projects: [{ id: "project-1", title: "Launch" }],
     });
+    mockListAgents.mockReturnValue([]);
 
     const user = userEvent.setup();
     render(<BindPage />);
 
     await user.click(screen.getByRole("button", { name: "Acme" }));
-    await user.click(screen.getByRole("button", { name: "Launch" }));
+    await user.selectOptions(screen.getByLabelText("默认项目"), "project-1");
+    await user.click(screen.getByRole("button", { name: "完成绑定" }));
 
     await waitFor(() => {
       expect(mockCreateChannelBinding).toHaveBeenCalledWith("ws-1", {
@@ -144,8 +155,38 @@ describe("BindPage", () => {
         provider: "feishu",
         connection_id: "feishu",
         default_project_id: "project-1",
+        listen_mode: "mentions",
       });
     });
     expect(routerPush).toHaveBeenCalledWith("/acme/settings");
+  });
+
+  it("binds chat with optional agent id", async () => {
+    mockGetBindPreview.mockReturnValue({
+      ...userPreview(),
+      kind: "chat",
+      external_chat_id: "oc_1",
+      external_chat_name: "Team",
+    });
+    mockListProjects.mockReturnValue({ projects: [] });
+    mockListAgents.mockReturnValue([{ id: "agent-1", name: "Alpha", archived_at: null }]);
+
+    const user = userEvent.setup();
+    render(<BindPage />);
+
+    await user.click(screen.getByRole("button", { name: "Acme" }));
+    await user.selectOptions(screen.getByLabelText("指定 Agent（可选）"), "agent-1");
+    await user.click(screen.getByRole("button", { name: "完成绑定" }));
+
+    await waitFor(() => {
+      expect(mockCreateChannelBinding).toHaveBeenCalledWith("ws-1", {
+        token: "bind-token",
+        provider: "feishu",
+        connection_id: "feishu",
+        default_project_id: null,
+        listen_mode: "mentions",
+        agent_id: "agent-1",
+      });
+    });
   });
 });

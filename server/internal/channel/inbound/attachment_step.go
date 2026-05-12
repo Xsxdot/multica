@@ -33,6 +33,7 @@ type AttachmentConfig struct {
 	AttachmentQuerier AttachmentQuerier
 	FileDownloader    port.FileDownloader
 	Gateway           port.ChannelGateway
+	ReplySink         ChannelReplySink
 	ChatBinding       ChatBindingLookup
 	UserResolver      UserInfoResolver
 	IssueFacade       facade.IssueFacade
@@ -185,10 +186,10 @@ func (s *attachmentStep) fileDownloader(evt port.InboundEvent) (port.FileDownloa
 }
 
 func (s *attachmentStep) sendReply(ctx context.Context, evt port.InboundEvent, text string) {
-	if s.cfg.Gateway == nil {
+	if s.cfg.ReplySink == nil {
 		return
 	}
-	if _, err := s.cfg.Gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{ChatID: evt.ChatID, Text: text}); err != nil {
+	if err := s.cfg.ReplySink.SendText(ctx, evt, port.OutboundMessage{ChatID: evt.ChatID, Text: text}); err != nil {
 		slog.Error("attachment: send reply failed", "channel", evt.ChannelName, "chat_id", evt.ChatID, "error", err)
 	}
 }

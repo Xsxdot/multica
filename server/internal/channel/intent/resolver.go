@@ -17,6 +17,9 @@ const (
 type IntentRequest struct {
 	WorkspaceID      string
 	DefaultProjectID string
+	// AgentID, when non-empty, forces channel intent to use that agent only
+	// (no fallback to another agent if unavailable).
+	AgentID          string
 	Text             string
 	Channel          string
 	ConnectionID     string

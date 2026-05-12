@@ -32,6 +32,21 @@ WHERE id IN (
 )
 RETURNING *;
 
+-- name: ClaimPendingOutboundFailuresForConnections :many
+UPDATE channel_outbound_failure SET
+    next_retry_at = now() + interval '5 minutes',
+    updated_at = now()
+WHERE id IN (
+    SELECT id FROM channel_outbound_failure
+    WHERE status = 'pending'
+      AND next_retry_at <= now()
+      AND connection_id = ANY(sqlc.arg(connection_ids)::text[])
+    ORDER BY next_retry_at ASC
+    LIMIT sqlc.arg(claim_limit)
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING *;
+
 -- name: IncrementOutboundFailureAttempts :one
 -- Record a retry attempt: bump attempts, set last_error, last_attempted_at,
 -- and compute next_retry_at using the caller-supplied backoff duration.

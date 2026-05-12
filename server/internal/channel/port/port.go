@@ -12,11 +12,10 @@ import (
 type EventType string
 
 const (
-	// EventTypeMessageReceived is emitted when a user sends a message that the
-	// adapter has decided is addressed to the bot (e.g. an @-mention in a
-	// group, or any direct message). Filtering is the adapter's job — by the
-	// time an InboundEvent of this type leaves Events(), downstream code can
-	// assume the message is intended for processing.
+	// EventTypeMessageReceived is emitted when a user sends a message in a
+	// conversation the adapter is subscribed to. Group chats may still be
+	// filtered later using BotMentioned + the workspace binding's listen_mode;
+	// direct chats are typically processed without that gate.
 	EventTypeMessageReceived EventType = "message_received"
 
 	// EventTypeMessageRecalled is emitted when the upstream platform signals
@@ -95,6 +94,8 @@ const (
 //     by the inbound de-dup table (T6). Adapters must NOT generate their own
 //     uuid here — re-deliveries from the platform's replay buffer must collide
 //     with prior receipts so the dedup table can drop them.
+//   - BotMentioned is set by the adapter when the platform indicates the bot
+//     was @-mentioned in a group (ignored for direct chats at the filter step).
 //   - Text is the user-visible message body with mention markers stripped
 //     (e.g. "@_user_xxx hi" → "hi"). Keeping the canonical form here lets the
 //     intent parser (T9) match against a clean string.
@@ -112,6 +113,7 @@ type InboundEvent struct {
 	SenderID            string
 	SenderName          string
 	Text                string
+	BotMentioned        bool
 	MessageID           string
 	RuntimeEventID      string `json:"-"`
 	Intent              InboundIntent

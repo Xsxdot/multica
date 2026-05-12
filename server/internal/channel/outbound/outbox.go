@@ -90,7 +90,31 @@ INSERT INTO channel_outbound_notification (
 	return err
 }
 
-func (s *DBNotificationStore) ClaimDue(ctx context.Context, limit int32) ([]OutboxNotification, error) {
+func (s *DBNotificationStore) ClaimDue(ctx context.Context, limit int32, readyConnectionIDs []string) ([]OutboxNotification, error) {
+	if readyConnectionIDs != nil && len(readyConnectionIDs) == 0 {
+		return nil, nil
+	}
+	if readyConnectionIDs != nil {
+		const q = `
+UPDATE channel_outbound_notification SET
+    status = 'processing',
+    next_attempt_at = now() + interval '5 minutes',
+    updated_at = now()
+WHERE id IN (
+    SELECT id FROM channel_outbound_notification
+    WHERE status = 'pending'
+      AND aggregation_due_at <= now()
+      AND next_attempt_at <= now()
+      AND connection_id = ANY($2::text[])
+    ORDER BY aggregation_due_at ASC, created_at ASC
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
+          title, body, attempts, max_attempts
+`
+		return s.queryNotifications(ctx, q, limit, readyConnectionIDs)
+	}
 	const q = `
 UPDATE channel_outbound_notification SET
     status = 'processing',
@@ -111,7 +135,30 @@ RETURNING id, provider, connection_id, event_kind, target_user_id, target_extern
 	return s.queryNotifications(ctx, q, limit)
 }
 
-func (s *DBNotificationStore) ReclaimStaleProcessing(ctx context.Context, limit int32, staleAfter time.Duration) ([]OutboxNotification, error) {
+func (s *DBNotificationStore) ReclaimStaleProcessing(ctx context.Context, limit int32, staleAfter time.Duration, readyConnectionIDs []string) ([]OutboxNotification, error) {
+	if readyConnectionIDs != nil && len(readyConnectionIDs) == 0 {
+		return nil, nil
+	}
+	if readyConnectionIDs != nil {
+		const q = `
+UPDATE channel_outbound_notification SET
+    status = 'processing',
+    next_attempt_at = now() + interval '5 minutes',
+    updated_at = now()
+WHERE id IN (
+    SELECT id FROM channel_outbound_notification
+    WHERE status = 'processing'
+      AND updated_at < now() - $2::interval
+      AND connection_id = ANY($3::text[])
+    ORDER BY updated_at ASC
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
+          title, body, attempts, max_attempts
+`
+		return s.queryNotifications(ctx, q, limit, pgInterval(staleAfter), readyConnectionIDs)
+	}
 	const q = `
 UPDATE channel_outbound_notification SET
     status = 'processing',
@@ -221,14 +268,15 @@ WHERE status IN ('sent', 'dead')
 }
 
 type OutboxWorker struct {
-	store  NotificationStore
-	sender RetrySender
-	active func() bool
+	store            NotificationStore
+	sender           RetrySender
+	active           func() bool
+	readyConnections func() []string
 }
 
 type NotificationStore interface {
-	ClaimDue(ctx context.Context, limit int32) ([]OutboxNotification, error)
-	ReclaimStaleProcessing(ctx context.Context, limit int32, staleAfter time.Duration) ([]OutboxNotification, error)
+	ClaimDue(ctx context.Context, limit int32, readyConnectionIDs []string) ([]OutboxNotification, error)
+	ReclaimStaleProcessing(ctx context.Context, limit int32, staleAfter time.Duration, readyConnectionIDs []string) ([]OutboxNotification, error)
 	MarkSent(ctx context.Context, ids []pgtype.UUID) error
 	ScheduleRetry(ctx context.Context, ids []pgtype.UUID, lastError string, backoff time.Duration) error
 	MarkDead(ctx context.Context, ids []pgtype.UUID, lastError string) error
@@ -243,8 +291,21 @@ func (w *OutboxWorker) SetActiveFunc(active func() bool) {
 	w.active = active
 }
 
-func (w *OutboxWorker) isActive() bool {
-	return w.active == nil || w.active()
+// SetReadyConnectionsFunc limits claims to connection ids that currently have
+// a live adapter. A nil function means the worker is connection-unscoped, which
+// is kept for older tests and standalone uses.
+func (w *OutboxWorker) SetReadyConnectionsFunc(readyConnections func() []string) {
+	w.readyConnections = readyConnections
+}
+
+func (w *OutboxWorker) readyConnectionIDs() []string {
+	if w.active != nil && !w.active() {
+		return []string{}
+	}
+	if w.readyConnections == nil {
+		return nil
+	}
+	return normalizeConnectionIDs(w.readyConnections())
 }
 
 func (w *OutboxWorker) Run(ctx context.Context) {
@@ -257,9 +318,7 @@ func (w *OutboxWorker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if w.isActive() {
-				w.processBatch(ctx)
-			}
+			w.processBatch(ctx)
 		case <-cleanupTicker.C:
 			if err := w.store.Cleanup(ctx); err != nil {
 				slog.Error("outbox worker: cleanup failed", "error", err)
@@ -269,13 +328,18 @@ func (w *OutboxWorker) Run(ctx context.Context) {
 }
 
 func (w *OutboxWorker) processBatch(ctx context.Context) {
-	reclaimed, err := w.store.ReclaimStaleProcessing(ctx, OutboxBatchSize, 5*time.Minute)
+	readyConnectionIDs := w.readyConnectionIDs()
+	if readyConnectionIDs != nil && len(readyConnectionIDs) == 0 {
+		return
+	}
+
+	reclaimed, err := w.store.ReclaimStaleProcessing(ctx, OutboxBatchSize, 5*time.Minute, readyConnectionIDs)
 	if err != nil {
 		channelmetrics.M.RecordOutboundOutbox("unknown", "reclaim_error", 1)
 		slog.Error("outbox worker: reclaim stale processing failed", "error", err)
 	}
 
-	rows, err := w.store.ClaimDue(ctx, OutboxBatchSize)
+	rows, err := w.store.ClaimDue(ctx, OutboxBatchSize, readyConnectionIDs)
 	if err != nil {
 		channelmetrics.M.RecordOutboundOutbox("unknown", "claim_error", 1)
 		slog.Error("outbox worker: claim failed", "error", err)
@@ -285,6 +349,23 @@ func (w *OutboxWorker) processBatch(ctx context.Context) {
 	for _, g := range groups {
 		w.processGroup(ctx, g)
 	}
+}
+
+func normalizeConnectionIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 type notificationGroup struct {

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -137,17 +139,94 @@ func (m *Manager) connections(ctx context.Context) []envConnection {
 		if err != nil {
 			slog.Error("channel manager: list configured connections failed", "error", err)
 			return nil
-		} else if len(rows) > 0 {
-			enabled := make([]db.ChannelConnection, 0, len(rows))
-			for _, row := range rows {
-				if row.Enabled {
-					enabled = append(enabled, row)
-				}
-			}
-			return m.dbConnections(ctx, enabled)
 		}
+		if len(rows) == 0 && m.envBootstrapAllowed() {
+			if err := m.bootstrapEnvConnections(ctx); err != nil {
+				slog.Error("channel manager: env bootstrap failed", "error", err)
+				return nil
+			}
+			rows, err = m.cfg.Queries.ListChannelConnections(ctx)
+			if err != nil {
+				slog.Error("channel manager: list bootstrapped connections failed", "error", err)
+				return nil
+			}
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		enabled := make([]db.ChannelConnection, 0, len(rows))
+		for _, row := range rows {
+			if row.Enabled {
+				enabled = append(enabled, row)
+			}
+		}
+		return m.dbConnections(ctx, enabled)
 	}
 	return m.envConnections()
+}
+
+func (m *Manager) envBootstrapAllowed() bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("CHANNEL_ENV_BOOTSTRAP")))
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
+	return appEnv != "production" && appEnv != "prod"
+}
+
+func (m *Manager) bootstrapEnvConnections(ctx context.Context) error {
+	if m.cfg.Queries == nil {
+		return nil
+	}
+	for _, entry := range m.envConnections() {
+		config, secrets, err := splitConnectionValues(entry.factory.ConfigSchema(), entry.config.Values)
+		if err != nil {
+			return err
+		}
+		if err := m.cfg.Queries.BootstrapChannelConnection(ctx, db.BootstrapChannelConnectionParams{
+			ID:           entry.config.ConnectionID,
+			Provider:     entry.config.Provider,
+			DisplayName:  entry.config.DisplayName,
+			IsDefault:    true,
+			Config:       mustMarshalConfig(config),
+			SecretConfig: mustMarshalConfig(secrets),
+		}); err != nil {
+			return fmt.Errorf("bootstrap %s: %w", entry.config.ConnectionID, err)
+		}
+		slog.Info("channel manager: bootstrapped env channel connection", "provider", entry.config.Provider, "connection_id", entry.config.ConnectionID)
+	}
+	return nil
+}
+
+func splitConnectionValues(fields []provider.ConfigField, values map[string]string) (map[string]string, map[string]string, error) {
+	config := map[string]string{}
+	secrets := map[string]string{}
+	secretFields := make(map[string]bool, len(fields))
+	for _, field := range fields {
+		secretFields[field.Key] = field.Secret
+	}
+	for key, value := range values {
+		if secretFields[key] {
+			secrets[key] = value
+			continue
+		}
+		config[key] = value
+	}
+	return config, secrets, nil
+}
+
+func mustMarshalConfig(values map[string]string) []byte {
+	if values == nil {
+		return []byte(`{}`)
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return []byte(`{}`)
+	}
+	return raw
 }
 
 func (m *Manager) dbConnections(ctx context.Context, rows []db.ChannelConnection) []envConnection {
@@ -574,14 +653,14 @@ func (m *Manager) startOutbox(ctx context.Context) {
 		outboxCtx, cancel := context.WithCancel(ctx)
 		m.cancels = append(m.cancels, cancel)
 		worker := outbound.NewOutboxWorker(outbound.NewDBNotificationStore(m.cfg.Pool), newRegistryRetrySender(m.cfg.Registry))
-		worker.SetActiveFunc(m.anyProviderReady)
+		worker.SetReadyConnectionsFunc(m.readyConnectionIDs)
 		go worker.Run(outboxCtx)
 	}
 	if m.cfg.RetryWorkerEnabled {
 		retryCtx, cancel := context.WithCancel(ctx)
 		m.cancels = append(m.cancels, cancel)
 		worker := outbound.NewRetryWorker(m.cfg.Pool, m.cfg.Queries, newRegistryRetrySender(m.cfg.Registry))
-		worker.SetActiveFunc(m.anyProviderReady)
+		worker.SetReadyConnectionsFunc(m.readyConnectionIDs)
 		go worker.Run(retryCtx)
 	}
 	if m.cfg.OutboundCleanupEnabled {
@@ -590,6 +669,19 @@ func (m *Manager) startOutbox(ctx context.Context) {
 		worker := outbound.NewCleanupWorker(m.cfg.Queries)
 		go worker.Run(cleanupCtx)
 	}
+}
+
+func (m *Manager) readyConnectionIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.ready))
+	for id, ready := range m.ready {
+		if ready != nil && ready.Load() {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (m *Manager) anyProviderReady() bool {

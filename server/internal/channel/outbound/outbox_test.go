@@ -11,22 +11,30 @@ import (
 )
 
 type fakeNotificationStore struct {
-	claimed   []OutboxNotification
-	reclaimed []OutboxNotification
-	claimErr  error
-	sent      []pgtype.UUID
-	retried   []pgtype.UUID
-	dead      []pgtype.UUID
+	claimed         []OutboxNotification
+	reclaimed       []OutboxNotification
+	claimErr        error
+	claimReadyIDs   []string
+	reclaimReadyIDs []string
+	claimCalls      int
+	reclaimCalls    int
+	sent            []pgtype.UUID
+	retried         []pgtype.UUID
+	dead            []pgtype.UUID
 }
 
-func (f *fakeNotificationStore) ClaimDue(context.Context, int32) ([]OutboxNotification, error) {
+func (f *fakeNotificationStore) ClaimDue(_ context.Context, _ int32, readyConnectionIDs []string) ([]OutboxNotification, error) {
+	f.claimCalls++
+	f.claimReadyIDs = append([]string(nil), readyConnectionIDs...)
 	if f.claimErr != nil {
 		return nil, f.claimErr
 	}
 	return f.claimed, nil
 }
 
-func (f *fakeNotificationStore) ReclaimStaleProcessing(context.Context, int32, time.Duration) ([]OutboxNotification, error) {
+func (f *fakeNotificationStore) ReclaimStaleProcessing(_ context.Context, _ int32, _ time.Duration, readyConnectionIDs []string) ([]OutboxNotification, error) {
+	f.reclaimCalls++
+	f.reclaimReadyIDs = append([]string(nil), readyConnectionIDs...)
 	return f.reclaimed, nil
 }
 
@@ -173,5 +181,36 @@ func TestOutboxWorker_MixedAttemptsGroup_SplitsRetryAndDead(t *testing.T) {
 	}
 	if len(store.retried) != 1 || store.retried[0].Bytes != [16]byte{0x52} {
 		t.Fatalf("retried ids = %v, want [0x52]", store.retried)
+	}
+}
+
+func TestOutboxWorker_ReadyConnectionsFilterClaims(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeNotificationStore{}
+	worker := NewOutboxWorker(store, &mockRetrySender{})
+	worker.SetReadyConnectionsFunc(func() []string { return []string{"conn-a", "conn-a", " "} })
+
+	worker.processBatch(context.Background())
+
+	if got, want := strings.Join(store.claimReadyIDs, ","), "conn-a"; got != want {
+		t.Fatalf("claim ready ids = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(store.reclaimReadyIDs, ","), "conn-a"; got != want {
+		t.Fatalf("reclaim ready ids = %q, want %q", got, want)
+	}
+}
+
+func TestOutboxWorker_NoReadyConnectionsDoesNotClaim(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeNotificationStore{}
+	worker := NewOutboxWorker(store, &mockRetrySender{})
+	worker.SetReadyConnectionsFunc(func() []string { return nil })
+
+	worker.processBatch(context.Background())
+
+	if store.claimCalls != 0 || store.reclaimCalls != 0 {
+		t.Fatalf("claims = %d/%d, want 0/0", store.claimCalls, store.reclaimCalls)
 	}
 }

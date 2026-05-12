@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -198,9 +199,10 @@ func (r *Runtime) processRecord(ctx context.Context, rec *InboundEventRecord) er
 
 func (r *Runtime) resolveIntent(ctx context.Context, rec *InboundEventRecord) (bool, error) {
 	evt := rec.Event
-	chatCtx := ChatBindingContext{WorkspaceID: rec.WorkspaceID, DefaultProjectID: rec.DefaultProjectID}
+	chatCtx := r.lookupChatContext(ctx, evt)
 	if chatCtx.WorkspaceID == "" {
-		chatCtx = r.lookupChatContext(ctx, evt)
+		chatCtx.WorkspaceID = rec.WorkspaceID
+		chatCtx.DefaultProjectID = rec.DefaultProjectID
 	}
 	if evt.Type != port.EventTypeMessageReceived {
 		if err := r.cfg.Store.SaveEvent(ctx, rec.ID, evt, InboundPhasePost, chatCtx); err != nil {
@@ -213,6 +215,7 @@ func (r *Runtime) resolveIntent(ctx context.Context, rec *InboundEventRecord) (b
 	req := chintent.IntentRequest{
 		WorkspaceID:      chatCtx.WorkspaceID,
 		DefaultProjectID: chatCtx.DefaultProjectID,
+		AgentID:          strings.TrimSpace(chatCtx.AgentID),
 		Text:             evt.Text,
 		Channel:          evt.ChannelName,
 		ConnectionID:     evt.ConnectionID(),
@@ -348,9 +351,10 @@ func (r *Runtime) resumeWaitingAgents(ctx context.Context) {
 			r.send(ctx, rec.Event, "语义理解失败了，这条消息我先停止处理，请稍后重试。")
 			continue
 		}
-		chatCtx := ChatBindingContext{WorkspaceID: rec.WorkspaceID, DefaultProjectID: rec.DefaultProjectID}
+		chatCtx := r.lookupChatContext(ctx, rec.Event)
 		if chatCtx.WorkspaceID == "" {
-			chatCtx = r.lookupChatContext(ctx, rec.Event)
+			chatCtx.WorkspaceID = rec.WorkspaceID
+			chatCtx.DefaultProjectID = rec.DefaultProjectID
 		}
 		if _, err := r.applyIntentResult(ctx, rec, result, chatCtx, true); err != nil {
 			slog.Error("channel inbound runtime: resume intent failed", "event_row_id", item.ID, "error", err)
@@ -406,7 +410,7 @@ func (r *Runtime) send(ctx context.Context, evt port.InboundEvent, text string) 
 	if r.cfg.ReplySink == nil || text == "" {
 		return
 	}
-	if err := r.cfg.ReplySink.Send(ctx, evt, text); err != nil {
+	if err := r.cfg.ReplySink.SendText(ctx, evt, port.OutboundMessage{Text: text}); err != nil {
 		slog.Error("channel inbound runtime: send reply failed",
 			"channel", evt.ChannelName,
 			"chat_id", evt.ChatID,

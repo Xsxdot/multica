@@ -7,7 +7,8 @@ import (
 )
 
 type ChannelReplySink interface {
-	Send(ctx context.Context, evt port.InboundEvent, text string) error
+	SendText(ctx context.Context, evt port.InboundEvent, msg port.OutboundMessage) error
+	SendRich(ctx context.Context, evt port.InboundEvent, msg port.OutboundRichMessage) error
 }
 
 type GatewayReplySink struct {
@@ -18,20 +19,38 @@ func NewGatewayReplySink(gateway port.ChannelGateway) *GatewayReplySink {
 	return &GatewayReplySink{gateway: gateway}
 }
 
-func (s *GatewayReplySink) Send(ctx context.Context, evt port.InboundEvent, text string) error {
-	if s == nil || s.gateway == nil || text == "" {
+func (s *GatewayReplySink) SendText(ctx context.Context, evt port.InboundEvent, msg port.OutboundMessage) error {
+	if s == nil || s.gateway == nil || msg.Text == "" {
 		return nil
 	}
-	target := port.TargetChat(evt.ChatID)
-	if evt.ChatType == port.ChatTypeDirect {
-		target = port.TargetUser(evt.SenderID)
+	msg.Target = defaultReplyTarget(evt, msg.Target)
+	if msg.ChatID == "" {
+		msg.ChatID = evt.ChatID
 	}
-	_, err := s.gateway.SendText(ctx, evt.ConnectionID(), port.OutboundMessage{
-		Target: target,
-		ChatID: evt.ChatID,
-		Text:   text,
-	})
+	_, err := s.gateway.SendText(ctx, evt.ConnectionID(), msg)
 	return err
+}
+
+func (s *GatewayReplySink) SendRich(ctx context.Context, evt port.InboundEvent, msg port.OutboundRichMessage) error {
+	if s == nil || s.gateway == nil || (msg.Title == "" && msg.Body == "") {
+		return nil
+	}
+	msg.Target = defaultReplyTarget(evt, msg.Target)
+	if msg.ChatID == "" {
+		msg.ChatID = evt.ChatID
+	}
+	_, err := s.gateway.SendRich(ctx, evt.ConnectionID(), msg)
+	return err
+}
+
+func defaultReplyTarget(evt port.InboundEvent, target port.OutboundTarget) port.OutboundTarget {
+	if target.ID != "" {
+		return target
+	}
+	if evt.ChatType == port.ChatTypeDirect {
+		return port.TargetUser(evt.SenderID)
+	}
+	return port.TargetChat(evt.ChatID)
 }
 
 var _ ChannelReplySink = (*GatewayReplySink)(nil)

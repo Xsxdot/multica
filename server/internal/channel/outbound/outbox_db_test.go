@@ -54,10 +54,10 @@ func TestDBNotificationStore_ReclaimStaleProcessing(t *testing.T) {
 	var id pgtype.UUID
 	err = pool.QueryRow(ctx, `
 		INSERT INTO channel_outbound_notification (
-			provider, event_kind, target_user_id, target_external_user_id,
+			provider, connection_id, event_kind, target_user_id, target_external_user_id,
 			title, body, status, updated_at, next_attempt_at, aggregation_due_at
 		) VALUES (
-			'feishu', 'test_event', $1, 'ext_1',
+			'feishu', 'conn-a', 'test_event', $1, 'ext_1',
 			'Title', 'Body', 'processing', now() - interval '10 minutes', now(), now()
 		)
 		RETURNING id
@@ -68,7 +68,7 @@ func TestDBNotificationStore_ReclaimStaleProcessing(t *testing.T) {
 	defer pool.Exec(ctx, `DELETE FROM channel_outbound_notification WHERE id = $1`, id)
 
 	// Reclaim should succeed and return the row.
-	reclaimed, err := store.ReclaimStaleProcessing(ctx, 10, 5*time.Minute)
+	reclaimed, err := store.ReclaimStaleProcessing(ctx, 10, 5*time.Minute, nil)
 	if err != nil {
 		t.Fatalf("ReclaimStaleProcessing: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestDBNotificationStore_ReclaimStaleProcessing(t *testing.T) {
 	}
 
 	// ClaimDue should NOT see the row because it is still processing.
-	claimed, err := store.ClaimDue(ctx, 10)
+	claimed, err := store.ClaimDue(ctx, 10, nil)
 	if err != nil {
 		t.Fatalf("ClaimDue: %v", err)
 	}

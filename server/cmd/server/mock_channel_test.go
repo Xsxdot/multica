@@ -422,10 +422,11 @@ func newProductionDispatchStep(
 	registry *channel.Registry,
 	issueSvc facade.IssueService,
 ) inbound.Step {
+	gw := gateway.NewRegistryGateway(registry)
 	return inbound.NewDispatchStep(inbound.DispatchConfig{
 		IssueFacade:      facade.NewIssueFacade(issueSvc),
 		CommentFacade:    facade.NewCommentFacade(noopCommentService{}),
-		Gateway:          gateway.NewRegistryGateway(registry),
+		ReplySink:        inbound.NewGatewayReplySink(gw),
 		ChatBinding:      newDBChatBindingLookup(pool),
 		UserResolver:     newDBUserInfoResolver(pool),
 		ProjectValidator: inbound.NewDBProjectWorkspaceValidator(pool),

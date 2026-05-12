@@ -18,6 +18,12 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
+// Channel listen modes (stored on channel_chat_binding.listen_mode).
+const (
+	channelListenModeMentions = "mentions"
+	channelListenModeAll      = "all"
+)
+
 // ---------------------------------------------------------------------------
 // Request / Response types
 // ---------------------------------------------------------------------------
@@ -30,6 +36,8 @@ type ChannelBindingResponse struct {
 	ChatType         string  `json:"chat_type"`
 	ExternalChatName *string `json:"external_chat_name"`
 	DefaultProjectID *string `json:"default_project_id"`
+	ListenMode       string  `json:"listen_mode"`
+	AgentID          *string `json:"agent_id"`
 	IsPrimary        bool    `json:"is_primary"`
 	BoundByUserID    string  `json:"bound_by_user_id"`
 	CreatedAt        string  `json:"created_at"`
@@ -232,7 +240,11 @@ func canManageBinding(binding db.ChannelChatBinding, member db.Member) bool {
 }
 
 func bindingToResponse(b db.ChannelChatBinding) ChannelBindingResponse {
-	return ChannelBindingResponse{
+	listen := b.ListenMode
+	if listen == "" {
+		listen = channelListenModeMentions
+	}
+	resp := ChannelBindingResponse{
 		ID:               uuidToString(b.ID),
 		Provider:         b.Provider,
 		ConnectionID:     b.ConnectionID,
@@ -240,10 +252,74 @@ func bindingToResponse(b db.ChannelChatBinding) ChannelBindingResponse {
 		ChatType:         b.ChatType,
 		ExternalChatName: textToPtr(b.ExternalChatName),
 		DefaultProjectID: uuidToPtr(b.DefaultProjectID),
+		ListenMode:       listen,
 		IsPrimary:        b.IsPrimary,
 		BoundByUserID:    uuidToString(b.BoundByUserID),
 		CreatedAt:        timestampToString(b.CreatedAt),
 	}
+	if b.AgentID.Valid {
+		s := uuidToString(b.AgentID)
+		resp.AgentID = &s
+	}
+	return resp
+}
+
+func normalizeListenMode(s string) (string, error) {
+	switch strings.TrimSpace(strings.ToLower(s)) {
+	case "", channelListenModeMentions:
+		return channelListenModeMentions, nil
+	case channelListenModeAll:
+		return channelListenModeAll, nil
+	default:
+		return "", fmt.Errorf("listen_mode must be %q or %q", channelListenModeMentions, channelListenModeAll)
+	}
+}
+
+func (h *Handler) validateBindingAgent(ctx context.Context, workspaceID pgtype.UUID, agentID pgtype.UUID) error {
+	if !agentID.Valid {
+		return nil
+	}
+	agent, err := h.Queries.GetAgent(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("agent not found")
+		}
+		return err
+	}
+	if uuidToString(agent.WorkspaceID) != uuidToString(workspaceID) {
+		return fmt.Errorf("agent does not belong to this workspace")
+	}
+	if agent.ArchivedAt.Valid {
+		return fmt.Errorf("agent is archived")
+	}
+	if !agent.RuntimeID.Valid {
+		return fmt.Errorf("agent has no runtime configured")
+	}
+	return nil
+}
+
+// resolveBindingAgentID maps optional request agent_id to a UUID for persistence.
+// When keepExistingWhenReqNil is true and reqAgent is nil, existing is returned unchanged.
+func (h *Handler) resolveBindingAgentID(w http.ResponseWriter, r *http.Request, workspaceID pgtype.UUID, reqAgent *string, existing pgtype.UUID, keepExistingWhenReqNil bool) (pgtype.UUID, bool) {
+	if reqAgent == nil {
+		if keepExistingWhenReqNil {
+			return existing, true
+		}
+		return pgtype.UUID{Valid: false}, true
+	}
+	trim := strings.TrimSpace(*reqAgent)
+	if trim == "" {
+		return pgtype.UUID{Valid: false}, true
+	}
+	aid, ok := parseUUIDOrBadRequest(w, trim, "agent_id")
+	if !ok {
+		return pgtype.UUID{}, false
+	}
+	if err := h.validateBindingAgent(r.Context(), workspaceID, aid); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return pgtype.UUID{}, false
+	}
+	return aid, true
 }
 
 func lockChannelBindingProvider(ctx context.Context, tx pgx.Tx, workspaceID pgtype.UUID, connectionID string) error {
@@ -279,6 +355,9 @@ type CreateChannelBindingRequest struct {
 	Provider         string  `json:"provider"`
 	ConnectionID     string  `json:"connection_id"`
 	DefaultProjectID *string `json:"default_project_id"`
+	ListenMode       string  `json:"listen_mode"`
+	// AgentID optional: omit or null = no dedicated agent; empty string clears a previously set agent.
+	AgentID *string `json:"agent_id"`
 }
 
 type CreateChannelUserBindingRequest struct {
@@ -287,8 +366,14 @@ type CreateChannelUserBindingRequest struct {
 	ConnectionID string `json:"connection_id"`
 }
 
-type SetPrimaryChannelBindingRequest struct {
-	IsPrimary bool `json:"is_primary"`
+// PatchChannelBindingRequest partially updates a channel chat binding.
+// Pointer fields that are nil are left unchanged (except is_primary, which
+// uses presence: omit or null means do not change primary state).
+type PatchChannelBindingRequest struct {
+	IsPrimary        *bool   `json:"is_primary"`
+	DefaultProjectID *string `json:"default_project_id"`
+	ListenMode       *string `json:"listen_mode"`
+	AgentID          *string `json:"agent_id"`
 }
 
 // ---------------------------------------------------------------------------
@@ -672,22 +757,32 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 
 	var defaultProjectID pgtype.UUID
 	if req.DefaultProjectID != nil {
-		projectID, ok := parseUUIDOrBadRequest(w, *req.DefaultProjectID, "default_project_id")
-		if !ok {
-			return
-		}
-		if _, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
-			ID:          projectID,
-			WorkspaceID: member.WorkspaceID,
-		}); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				writeError(w, http.StatusBadRequest, "default_project_id does not belong to this workspace")
+		if strings.TrimSpace(*req.DefaultProjectID) == "" {
+			defaultProjectID = pgtype.UUID{Valid: false}
+		} else {
+			projectID, ok := parseUUIDOrBadRequest(w, strings.TrimSpace(*req.DefaultProjectID), "default_project_id")
+			if !ok {
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "failed to validate default project")
-			return
+			if _, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+				ID:          projectID,
+				WorkspaceID: member.WorkspaceID,
+			}); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					writeError(w, http.StatusBadRequest, "default_project_id does not belong to this workspace")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to validate default project")
+				return
+			}
+			defaultProjectID = projectID
 		}
-		defaultProjectID = projectID
+	}
+
+	listenM, err := normalizeListenMode(req.ListenMode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	tx, err := h.TxStarter.Begin(r.Context())
@@ -732,17 +827,29 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	})
 	if err == nil {
 		if existing.WorkspaceID == member.WorkspaceID {
+			defProj := existing.DefaultProjectID
 			if req.DefaultProjectID != nil {
-				updated, updateErr := qtx.UpdateChannelChatBindingDefaultProject(r.Context(), db.UpdateChannelChatBindingDefaultProjectParams{
-					ID:               existing.ID,
-					DefaultProjectID: defaultProjectID,
-				})
-				if updateErr != nil {
-					writeError(w, http.StatusInternalServerError, "failed to update default project")
-					return
+				if strings.TrimSpace(*req.DefaultProjectID) == "" {
+					defProj = pgtype.UUID{Valid: false}
+				} else {
+					defProj = defaultProjectID
 				}
-				existing = updated
 			}
+			agentOut, ok := h.resolveBindingAgentID(w, r, member.WorkspaceID, req.AgentID, existing.AgentID, true)
+			if !ok {
+				return
+			}
+			updated, updateErr := qtx.UpdateChannelChatBindingSettings(r.Context(), db.UpdateChannelChatBindingSettingsParams{
+				ID:               existing.ID,
+				DefaultProjectID: defProj,
+				ListenMode:       listenM,
+				AgentID:          agentOut,
+			})
+			if updateErr != nil {
+				writeError(w, http.StatusInternalServerError, "failed to update binding settings")
+				return
+			}
+			existing = updated
 			if _, consumeErr := consumer.Consume(r.Context(), req.Token); consumeErr != nil {
 				writeError(w, http.StatusBadRequest, "invalid or expired token")
 				return
@@ -779,17 +886,29 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	})
 	if err == nil {
 		if existing.WorkspaceID == member.WorkspaceID {
+			defProj := existing.DefaultProjectID
 			if req.DefaultProjectID != nil {
-				updated, updateErr := qtx.UpdateChannelChatBindingDefaultProject(r.Context(), db.UpdateChannelChatBindingDefaultProjectParams{
-					ID:               existing.ID,
-					DefaultProjectID: defaultProjectID,
-				})
-				if updateErr != nil {
-					writeError(w, http.StatusInternalServerError, "failed to update default project")
-					return
+				if strings.TrimSpace(*req.DefaultProjectID) == "" {
+					defProj = pgtype.UUID{Valid: false}
+				} else {
+					defProj = defaultProjectID
 				}
-				existing = updated
 			}
+			agentOut, ok := h.resolveBindingAgentID(w, r, member.WorkspaceID, req.AgentID, existing.AgentID, true)
+			if !ok {
+				return
+			}
+			updated, updateErr := qtx.UpdateChannelChatBindingSettings(r.Context(), db.UpdateChannelChatBindingSettingsParams{
+				ID:               existing.ID,
+				DefaultProjectID: defProj,
+				ListenMode:       listenM,
+				AgentID:          agentOut,
+			})
+			if updateErr != nil {
+				writeError(w, http.StatusInternalServerError, "failed to update binding settings")
+				return
+			}
+			existing = updated
 			if err := tx.Commit(r.Context()); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to commit binding transaction")
 				return
@@ -829,6 +948,11 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 	}
 	isPrimary := providerCount == 0
 
+	agentForCreate, ok := h.resolveBindingAgentID(w, r, member.WorkspaceID, req.AgentID, pgtype.UUID{}, false)
+	if !ok {
+		return
+	}
+
 	binding, err := qtx.CreateChannelChatBinding(r.Context(), db.CreateChannelChatBindingParams{
 		Provider:         token.Provider,
 		ConnectionID:     token.ConnectionID,
@@ -839,6 +963,8 @@ func (h *Handler) CreateChannelBinding(w http.ResponseWriter, r *http.Request) {
 		BoundByUserID:    member.UserID,
 		ExternalChatName: token.ExternalChatName,
 		DefaultProjectID: defaultProjectID,
+		ListenMode:       listenM,
+		AgentID:          agentForCreate,
 	})
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -1003,7 +1129,7 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var req SetPrimaryChannelBindingRequest
+	var req PatchChannelBindingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -1024,29 +1150,14 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Only binding creator or workspace admin/owner can set primary
 	if !canManageBinding(binding, member) {
 		writeError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
 
-	// Prevent unsetting the only primary binding for a workspace/channel connection.
-	if !req.IsPrimary && binding.IsPrimary {
-		bindings, err := h.Queries.ListChannelChatBindings(r.Context(), binding.WorkspaceID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to check primary bindings")
-			return
-		}
-		primaryCount := 0
-		for _, b := range bindings {
-			if b.ConnectionID == binding.ConnectionID && b.IsPrimary {
-				primaryCount++
-			}
-		}
-		if primaryCount <= 1 {
-			writeError(w, http.StatusBadRequest, "cannot unset primary: workspace would have no primary binding")
-			return
-		}
+	if req.IsPrimary == nil && req.DefaultProjectID == nil && req.ListenMode == nil && req.AgentID == nil {
+		writeError(w, http.StatusBadRequest, "no updates provided")
+		return
 	}
 
 	tx, err := h.TxStarter.Begin(r.Context())
@@ -1057,35 +1168,103 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 	defer func() { _ = tx.Rollback(r.Context()) }()
 	qtx := db.New(tx)
 
-	if req.IsPrimary {
-		if _, err := tx.Exec(r.Context(), `
+	if req.IsPrimary != nil {
+		if !*req.IsPrimary && binding.IsPrimary {
+			bindings, err := qtx.ListChannelChatBindings(r.Context(), binding.WorkspaceID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to check primary bindings")
+				return
+			}
+			primaryCount := 0
+			for _, b := range bindings {
+				if b.ConnectionID == binding.ConnectionID && b.IsPrimary {
+					primaryCount++
+				}
+			}
+			if primaryCount <= 1 {
+				writeError(w, http.StatusBadRequest, "cannot unset primary: workspace would have no primary binding")
+				return
+			}
+		}
+
+		if *req.IsPrimary {
+			if _, err := tx.Exec(r.Context(), `
 			SELECT id FROM channel_chat_binding
 			WHERE workspace_id = $1 AND connection_id = $2
 			FOR UPDATE
 		`, binding.WorkspaceID, binding.ConnectionID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
+				writeError(w, http.StatusInternalServerError, "failed to lock channel bindings")
+				return
+			}
+			if err := qtx.ClearPrimaryBindingsForWorkspaceProvider(r.Context(), db.ClearPrimaryBindingsForWorkspaceProviderParams{
+				WorkspaceID:  binding.WorkspaceID,
+				ConnectionID: binding.ConnectionID,
+			}); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to clear primary bindings")
+				return
+			}
+		}
+
+		binding, err = qtx.SetChannelChatBindingPrimary(r.Context(), db.SetChannelChatBindingPrimaryParams{
+			ID:        bindingUUID,
+			IsPrimary: *req.IsPrimary,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update binding")
 			return
 		}
 	}
 
-	// If setting primary, first clear existing primary for this workspace/channel connection.
-	if req.IsPrimary {
-		if err := qtx.ClearPrimaryBindingsForWorkspaceProvider(r.Context(), db.ClearPrimaryBindingsForWorkspaceProviderParams{
-			WorkspaceID:  binding.WorkspaceID,
-			ConnectionID: binding.ConnectionID,
-		}); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to clear primary bindings")
+	if req.DefaultProjectID != nil || req.ListenMode != nil || req.AgentID != nil {
+		defProj := binding.DefaultProjectID
+		if req.DefaultProjectID != nil {
+			if strings.TrimSpace(*req.DefaultProjectID) == "" {
+				defProj = pgtype.UUID{Valid: false}
+			} else {
+				pid, ok := parseUUIDOrBadRequest(w, strings.TrimSpace(*req.DefaultProjectID), "default_project_id")
+				if !ok {
+					return
+				}
+				if _, err := qtx.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+					ID:          pid,
+					WorkspaceID: binding.WorkspaceID,
+				}); err != nil {
+					if errors.Is(err, pgx.ErrNoRows) {
+						writeError(w, http.StatusBadRequest, "default_project_id does not belong to this workspace")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to validate default project")
+					return
+				}
+				defProj = pid
+			}
+		}
+		listenM := binding.ListenMode
+		if listenM == "" {
+			listenM = channelListenModeMentions
+		}
+		if req.ListenMode != nil {
+			lm, errLM := normalizeListenMode(*req.ListenMode)
+			if errLM != nil {
+				writeError(w, http.StatusBadRequest, errLM.Error())
+				return
+			}
+			listenM = lm
+		}
+		agentOut, ok := h.resolveBindingAgentID(w, r, binding.WorkspaceID, req.AgentID, binding.AgentID, req.AgentID == nil)
+		if !ok {
 			return
 		}
-	}
-
-	updated, err := qtx.SetChannelChatBindingPrimary(r.Context(), db.SetChannelChatBindingPrimaryParams{
-		ID:        bindingUUID,
-		IsPrimary: req.IsPrimary,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update binding")
-		return
+		binding, err = qtx.UpdateChannelChatBindingSettings(r.Context(), db.UpdateChannelChatBindingSettingsParams{
+			ID:               bindingUUID,
+			DefaultProjectID: defProj,
+			ListenMode:       listenM,
+			AgentID:          agentOut,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update binding settings")
+			return
+		}
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
@@ -1093,5 +1272,5 @@ func (h *Handler) SetPrimaryChannelBinding(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	writeJSON(w, http.StatusOK, bindingToResponse(updated))
+	writeJSON(w, http.StatusOK, bindingToResponse(binding))
 }
