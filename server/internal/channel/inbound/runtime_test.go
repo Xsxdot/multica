@@ -32,14 +32,14 @@ func TestRuntimeAccept_UserACKs(t *testing.T) {
 		want string
 	}{
 		{
-			name: "starts immediately",
+			name: "accepted defers ack until pre-pipeline passes",
 			res:  AcceptResult{EventID: "row-1", Accepted: true},
-			want: "好的，开始处理。",
+			want: "",
 		},
 		{
-			name: "queued behind existing work",
+			name: "queued ack is deferred until pre-pipeline passes",
 			res:  AcceptResult{EventID: "row-1", Accepted: true, QueueDepth: 2},
-			want: "已收到，前面还有 2 条，我会按顺序处理。",
+			want: "",
 		},
 		{
 			name: "backpressure",
@@ -71,6 +71,81 @@ func TestRuntimeAccept_UserACKs(t *testing.T) {
 				t.Fatalf("ack = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRuntimeProcessRecord_SendsDeferredAckAfterPreContinue(t *testing.T) {
+	store := &fakeRuntimeStore{}
+	sink := &recordingReplySink{}
+	rt := NewRuntime(RuntimeConfig{
+		Store:     store,
+		ReplySink: sink,
+		PrePipeline: NewPipeline(fnStep{
+			name: "pre",
+			run: func(_ context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
+				return evt, DecisionContinue, nil
+			},
+		}),
+	})
+	rt.deferProcessingAck("row-1")
+
+	err := rt.processRecord(context.Background(), &InboundEventRecord{
+		ID:    "row-1",
+		Phase: InboundPhasePre,
+		Event: port.InboundEvent{
+			ChannelName: "feishu",
+			EventID:     "evt-1",
+			Type:        port.EventTypeMessageReceived,
+			ChatID:      "oc_1",
+			ChatType:    port.ChatTypeGroup,
+			SenderID:    "ou_1",
+			Text:        "hello",
+		},
+	})
+	if err != nil {
+		t.Fatalf("processRecord: %v", err)
+	}
+	if got := sink.last(); got != "好的，开始处理。" {
+		t.Fatalf("ack = %q", got)
+	}
+}
+
+func TestRuntimeProcessRecord_DoesNotSendDeferredAckAfterPreSkip(t *testing.T) {
+	store := &fakeRuntimeStore{}
+	sink := &recordingReplySink{}
+	rt := NewRuntime(RuntimeConfig{
+		Store:     store,
+		ReplySink: sink,
+		PrePipeline: NewPipeline(fnStep{
+			name: "pre",
+			run: func(_ context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
+				return evt, DecisionSkip, nil
+			},
+		}),
+	})
+	rt.deferProcessingAck("row-1")
+
+	err := rt.processRecord(context.Background(), &InboundEventRecord{
+		ID:    "row-1",
+		Phase: InboundPhasePre,
+		Event: port.InboundEvent{
+			ChannelName: "feishu",
+			EventID:     "evt-1",
+			Type:        port.EventTypeMessageReceived,
+			ChatID:      "oc_1",
+			ChatType:    port.ChatTypeGroup,
+			SenderID:    "ou_1",
+			Text:        "hello",
+		},
+	})
+	if err != nil {
+		t.Fatalf("processRecord: %v", err)
+	}
+	if got := sink.last(); got != "" {
+		t.Fatalf("ack = %q, want empty", got)
+	}
+	if _, ok := rt.pendingAckByEvent["row-1"]; ok {
+		t.Fatal("deferred ack should be discarded when pre-pipeline skips")
 	}
 }
 

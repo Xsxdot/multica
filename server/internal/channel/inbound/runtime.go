@@ -43,6 +43,9 @@ type RuntimeConfig struct {
 
 type Runtime struct {
 	cfg RuntimeConfig
+
+	mu                sync.Mutex
+	pendingAckByEvent map[string]struct{}
 }
 
 func NewRuntime(cfg RuntimeConfig) *Runtime {
@@ -67,7 +70,7 @@ func NewRuntime(cfg RuntimeConfig) *Runtime {
 	if cfg.ProcessingLease <= 0 {
 		cfg.ProcessingLease = defaultInboundProcessingLease
 	}
-	return &Runtime{cfg: cfg}
+	return &Runtime{cfg: cfg, pendingAckByEvent: make(map[string]struct{})}
 }
 
 func (r *Runtime) Run(ctx context.Context) {
@@ -114,11 +117,45 @@ func (r *Runtime) Accept(ctx context.Context, evt port.InboundEvent, opts Accept
 	case result.ClarificationConsumed:
 		r.send(ctx, evt, "收到补充，继续处理。")
 	case result.Accepted && result.QueueDepth == 0:
-		r.send(ctx, evt, "好的，开始处理。")
+		r.deferProcessingAck(result.EventID)
 	case result.Accepted:
-		r.send(ctx, evt, fmt.Sprintf("已收到，前面还有 %d 条，我会按顺序处理。", result.QueueDepth))
+		r.deferProcessingAck(result.EventID)
 	}
 	return result, nil
+}
+
+func (r *Runtime) deferProcessingAck(eventRowID string) {
+	if r == nil || eventRowID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pendingAckByEvent[eventRowID] = struct{}{}
+}
+
+func (r *Runtime) sendDeferredProcessingAck(ctx context.Context, eventRowID string, evt port.InboundEvent) {
+	if r == nil || eventRowID == "" {
+		return
+	}
+	r.mu.Lock()
+	_, ok := r.pendingAckByEvent[eventRowID]
+	if ok {
+		delete(r.pendingAckByEvent, eventRowID)
+	}
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	r.send(ctx, evt, "好的，开始处理。")
+}
+
+func (r *Runtime) discardDeferredProcessingAck(eventRowID string) {
+	if r == nil || eventRowID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.pendingAckByEvent, eventRowID)
 }
 
 func (r *Runtime) workerLoop(ctx context.Context, workerID string) {
@@ -162,12 +199,14 @@ func (r *Runtime) processRecord(ctx context.Context, rec *InboundEventRecord) er
 				return err
 			}
 			if outcome.Decision == DecisionSkip {
+				r.discardDeferredProcessingAck(rec.ID)
 				return r.cfg.Store.MarkProcessed(ctx, rec.ID)
 			}
 			chatCtx := r.lookupChatContext(ctx, next)
 			if err := r.cfg.Store.SaveEvent(ctx, rec.ID, next, InboundPhaseIntent, chatCtx); err != nil {
 				return err
 			}
+			r.sendDeferredProcessingAck(ctx, rec.ID, next)
 			rec.Event = next
 			rec.Phase = InboundPhaseIntent
 			rec.WorkspaceID = chatCtx.WorkspaceID
