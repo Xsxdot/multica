@@ -23,6 +23,9 @@ func BuildPrompt(task Task) string {
 	if task.ChannelIntentPrompt != "" {
 		return buildChannelIntentPrompt(task)
 	}
+	if task.ChannelTurnPrompt != "" {
+		return buildChannelTurnPrompt(task)
+	}
 	if task.QuickCreatePrompt != "" {
 		return buildQuickCreatePrompt(task)
 	}
@@ -41,6 +44,18 @@ func buildChannelIntentPrompt(task Task) string {
 	b.WriteString("You are resolving a Multica channel chat message into one safe structured intent.\n")
 	b.WriteString("Return only JSON: {\"intent\":\"Unknown\",\"confidence\":0.0,\"params\":{}}.\n\n")
 	fmt.Fprintf(&b, "User message:\n%s\n", task.ChannelIntentMessage)
+	return b.String()
+}
+
+func buildChannelTurnPrompt(task Task) string {
+	if strings.TrimSpace(task.ChannelTurnPrompt) != "" {
+		return task.ChannelTurnPrompt
+	}
+	var b strings.Builder
+	b.WriteString("You are handling a Multica channel message as a teammate in a work chat.\n")
+	b.WriteString("Use the `multica` CLI to read workspace data or perform low-risk issue actions when needed.\n\n")
+	fmt.Fprintf(&b, "User message:\n%s\n\n", task.ChannelTurnMessage)
+	b.WriteString("Reply naturally with the exact message that should be sent back to the channel.\n")
 	return b.String()
 }
 

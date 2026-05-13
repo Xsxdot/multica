@@ -79,7 +79,7 @@ func (c *TaskBackedChatIntentClient) StartIntent(ctx context.Context, req chinte
 			return "", fmt.Errorf("lookup existing channel intent task: %w", err)
 		}
 	}
-	agent, err := c.selectAgent(ctx, workspaceID, req)
+	agent, err := c.selectAgent(ctx, workspaceID, req, protocol.DaemonCapabilityChannelIntent)
 	if err != nil {
 		return "", err
 	}
@@ -99,6 +99,10 @@ func (c *TaskBackedChatIntentClient) StartIntent(ctx context.Context, req chinte
 		return "", err
 	}
 	return util.UUIDToString(task.ID), nil
+}
+
+func (c *TaskBackedChatIntentClient) StartTurn(ctx context.Context, req chintent.IntentRequest) (string, error) {
+	return c.StartIntent(ctx, req)
 }
 
 func (c *TaskBackedChatIntentClient) ParseIntentResult(ctx context.Context, taskID string) (chintent.IntentResult, bool, error) {
@@ -144,6 +148,84 @@ func (c *TaskBackedChatIntentClient) ParseIntentResult(ctx context.Context, task
 	}
 }
 
+func (c *TaskBackedChatIntentClient) ParseTurnResult(ctx context.Context, taskID string) (chintent.IntentResult, bool, error) {
+	return c.ParseIntentResult(ctx, taskID)
+}
+
+func (c *TaskBackedChatIntentClient) StartAgentTurn(ctx context.Context, req chintent.IntentRequest) (string, error) {
+	if c == nil || c.queries == nil || c.tasks == nil {
+		return "", fmt.Errorf("channel turn client is not configured")
+	}
+	workspaceID, err := util.ParseUUID(strings.TrimSpace(req.WorkspaceID))
+	if err != nil {
+		return "", err
+	}
+	requesterID, err := c.authorizeRequester(ctx, req, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	if req.InboundEventID != "" {
+		existing, err := c.queries.GetContextTaskByInboundEvent(ctx, db.GetContextTaskByInboundEventParams{
+			ContextType:    service.ChannelTurnContextType,
+			InboundEventID: req.InboundEventID,
+		})
+		if err == nil {
+			return util.UUIDToString(existing.ID), nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("lookup existing channel turn task: %w", err)
+		}
+	}
+	agent, err := c.selectAgent(ctx, workspaceID, req, protocol.DaemonCapabilityChannelTurn)
+	if err != nil {
+		return "", err
+	}
+	task, err := c.tasks.EnqueueChannelTurnTask(ctx, workspaceID, agent.ID, service.ChannelTurnTaskParams{
+		Prompt:            chintent.BuildChannelAgentTurnPrompt(req),
+		Message:           req.Text,
+		RequesterID:       requesterID,
+		Channel:           req.Channel,
+		ChatID:            req.ChatID,
+		ChatType:          req.ChatType,
+		SenderID:          req.SenderID,
+		SenderName:        req.SenderName,
+		InboundEventID:    req.InboundEventID,
+		ReplyContextIssue: req.ContextIssueKey,
+	})
+	if err != nil {
+		return "", err
+	}
+	return util.UUIDToString(task.ID), nil
+}
+
+func (c *TaskBackedChatIntentClient) ParseAgentTurnResult(ctx context.Context, taskID string) (string, bool, error) {
+	if c == nil || c.queries == nil {
+		return "", true, fmt.Errorf("channel turn client is not configured")
+	}
+	taskUUID, err := util.ParseUUID(strings.TrimSpace(taskID))
+	if err != nil {
+		return "", true, err
+	}
+	task, err := c.queries.GetAgentTask(ctx, taskUUID)
+	if err != nil {
+		return "", true, fmt.Errorf("load channel turn task: %w", err)
+	}
+	switch task.Status {
+	case "completed":
+		output, err := taskCompletionOutput(task, "channel turn")
+		return output, true, err
+	case "failed":
+		if task.Error.Valid && strings.TrimSpace(task.Error.String) != "" {
+			return "", true, fmt.Errorf("channel turn task failed: %s", task.Error.String)
+		}
+		return "", true, fmt.Errorf("channel turn task failed")
+	case "cancelled":
+		return "", true, fmt.Errorf("channel turn task cancelled")
+	default:
+		return "", false, nil
+	}
+}
+
 func (c *TaskBackedChatIntentClient) authorizeRequester(ctx context.Context, req chintent.IntentRequest, workspaceID pgtype.UUID) (string, error) {
 	if c.access == nil {
 		return "", nil
@@ -171,7 +253,7 @@ func (c *TaskBackedChatIntentClient) authorizeRequester(ctx context.Context, req
 
 const errBoundChannelAgentUnavailable = "指定 agent 当前不可用或不支持群聊语义处理。"
 
-func (c *TaskBackedChatIntentClient) selectAgent(ctx context.Context, workspaceID pgtype.UUID, req chintent.IntentRequest) (db.Agent, error) {
+func (c *TaskBackedChatIntentClient) selectAgent(ctx context.Context, workspaceID pgtype.UUID, req chintent.IntentRequest, capability string) (db.Agent, error) {
 	if aid := strings.TrimSpace(req.AgentID); aid != "" {
 		agentUUID, err := util.ParseUUID(aid)
 		if err != nil {
@@ -194,7 +276,7 @@ func (c *TaskBackedChatIntentClient) selectAgent(ctx context.Context, workspaceI
 			return db.Agent{}, errors.New(errBoundChannelAgentUnavailable)
 		}
 		runtime, err := c.queries.GetAgentRuntime(ctx, agent.RuntimeID)
-		if err != nil || runtime.Status != "online" || !runtimeSupportsChannelIntent(runtime) {
+		if err != nil || runtime.Status != "online" || !runtimeSupports(runtime, capability) {
 			return db.Agent{}, errors.New(errBoundChannelAgentUnavailable)
 		}
 		return agent, nil
@@ -209,23 +291,30 @@ func (c *TaskBackedChatIntentClient) selectAgent(ctx context.Context, workspaceI
 			continue
 		}
 		runtime, err := c.queries.GetAgentRuntime(ctx, agent.RuntimeID)
-		if err != nil || runtime.Status != "online" || !runtimeSupportsChannelIntent(runtime) {
+		if err != nil || runtime.Status != "online" || !runtimeSupports(runtime, capability) {
 			continue
 		}
 		return agent, nil
 	}
-	return db.Agent{}, fmt.Errorf("no online channel-intent-capable agent runtime available")
+	return db.Agent{}, fmt.Errorf("no online channel-capable agent runtime available")
 }
 
 func runtimeSupportsChannelIntent(runtime db.AgentRuntime) bool {
+	return runtimeSupports(runtime, protocol.DaemonCapabilityChannelIntent)
+}
+
+func runtimeSupports(runtime db.AgentRuntime, capability string) bool {
+	if capability == "" {
+		return true
+	}
 	var metadata struct {
 		Capabilities []string `json:"capabilities"`
 	}
 	if err := json.Unmarshal(runtime.Metadata, &metadata); err != nil {
 		return false
 	}
-	for _, capability := range metadata.Capabilities {
-		if capability == protocol.DaemonCapabilityChannelIntent {
+	for _, c := range metadata.Capabilities {
+		if c == capability {
 			return true
 		}
 	}
@@ -272,13 +361,17 @@ func (c *TaskBackedChatIntentClient) cancelTask(taskID pgtype.UUID) {
 }
 
 func channelIntentOutput(task db.AgentTaskQueue) (string, error) {
+	return taskCompletionOutput(task, "channel intent")
+}
+
+func taskCompletionOutput(task db.AgentTaskQueue, label string) (string, error) {
 	var payload protocol.TaskCompletedPayload
 	if err := json.Unmarshal(task.Result, &payload); err != nil {
-		return "", fmt.Errorf("parse channel intent task result: %w", err)
+		return "", fmt.Errorf("parse %s task result: %w", label, err)
 	}
 	output := strings.TrimSpace(payload.Output)
 	if output == "" {
-		return "", fmt.Errorf("channel intent task completed without output")
+		return "", fmt.Errorf("%s task completed without output", label)
 	}
 	return output, nil
 }
@@ -292,6 +385,8 @@ func channelIntentTaskMessage(task db.AgentTaskQueue) string {
 }
 
 var (
-	_ chintent.ChatIntentClient      = (*TaskBackedChatIntentClient)(nil)
-	_ chintent.AsyncChatIntentClient = (*TaskBackedChatIntentClient)(nil)
+	_ chintent.ChatIntentClient       = (*TaskBackedChatIntentClient)(nil)
+	_ chintent.AsyncChatIntentClient  = (*TaskBackedChatIntentClient)(nil)
+	_ chintent.ChannelTurnPlanner     = (*TaskBackedChatIntentClient)(nil)
+	_ chintent.ChannelAgentTurnClient = (*TaskBackedChatIntentClient)(nil)
 )

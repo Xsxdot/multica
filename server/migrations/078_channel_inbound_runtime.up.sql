@@ -45,7 +45,7 @@ CREATE TABLE channel_inbound_event (
                                       )),
     phase               TEXT         NOT NULL DEFAULT 'pre'
                                       CHECK (phase IN ('pre', 'intent', 'post', 'done')),
-    wait_kind           TEXT         CHECK (wait_kind IN ('intent', 'action', 'user_clarification')),
+    wait_kind           TEXT         CHECK (wait_kind IN ('intent', 'action', 'channel_turn', 'user_clarification')),
     wait_task_id        UUID         REFERENCES agent_task_queue(id) ON DELETE SET NULL,
     wait_expires_at     TIMESTAMPTZ,
     workspace_id        UUID         REFERENCES workspace(id) ON DELETE SET NULL,

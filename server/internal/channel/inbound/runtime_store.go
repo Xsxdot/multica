@@ -31,9 +31,10 @@ const (
 	InboundPhasePost   = "post"
 	InboundPhaseDone   = "done"
 
-	WaitKindIntent = "intent"
-	WaitKindAction = "action"
-	WaitKindUser   = "user_clarification"
+	WaitKindIntent      = "intent"
+	WaitKindAction      = "action"
+	WaitKindChannelTurn = "channel_turn"
+	WaitKindUser        = "user_clarification"
 )
 
 type AcceptOptions struct {
@@ -96,7 +97,7 @@ type InboundEventStore interface {
 	ClaimNext(ctx context.Context, workerID string) (*InboundEventRecord, error)
 	SaveEvent(ctx context.Context, id string, evt port.InboundEvent, phase string, chatCtx ChatBindingContext) error
 	MarkQueued(ctx context.Context, id string, evt port.InboundEvent, phase string, chatCtx ChatBindingContext) error
-	MarkWaitingAgent(ctx context.Context, id string, evt port.InboundEvent, taskID string, chatCtx ChatBindingContext) error
+	MarkWaitingAgent(ctx context.Context, id string, evt port.InboundEvent, taskID string, chatCtx ChatBindingContext, waitKind string) error
 	MarkWaitingUser(ctx context.Context, id string, evt port.InboundEvent, replyText string, chatCtx ChatBindingContext, expiresAt time.Time) error
 	MarkProcessed(ctx context.Context, id string) error
 	MarkRetry(ctx context.Context, id string, err error) (RetryResult, error)
@@ -196,7 +197,7 @@ FOR UPDATE
 		return AcceptResult{}, err
 	}
 	if activeID != "" {
-		activeStatus, activeText, waitExpiresAt, terminal, err := loadActiveEventState(ctx, tx, activeID)
+		activeStatus, _, waitExpiresAt, terminal, err := loadActiveEventState(ctx, tx, activeID)
 		if err != nil {
 			return AcceptResult{}, err
 		}
@@ -213,36 +214,14 @@ FOR UPDATE
 				return AcceptResult{}, err
 			}
 			activeID = ""
-		} else if activeStatus == InboundStatusWaitingUser && !opts.BypassLimit {
-			id, err := insertInboundEvent(ctx, tx, evt, key, InboundStatusProcessed, InboundPhaseDone)
-			if err != nil {
+		} else if activeStatus == InboundStatusWaitingUser {
+			if err := markDeadTx(ctx, tx, activeID, "superseded by a new channel turn"); err != nil {
 				return AcceptResult{}, err
 			}
-			combined := combineClarification(activeText, evt.Text)
-			if _, err := tx.Exec(ctx, `
-UPDATE channel_inbound_event
-SET text = $2,
-    canonical_event = jsonb_set(canonical_event, '{Text}', to_jsonb($2::text), true),
-    status = 'queued',
-    phase = 'intent',
-    wait_kind = NULL,
-    wait_task_id = NULL,
-    wait_expires_at = NULL,
-    next_attempt_at = now(),
-    updated_at = now(),
-    last_error = NULL
-WHERE id = $1
-`, activeID, combined); err != nil {
+			if err := clearConversationActive(ctx, tx, connectionID, key, activeID); err != nil {
 				return AcceptResult{}, err
 			}
-			if err := tx.Commit(ctx); err != nil {
-				return AcceptResult{}, err
-			}
-			return AcceptResult{
-				EventID:                  id,
-				ClarificationConsumed:    true,
-				ActiveWaitingForUserText: activeText,
-			}, nil
+			activeID = ""
 		}
 	}
 
@@ -393,16 +372,19 @@ WHERE id = $1
 	return err
 }
 
-func (s *DBInboundEventStore) MarkWaitingAgent(ctx context.Context, id string, evt port.InboundEvent, taskID string, chatCtx ChatBindingContext) error {
+func (s *DBInboundEventStore) MarkWaitingAgent(ctx context.Context, id string, evt port.InboundEvent, taskID string, chatCtx ChatBindingContext, waitKind string) error {
 	canonical, raw, err := marshalEvent(evt)
 	if err != nil {
 		return err
+	}
+	if waitKind == "" {
+		waitKind = WaitKindIntent
 	}
 	_, err = s.pool.Exec(ctx, `
 UPDATE channel_inbound_event
 SET status = 'waiting_agent',
     phase = 'intent',
-    wait_kind = 'intent',
+    wait_kind = $8,
     wait_task_id = nullif($2, '')::uuid,
     wait_expires_at = NULL,
     text = $3,
@@ -414,7 +396,7 @@ SET status = 'waiting_agent',
     locked_by = NULL,
     updated_at = now()
 WHERE id = $1
-`, id, taskID, evt.Text, canonical, raw, chatCtx.WorkspaceID, chatCtx.DefaultProjectID)
+`, id, taskID, evt.Text, canonical, raw, chatCtx.WorkspaceID, chatCtx.DefaultProjectID, waitKind)
 	return err
 }
 

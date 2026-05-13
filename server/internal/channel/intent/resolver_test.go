@@ -193,6 +193,30 @@ func TestChatIntentResolver_DestructiveDeleteBecomesUnsupported(t *testing.T) {
 	}
 }
 
+func TestChatIntentResolver_ChannelTurnPlan(t *testing.T) {
+	t.Parallel()
+
+	resolver := in.NewChatIntentResolver(in.ChatIntentResolverConfig{
+		Client: fakeChatClient{raw: `{"mode":"query","intent":"QueryProgress","params":{"scope":"projects"},"user_reply_draft":"我看一下各项目进展。","confidence":0.92}`},
+	})
+	got, err := resolver.Resolve(context.Background(), in.IntentRequest{WorkspaceID: "ws-1", Text: "各项目进展怎么样？"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Matched {
+		t.Fatal("expected chat match")
+	}
+	if got.Intent.Kind != in.IntentQueryProgress {
+		t.Fatalf("kind = %q, want QueryProgress", got.Intent.Kind)
+	}
+	if got.Intent.Params["scope"] != "projects" {
+		t.Fatalf("scope = %q, want projects", got.Intent.Params["scope"])
+	}
+	if got.Intent.Params["_user_reply_draft"] == "" {
+		t.Fatal("expected user reply draft to be preserved")
+	}
+}
+
 func TestChatIntentResolver_NilClientNoMatch(t *testing.T) {
 	t.Parallel()
 

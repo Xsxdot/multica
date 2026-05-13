@@ -62,7 +62,7 @@ RETURNING *;
 -- name: ListAgentTasks :many
 SELECT * FROM agent_task_queue
 WHERE agent_id = $1
-  AND COALESCE(context->>'type', '') <> 'channel_intent'
+  AND COALESCE(context->>'type', '') NOT IN ('channel_intent', 'channel_turn')
 ORDER BY created_at DESC;
 
 -- name: CreateAgentTask :one
@@ -93,9 +93,24 @@ INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, 
 VALUES ($1, $2, NULL, 'queued', $3, $4)
 RETURNING *;
 
+-- name: CreateChannelTurnTask :one
+-- Channel-turn tasks are internal channel agent turns. They have no issue /
+-- chat / autopilot link; the daemon detects them via context.type ==
+-- "channel_turn" and returns a natural-language reply for the channel.
+INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, context)
+VALUES ($1, $2, NULL, 'queued', $3, $4)
+RETURNING *;
+
 -- name: GetChannelIntentTaskByInboundEvent :one
 SELECT * FROM agent_task_queue
 WHERE COALESCE(context->>'type', '') = 'channel_intent'
+  AND context->>'channel_inbound_event_id' = sqlc.arg(inbound_event_id)::text
+ORDER BY created_at ASC
+LIMIT 1;
+
+-- name: GetContextTaskByInboundEvent :one
+SELECT * FROM agent_task_queue
+WHERE COALESCE(context->>'type', '') = sqlc.arg(context_type)::text
   AND context->>'channel_inbound_event_id' = sqlc.arg(inbound_event_id)::text
 ORDER BY created_at ASC
 LIMIT 1;

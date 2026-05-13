@@ -155,6 +155,22 @@ type AutopilotTrigger struct {
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
+type ChannelActionProposal struct {
+	ID               pgtype.UUID        `json:"id"`
+	Code             string             `json:"code"`
+	ConnectionID     string             `json:"connection_id"`
+	ChatID           string             `json:"chat_id"`
+	SenderExternalID string             `json:"sender_external_id"`
+	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
+	InboundEventID   pgtype.UUID        `json:"inbound_event_id"`
+	ActionKind       string             `json:"action_kind"`
+	IntentPayload    []byte             `json:"intent_payload"`
+	Status           string             `json:"status"`
+	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
 type ChannelActionResult struct {
 	ID             pgtype.UUID        `json:"id"`
 	InboundEventID pgtype.UUID        `json:"inbound_event_id"`
@@ -308,6 +324,25 @@ type ChannelOutboundNotification struct {
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
 	ConnectionID         string             `json:"connection_id"`
+	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
+	IssueID              pgtype.UUID        `json:"issue_id"`
+	IssueIdentifier      string             `json:"issue_identifier"`
+	IssueTitle           string             `json:"issue_title"`
+	InboxItemID          pgtype.UUID        `json:"inbox_item_id"`
+	Replyable            bool               `json:"replyable"`
+}
+
+type ChannelReplyContext struct {
+	ConnectionID    string             `json:"connection_id"`
+	ExternalUserID  string             `json:"external_user_id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	IssueID         pgtype.UUID        `json:"issue_id"`
+	IssueIdentifier string             `json:"issue_identifier"`
+	IssueTitle      string             `json:"issue_title"`
+	InboxItemID     pgtype.UUID        `json:"inbox_item_id"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
 type ChannelUserBinding struct {

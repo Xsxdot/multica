@@ -11,6 +11,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -31,6 +32,10 @@ type channelInboundRuntimeComponents struct {
 	PostPipeline  *inbound.Pipeline
 	RuleResolvers []chintent.IntentResolver
 	ChatIntent    chintent.AsyncChatIntentClient
+	TurnPlanner   chintent.ChannelTurnPlanner
+	ChannelTurn   chintent.ChannelAgentTurnClient
+	DispatchStore inbound.DispatchCompletionStore
+	ReplyContext  inbound.ReplyContextLookup
 }
 
 func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipelineOptions) channelInboundRuntimeComponents {
@@ -103,6 +108,7 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 			ProjectValidator:  inbound.NewDBProjectWorkspaceValidator(pool),
 			DispatchStore:     inbound.NewDBDispatchCompletionStore(pool),
 			ProposalStore:     inbound.NewDBActionProposalStore(pool),
+			ReplyContext:      replyctx.NewDBStore(pool),
 		}),
 		inbound.NewReplyStep(),
 	)
@@ -114,5 +120,23 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 		PostPipeline:  post,
 		RuleResolvers: ruleResolvers,
 		ChatIntent:    asyncChatIntent,
+		TurnPlanner:   turnPlannerFromAsync(asyncChatIntent),
+		ChannelTurn:   channelTurnFromAsync(asyncChatIntent),
+		DispatchStore: inbound.NewDBDispatchCompletionStore(pool),
+		ReplyContext:  replyctx.NewDBStore(pool),
 	}
+}
+
+func turnPlannerFromAsync(client chintent.AsyncChatIntentClient) chintent.ChannelTurnPlanner {
+	if planner, ok := client.(chintent.ChannelTurnPlanner); ok {
+		return planner
+	}
+	return nil
+}
+
+func channelTurnFromAsync(client chintent.AsyncChatIntentClient) chintent.ChannelAgentTurnClient {
+	if turn, ok := client.(chintent.ChannelAgentTurnClient); ok {
+		return turn
+	}
+	return nil
 }

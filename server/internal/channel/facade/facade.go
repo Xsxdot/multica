@@ -32,6 +32,8 @@ type CommentFacade interface {
 
 type IssueDigestFacade interface {
 	GetIssueDigest(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDigest, error)
+	GetIssueProgress(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueProgress, error)
+	ListProjectProgress(ctx context.Context, workspaceID pgtype.UUID) ([]ProjectProgress, error)
 	GetIssueDetail(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDetail, error)
 	GetIssueTimeline(ctx context.Context, workspaceID pgtype.UUID, identifier string, page, pageSize int) (IssueTimelinePage, error)
 	GetIssueLogs(ctx context.Context, workspaceID pgtype.UUID, identifier string, page, pageSize int) (IssueLogPage, error)
@@ -128,6 +130,14 @@ func NewIssueDigestFacade(svc IssueDigestService) IssueDigestFacade {
 
 func (f *issueDigestFacade) GetIssueDigest(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDigest, error) {
 	return f.svc.GetIssueDigest(ctx, workspaceID, identifier)
+}
+
+func (f *issueDigestFacade) GetIssueProgress(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueProgress, error) {
+	return f.svc.GetIssueProgress(ctx, workspaceID, identifier)
+}
+
+func (f *issueDigestFacade) ListProjectProgress(ctx context.Context, workspaceID pgtype.UUID) ([]ProjectProgress, error) {
+	return f.svc.ListProjectProgress(ctx, workspaceID)
 }
 
 func (f *issueDigestFacade) GetIssueDetail(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDetail, error) {

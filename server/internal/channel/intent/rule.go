@@ -22,6 +22,7 @@ const (
 	IntentCreateIssue   IntentKind = "CreateIssue"
 	IntentAddComment    IntentKind = "AddComment"
 	IntentQueryIssue    IntentKind = "QueryIssue"
+	IntentQueryProgress IntentKind = "QueryProgress"
 	IntentIssueDetail   IntentKind = "IssueDetail"
 	IntentIssueTimeline IntentKind = "IssueTimeline"
 	IntentIssueLogs     IntentKind = "IssueLogs"

@@ -18,6 +18,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/channel/facade"
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 	"github.com/multica-ai/multica/server/internal/util"
 )
 
@@ -56,6 +57,10 @@ type ProjectWorkspaceValidator interface {
 	ValidateProjectInWorkspace(ctx context.Context, workspaceID, projectID pgtype.UUID) error
 }
 
+type ReplyContextLookup interface {
+	Lookup(ctx context.Context, connectionID, externalUserID string, now time.Time) (replyctx.Context, bool, error)
+}
+
 type ResolvedUser struct {
 	MulticaUserID pgtype.UUID
 	DisplayName   string
@@ -71,6 +76,7 @@ type DispatchConfig struct {
 	ProjectValidator  ProjectWorkspaceValidator
 	DispatchStore     DispatchCompletionStore
 	ProposalStore     ActionProposalStore
+	ReplyContext      ReplyContextLookup
 }
 
 type dispatchStep struct {
@@ -110,6 +116,11 @@ func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inb
 		return evt, DecisionContinue, nil
 	}
 
+	var err error
+	evt, err = d.withReplyContextIssue(ctx, evt)
+	if err != nil {
+		return evt, DecisionContinue, err
+	}
 	intent := evt.Intent
 
 	slog.Debug("dispatch: routing intent",
@@ -122,11 +133,13 @@ func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inb
 
 	var reply string
 	var rich *port.OutboundRichMessage
-	var err error
+	err = nil
 
 	switch intent.Kind {
 	case port.IntentCreateIssue, port.IntentAddComment, port.IntentSetStatus, port.IntentSetAssignee, port.IntentSetPriority, port.IntentSetLabel:
 		reply, err = d.handleMutationIntent(ctx, evt)
+	case port.IntentQueryProgress:
+		reply, rich, err = d.handleQueryProgress(ctx, evt)
 	case port.IntentQueryIssue:
 		reply, rich, err = d.handleQueryIssue(ctx, evt)
 	case port.IntentIssueDetail:
@@ -142,11 +155,11 @@ func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inb
 	case port.IntentUnsupported:
 		reply = fmt.Sprintf("[%s] 此操作不支持在群内执行，请回 Web 端操作。", replyUnsupportedOp)
 	case port.IntentUnknown:
-		reply = fmt.Sprintf("[%s] 没有理解你的意思。支持的操作：创建 Issue、加评论、查状态、改状态、改指派人、改优先级、加/去标签。", replyUnknown)
+		reply, err = d.handleUnknown(ctx, evt)
 	case port.IntentASKClarify:
-		reply = fmt.Sprintf("[%s] 没有理解你的意思，请说得更明确一些。", replyAskClarify)
+		reply, err = d.handleAskClarify(ctx, evt)
 	default:
-		reply = fmt.Sprintf("[%s] 没有理解你的意思。支持的操作：创建 Issue、加评论、查状态、改状态、改指派人、改优先级、加/去标签。", replyUnknown)
+		reply = "我可以查进展、创建 Issue，或把你的回复写回某个 Issue。你可以直接说要查哪个 issue，或者要创建什么。"
 	}
 
 	if err != nil {
@@ -187,13 +200,67 @@ func (d *dispatchStep) persistDispatchCompletion(ctx context.Context, evt port.I
 	return nil
 }
 
+func (d *dispatchStep) withReplyContextIssue(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, error) {
+	if !intentCanUseReplyContextIssue(evt.Intent.Kind) || strings.TrimSpace(evt.Intent.Params["issue_key"]) != "" {
+		return evt, nil
+	}
+	rc, ok, err := d.replyContextForEvent(ctx, evt)
+	if err != nil || !ok || strings.TrimSpace(rc.IssueIdentifier) == "" {
+		return evt, err
+	}
+	params := make(map[string]string, len(evt.Intent.Params)+2)
+	for k, v := range evt.Intent.Params {
+		params[k] = v
+	}
+	params["issue_key"] = rc.IssueIdentifier
+	if evt.Intent.Kind == port.IntentQueryProgress && strings.TrimSpace(params["scope"]) == "" {
+		params["scope"] = "issue"
+	}
+	evt.Intent.Params = params
+	return evt, nil
+}
+
+func intentCanUseReplyContextIssue(kind port.IntentKind) bool {
+	switch kind {
+	case port.IntentAddComment,
+		port.IntentSetStatus,
+		port.IntentSetAssignee,
+		port.IntentSetPriority,
+		port.IntentSetLabel,
+		port.IntentQueryIssue,
+		port.IntentQueryProgress,
+		port.IntentIssueDetail,
+		port.IntentIssueTimeline,
+		port.IntentIssueLogs:
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *dispatchStep) replyContextForEvent(ctx context.Context, evt port.InboundEvent) (replyctx.Context, bool, error) {
+	if evt.ChatType != port.ChatTypeDirect || d.cfg.ReplyContext == nil {
+		return replyctx.Context{}, false, nil
+	}
+	return d.cfg.ReplyContext.Lookup(ctx, evt.ConnectionID(), evt.SenderID, time.Now())
+}
+
+func (d *dispatchStep) lookupWorkspaceID(ctx context.Context, evt port.InboundEvent) (pgtype.UUID, error) {
+	if rc, ok, err := d.replyContextForEvent(ctx, evt); err != nil {
+		return pgtype.UUID{}, err
+	} else if ok && rc.WorkspaceID.Valid {
+		return rc.WorkspaceID, nil
+	}
+	return d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
+}
+
 func (d *dispatchStep) handleCreateIssue(ctx context.Context, evt port.InboundEvent) (string, error) {
 	title, _ := evt.Intent.Params["title"]
 	if title == "" {
 		return fmt.Sprintf("[%s] 缺少 Issue 标题，请提供要创建的内容。", replyMissingParam), nil
 	}
 
-	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
+	wsID, err := d.lookupWorkspaceID(ctx, evt)
 	if err != nil {
 		return "", fmt.Errorf("lookup workspace: %w", err)
 	}
@@ -222,18 +289,70 @@ func (d *dispatchStep) handleCreateIssue(ctx context.Context, evt port.InboundEv
 	}
 
 	issue, err := d.cfg.IssueFacade.CreateIssue(ctx, facade.CreateIssueReq{
-		WorkspaceID:    wsID,
-		ActorID:        user.MulticaUserID,
-		ProjectID:      projectID,
-		InboundEventID: parseRuntimeEventID(evt.RuntimeEventID),
-		Title:          title,
-		Description:    evt.Intent.Params["description"],
+		WorkspaceID:        wsID,
+		ActorID:            user.MulticaUserID,
+		ProjectID:          projectID,
+		InboundEventID:     parseRuntimeEventID(evt.RuntimeEventID),
+		Title:              title,
+		Description:        evt.Intent.Params["description"],
+		AssigneeIdentifier: strings.TrimSpace(evt.Intent.Params["assignee"]),
 	})
 	if err != nil {
 		return "", fmt.Errorf("create issue: %w", err)
 	}
 
 	return fmt.Sprintf("[%s] 已创建 Issue %s：%s", replyIssueCreated, issue.Identifier, issue.Title), nil
+}
+
+func (d *dispatchStep) handleQueryProgress(ctx context.Context, evt port.InboundEvent) (string, *port.OutboundRichMessage, error) {
+	scope := strings.TrimSpace(evt.Intent.Params["scope"])
+	if scope == "" && strings.TrimSpace(evt.Intent.Params["issue_key"]) != "" {
+		scope = "issue"
+	}
+	if scope == "" {
+		scope = "projects"
+	}
+
+	wsID, err := d.lookupWorkspaceID(ctx, evt)
+	if err != nil {
+		return "", nil, fmt.Errorf("lookup workspace: %w", err)
+	}
+	if d.cfg.IssueDigestFacade == nil {
+		return fmt.Sprintf("[%s] 进展查询服务未配置。", replyInternalError), nil, nil
+	}
+
+	switch scope {
+	case "projects":
+		items, err := d.cfg.IssueDigestFacade.ListProjectProgress(ctx, wsID)
+		if err != nil {
+			return "", nil, fmt.Errorf("list project progress: %w", err)
+		}
+		body := FormatProjectProgress(items)
+		return body, &port.OutboundRichMessage{ChatID: evt.ChatID, Title: "项目进展", Body: body}, nil
+	case "my_todos":
+		return d.handleQueryIssue(ctx, evt)
+	case "issue":
+		issueKey := evt.Intent.Params["issue_key"]
+		if !ValidIdentifierFormat(issueKey) {
+			return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), nil, nil
+		}
+		progress, err := d.cfg.IssueDigestFacade.GetIssueProgress(ctx, wsID, issueKey)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Sprintf("[%s] 找不到 Issue %s。", replyIssueNotFound, issueKey), nil, nil
+			}
+			return "", nil, fmt.Errorf("get issue progress: %w", err)
+		}
+		body := FormatIssueProgress(progress)
+		return body, &port.OutboundRichMessage{
+			ChatID:  evt.ChatID,
+			Title:   fmt.Sprintf("%s 进展", progress.Digest.Issue.Identifier),
+			Body:    body,
+			Actions: digestActions(progress.Digest),
+		}, nil
+	default:
+		return fmt.Sprintf("[%s] 你是想查某个 Issue，还是看所有项目进展？", replyAskClarify), nil, nil
+	}
 }
 
 func (d *dispatchStep) handleAddComment(ctx context.Context, evt port.InboundEvent) (string, error) {
@@ -247,7 +366,7 @@ func (d *dispatchStep) handleAddComment(ctx context.Context, evt port.InboundEve
 		return fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), nil
 	}
 
-	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
+	wsID, err := d.lookupWorkspaceID(ctx, evt)
 	if err != nil {
 		return "", fmt.Errorf("lookup workspace: %w", err)
 	}
@@ -274,6 +393,56 @@ func (d *dispatchStep) handleAddComment(ctx context.Context, evt port.InboundEve
 	return fmt.Sprintf("[%s] 已在 %s 上添加评论。", replyCommentAdded, issueKey), nil
 }
 
+func (d *dispatchStep) handleUnknown(ctx context.Context, evt port.InboundEvent) (string, error) {
+	if msg, ok, err := d.tryReplyContextComment(ctx, evt); err != nil || ok {
+		return msg, err
+	}
+	if draft := strings.TrimSpace(evt.Intent.Params["_user_reply_draft"]); draft != "" {
+		return draft, nil
+	}
+	return "我还没抓到你想推进哪件事。你可以直接问“各项目进展怎么样”，或者说“创建一个 issue：...”", nil
+}
+
+func (d *dispatchStep) handleAskClarify(ctx context.Context, evt port.InboundEvent) (string, error) {
+	if msg, ok, err := d.tryReplyContextComment(ctx, evt); err != nil || ok {
+		return msg, err
+	}
+	if draft := strings.TrimSpace(evt.Intent.Params["_user_reply_draft"]); draft != "" {
+		return draft, nil
+	}
+	return "我还需要一点上下文：是要查某个 issue、看项目进展，还是创建/回复一个 issue？", nil
+}
+
+func (d *dispatchStep) tryReplyContextComment(ctx context.Context, evt port.InboundEvent) (string, bool, error) {
+	if evt.ChatType != port.ChatTypeDirect || d.cfg.ReplyContext == nil || strings.TrimSpace(evt.Text) == "" {
+		return "", false, nil
+	}
+	rc, ok, err := d.replyContextForEvent(ctx, evt)
+	if err != nil {
+		return "", true, fmt.Errorf("lookup reply context: %w", err)
+	}
+	if !ok || !rc.IssueID.Valid {
+		return "", false, nil
+	}
+	user, err := d.cfg.UserResolver.Resolve(ctx, evt.ConnectionID(), evt.SenderID)
+	if err != nil {
+		return "", true, fmt.Errorf("resolve user: %w", err)
+	}
+	if _, err := d.cfg.CommentFacade.AddComment(ctx, facade.AddCommentReq{
+		IssueID:        rc.IssueID,
+		ActorID:        user.MulticaUserID,
+		InboundEventID: parseRuntimeEventID(evt.RuntimeEventID),
+		Content:        evt.Text,
+	}); err != nil {
+		return "", true, fmt.Errorf("add reply-context comment: %w", err)
+	}
+	label := rc.IssueIdentifier
+	if label == "" {
+		label = util.UUIDToString(rc.IssueID)
+	}
+	return fmt.Sprintf("[%s] 已回复到 %s。", replyCommentAdded, label), true, nil
+}
+
 func (d *dispatchStep) handleMutationIntent(ctx context.Context, evt port.InboundEvent) (string, error) {
 	if d.cfg.ProposalStore == nil {
 		return d.executeMutationIntent(ctx, evt)
@@ -281,7 +450,7 @@ func (d *dispatchStep) handleMutationIntent(ctx context.Context, evt port.Inboun
 	if msg, ok := validateMutationIntent(evt.Intent); !ok {
 		return msg, nil
 	}
-	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
+	wsID, err := d.lookupWorkspaceID(ctx, evt)
 	if err != nil {
 		return "", fmt.Errorf("lookup workspace: %w", err)
 	}
@@ -379,7 +548,7 @@ func (d *dispatchStep) loadConfirmableProposal(ctx context.Context, evt port.Inb
 func (d *dispatchStep) handleQueryIssue(ctx context.Context, evt port.InboundEvent) (string, *port.OutboundRichMessage, error) {
 	issueKey, hasKey := evt.Intent.Params["issue_key"]
 
-	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
+	wsID, err := d.lookupWorkspaceID(ctx, evt)
 	if err != nil {
 		return "", nil, fmt.Errorf("lookup workspace: %w", err)
 	}
@@ -525,7 +694,7 @@ func (d *dispatchStep) resolveReadOnlyIssueKey(ctx context.Context, evt port.Inb
 	if !ValidIdentifierFormat(issueKey) {
 		return issueKey, pgtype.UUID{}, fmt.Sprintf("[%s] Issue 编号格式不正确。", replyIssueNotFound), false, nil
 	}
-	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
+	wsID, err := d.lookupWorkspaceID(ctx, evt)
 	if err != nil {
 		return issueKey, pgtype.UUID{}, "", false, fmt.Errorf("lookup workspace: %w", err)
 	}
@@ -614,7 +783,7 @@ func (d *dispatchStep) resolveIssueAndUser(ctx context.Context, evt port.Inbound
 	if !ValidIdentifierFormat(issueKey) {
 		return facade.Issue{}, ResolvedUser{}, fmt.Errorf("[%s] Issue 编号格式不正确。", replyIssueNotFound)
 	}
-	wsID, err := d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
+	wsID, err := d.lookupWorkspaceID(ctx, evt)
 	if err != nil {
 		return facade.Issue{}, ResolvedUser{}, fmt.Errorf("lookup workspace: %w", err)
 	}
@@ -799,6 +968,69 @@ func FormatIssueDigest(digest facade.IssueDigest) string {
 	}
 	fmt.Fprintf(&b, "\n\n下一步：%s", nextStepForDigest(digest))
 	fmt.Fprintf(&b, "\n\n展开：/detail %s · /timeline %s · /logs %s", digest.Issue.Identifier, digest.Issue.Identifier, digest.Issue.Identifier)
+	return b.String()
+}
+
+func FormatIssueProgress(progress facade.IssueProgress) string {
+	digest := progress.Digest
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s 目前是 %s：%s", digest.Issue.Identifier, digest.Issue.Status, digest.Issue.Title)
+	if digest.AssigneeName != "" {
+		fmt.Fprintf(&b, "\n负责人：%s", digest.AssigneeName)
+	} else {
+		b.WriteString("\n负责人：未指派")
+	}
+	if progress.LatestStatus != nil {
+		fmt.Fprintf(&b, "\n最近状态：%s", progress.LatestStatus.Summary)
+	}
+	if progress.LatestReply != nil && progress.LatestReply.Content != "" {
+		author := emptyAs(progress.LatestReply.AuthorName, progress.LatestReply.AuthorType)
+		fmt.Fprintf(&b, "\n\n最新回复（%s，%s）：\n%s",
+			emptyAs(author, "未知"),
+			progress.LatestReply.CreatedAt.Format("01-02 15:04"),
+			progress.LatestReply.Content,
+		)
+	} else if digest.AgentSummary != nil && digest.AgentSummary.ResultSummary != "" {
+		fmt.Fprintf(&b, "\n\n最新输出：\n%s", digest.AgentSummary.ResultSummary)
+	} else if len(digest.RecentEvents) > 0 {
+		b.WriteString("\n\n最近动态：")
+		for _, event := range digest.RecentEvents {
+			fmt.Fprintf(&b, "\n- %s：%s", emptyAs(event.ActorName, "系统"), event.Summary)
+		}
+	} else {
+		b.WriteString("\n\n还没有实质回复。")
+	}
+	next := progress.RecommendedNext
+	if next == "" {
+		next = nextStepForDigest(digest)
+	}
+	fmt.Fprintf(&b, "\n\n下一步：%s", next)
+	fmt.Fprintf(&b, "\n\n展开：/detail %s · /timeline %s · /logs %s", digest.Issue.Identifier, digest.Issue.Identifier, digest.Issue.Identifier)
+	return b.String()
+}
+
+func FormatProjectProgress(items []facade.ProjectProgress) string {
+	if len(items) == 0 {
+		return "当前 workspace 还没有项目。"
+	}
+	var b strings.Builder
+	b.WriteString("项目进展：")
+	for _, item := range items {
+		fmt.Fprintf(&b, "\n\n%s：开放 %d / 总计 %d", item.ProjectName, item.Open, item.Total)
+		if item.Blocked > 0 || item.InReview > 0 || item.InProgress > 0 {
+			fmt.Fprintf(&b, "\n- 处理中 %d · Review %d · 阻塞 %d", item.InProgress, item.InReview, item.Blocked)
+		}
+		if len(item.FocusIssues) > 0 {
+			b.WriteString("\n- 关注：")
+			for _, issue := range item.FocusIssues {
+				assignee := ""
+				if issue.Assignee != "" {
+					assignee = " @" + issue.Assignee
+				}
+				fmt.Fprintf(&b, "\n  %s [%s]%s %s", issue.Identifier, issue.Status, assignee, issue.Title)
+			}
+		}
+	}
 	return b.String()
 }
 

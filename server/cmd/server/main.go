@@ -286,6 +286,10 @@ func main() {
 				PostPipeline:  components.PostPipeline,
 				RuleResolvers: components.RuleResolvers,
 				ChatIntent:    components.ChatIntent,
+				TurnPlanner:   components.TurnPlanner,
+				ChannelTurn:   components.ChannelTurn,
+				DispatchStore: components.DispatchStore,
+				ReplyContext:  components.ReplyContext,
 			}
 		},
 		ConversationLimit:      envPositiveInt("CHANNEL_INBOUND_CONVERSATION_LIMIT", defaultChannelInboundConversationLimit),

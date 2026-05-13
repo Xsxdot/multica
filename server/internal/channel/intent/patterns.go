@@ -176,6 +176,27 @@ func defaultRules() []rule {
 			},
 		},
 		{
+			kind: IntentQueryProgress, confidence: 1,
+			re: regexp.MustCompile(`^(?:各|所有|全部)?项目(?:的)?(?:进展|情况|状态)(?:怎么样|如何)?[？?]?$`),
+			params: func(_ []string) map[string]string {
+				return map[string]string{"scope": "projects"}
+			},
+		},
+		{
+			kind: IntentQueryProgress, confidence: 1,
+			re: regexp.MustCompile(`^(?:\[)?(` + key + `)(?:\])?\s*到哪了[？?]?$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"scope": "issue", "issue_key": keyParam(sub[1])}
+			},
+		},
+		{
+			kind: IntentQueryProgress, confidence: 1,
+			re: regexp.MustCompile(`^(?:\[)?(` + key + `)(?:\])?\s*(?:这个\s*(?i:issue)\s*)?(?:怎么样了?|什么情况|进展(?:怎么样|如何)?|状态(?:怎么样|如何)?|现在状态)[？?]?$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"scope": "issue", "issue_key": keyParam(sub[1])}
+			},
+		},
+		{
 			kind: IntentQueryIssue, confidence: 1,
 			re: regexp.MustCompile(`^(?:\[)?(` + key + `)(?:\])?\s*到哪了[？?]?$`),
 			params: func(sub []string) map[string]string {
@@ -194,6 +215,13 @@ func defaultRules() []rule {
 			re: regexp.MustCompile(`^(?:我的待办|待办列表|看一下待办|我有哪些待办)$`),
 			params: func(_ []string) map[string]string {
 				return map[string]string{}
+			},
+		},
+		{
+			kind: IntentCreateIssue, confidence: 1,
+			re: regexp.MustCompile(`(?i)^创建一个\s*Issue\s*[:：]?\s*(.+?)\s*(?:，|,|\s)+(?:指派给|分配给)\s*@?(.+)$`),
+			params: func(sub []string) map[string]string {
+				return map[string]string{"title": strings.TrimSpace(sub[1]), "assignee": strings.TrimSpace(sub[2])}
 			},
 		},
 		{

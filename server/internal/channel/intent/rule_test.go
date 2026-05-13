@@ -22,9 +22,9 @@ func TestRuleMatcher_Corpus_Table(t *testing.T) {
 		{"在 [STA-2] 上加一条评论：已找产品确认", in.IntentAddComment, map[string]string{"issue_key": "STA-2", "comment": "已找产品确认"}},
 		{"在 [sta-2] 上加一条评论：已找产品确认", in.IntentAddComment, map[string]string{"issue_key": "STA-2", "comment": "已找产品确认"}},
 		{"STA-12 评论：请补一下截图", in.IntentAddComment, map[string]string{"issue_key": "STA-12", "comment": "请补一下截图"}},
-		{"[STA-2] 到哪了？", in.IntentQueryIssue, map[string]string{"issue_key": "STA-2"}},
-		{"sta-1 这个 issue 怎么样了", in.IntentQueryIssue, map[string]string{"issue_key": "STA-1"}},
-		{"STA-5 现在状态", in.IntentQueryIssue, map[string]string{"issue_key": "STA-5"}},
+		{"[STA-2] 到哪了？", in.IntentQueryProgress, map[string]string{"scope": "issue", "issue_key": "STA-2"}},
+		{"sta-1 这个 issue 怎么样了", in.IntentQueryProgress, map[string]string{"scope": "issue", "issue_key": "STA-1"}},
+		{"STA-5 现在状态", in.IntentQueryProgress, map[string]string{"scope": "issue", "issue_key": "STA-5"}},
 		{"我的待办", in.IntentQueryIssue, map[string]string{}},
 		{"把 [STA-2] 标成 done", in.IntentSetStatus, map[string]string{"issue_key": "STA-2", "status": "done"}},
 		{"STA-7 完成了", in.IntentSetStatus, map[string]string{"issue_key": "STA-7", "status": "done"}},
@@ -125,11 +125,14 @@ func TestRuleMatcher_QueryIssue_Variants(t *testing.T) {
 	}
 	for _, tc := range variants {
 		got, ok := m.Match(tc.text)
-		if !ok || got.Kind != in.IntentQueryIssue {
-			t.Fatalf("%q: want QueryIssue hit", tc.text)
+		if !ok || got.Kind != in.IntentQueryProgress {
+			t.Fatalf("%q: want QueryProgress hit", tc.text)
 		}
 		if tc.wantKey != "" && got.Params["issue_key"] != tc.wantKey {
 			t.Errorf("%q issue_key=%q want %q", tc.text, got.Params["issue_key"], tc.wantKey)
+		}
+		if got.Params["scope"] != "issue" {
+			t.Errorf("%q scope=%q want issue", tc.text, got.Params["scope"])
 		}
 	}
 	for _, text := range []string{"我的待办", "待办列表", "看一下待办", "我有哪些待办"} {

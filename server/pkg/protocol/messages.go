@@ -2,7 +2,10 @@ package protocol
 
 import "encoding/json"
 
-const DaemonCapabilityChannelIntent = "channel_intent"
+const (
+	DaemonCapabilityChannelIntent = "channel_intent"
+	DaemonCapabilityChannelTurn   = "channel_turn"
+)
 
 // Message is the envelope for all WebSocket messages.
 type Message struct {

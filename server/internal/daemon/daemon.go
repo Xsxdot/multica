@@ -329,8 +329,11 @@ func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID s
 		"device_name":       d.cfg.DeviceName,
 		"cli_version":       d.cfg.CLIVersion,
 		"launched_by":       d.cfg.LaunchedBy,
-		"capabilities":      []string{protocol.DaemonCapabilityChannelIntent},
-		"runtimes":          runtimes,
+		"capabilities": []string{
+			protocol.DaemonCapabilityChannelIntent,
+			protocol.DaemonCapabilityChannelTurn,
+		},
+		"runtimes": runtimes,
 	}
 
 	resp, err := d.client.Register(ctx, req)
@@ -1343,6 +1346,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		AutopilotTriggerPayload: strings.TrimSpace(string(task.AutopilotTriggerPayload)),
 		QuickCreatePrompt:       task.QuickCreatePrompt,
 		ChannelIntentPrompt:     task.ChannelIntentPrompt,
+		ChannelTurnPrompt:       task.ChannelTurnPrompt,
 	}
 
 	// Mark candidate env roots as active before any env work so the GC loop

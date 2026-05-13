@@ -47,6 +47,8 @@ type AttachmentService interface {
 
 type IssueDigestService interface {
 	GetIssueDigest(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDigest, error)
+	GetIssueProgress(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueProgress, error)
+	ListProjectProgress(ctx context.Context, workspaceID pgtype.UUID) ([]ProjectProgress, error)
 	GetIssueDetail(ctx context.Context, workspaceID pgtype.UUID, identifier string) (IssueDetail, error)
 	GetIssueTimeline(ctx context.Context, workspaceID pgtype.UUID, identifier string, page, pageSize int) (IssueTimelinePage, error)
 	GetIssueLogs(ctx context.Context, workspaceID pgtype.UUID, identifier string, page, pageSize int) (IssueLogPage, error)

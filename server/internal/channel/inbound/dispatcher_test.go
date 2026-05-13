@@ -15,6 +15,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel/gateway"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 )
 
 // ---------------------------------------------------------------------------
@@ -181,6 +182,8 @@ type fakeCommentService struct {
 
 type fakeIssueDigestService struct {
 	digest   facade.IssueDigest
+	progress facade.IssueProgress
+	projects []facade.ProjectProgress
 	detail   facade.IssueDetail
 	timeline facade.IssueTimelinePage
 	logs     facade.IssueLogPage
@@ -189,6 +192,17 @@ type fakeIssueDigestService struct {
 
 func (f *fakeIssueDigestService) GetIssueDigest(_ context.Context, _ pgtype.UUID, _ string) (facade.IssueDigest, error) {
 	return f.digest, f.err
+}
+
+func (f *fakeIssueDigestService) GetIssueProgress(_ context.Context, _ pgtype.UUID, _ string) (facade.IssueProgress, error) {
+	if f.progress.Digest.Issue.Identifier == "" {
+		return facade.IssueProgress{Digest: f.digest}, f.err
+	}
+	return f.progress, f.err
+}
+
+func (f *fakeIssueDigestService) ListProjectProgress(_ context.Context, _ pgtype.UUID) ([]facade.ProjectProgress, error) {
+	return f.projects, f.err
 }
 
 func (f *fakeIssueDigestService) GetIssueDetail(_ context.Context, _ pgtype.UUID, _ string) (facade.IssueDetail, error) {
@@ -237,6 +251,30 @@ func (f *fakeActionProposalStore) FindActionProposal(_ context.Context, _, _, _,
 func (f *fakeActionProposalStore) MarkActionProposalStatus(_ context.Context, _ pgtype.UUID, status string) error {
 	f.marked = append(f.marked, status)
 	return nil
+}
+
+type fakeReplyContextLookup struct {
+	ctx inboundReplyContext
+	ok  bool
+	err error
+}
+
+type inboundReplyContext = struct {
+	WorkspaceID     pgtype.UUID
+	IssueID         pgtype.UUID
+	IssueIdentifier string
+	IssueTitle      string
+	ExpiresAt       time.Time
+}
+
+func (f fakeReplyContextLookup) Lookup(_ context.Context, _, _ string, _ time.Time) (replyctx.Context, bool, error) {
+	return replyctx.Context{
+		WorkspaceID:     f.ctx.WorkspaceID,
+		IssueID:         f.ctx.IssueID,
+		IssueIdentifier: f.ctx.IssueIdentifier,
+		IssueTitle:      f.ctx.IssueTitle,
+		ExpiresAt:       f.ctx.ExpiresAt,
+	}, f.ok, f.err
 }
 
 func (f *fakeCommentService) AddComment(_ context.Context, req facade.AddCommentReq) (facade.Comment, error) {
@@ -393,6 +431,26 @@ func TestDispatchStep_CreateIssue_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(recCh.sends[0].Text, "STA-39") {
 		t.Errorf("reply should contain identifier STA-39: %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_CreateIssue_PassesAssignee(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, _ := buildDispatchConfig()
+	issueSvc.createReturn = facade.Issue{ID: uuid(0xAB), Identifier: "STA-40", Title: "加远程 agent", Status: "todo"}
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentCreateIssue, map[string]string{"title": "加远程 agent", "assignee": "张三"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(issueSvc.created) != 1 {
+		t.Fatalf("expected 1 CreateIssue call, got %d", len(issueSvc.created))
+	}
+	if issueSvc.created[0].AssigneeIdentifier != "张三" {
+		t.Fatalf("assignee = %q, want 张三", issueSvc.created[0].AssigneeIdentifier)
 	}
 }
 
@@ -1264,6 +1322,84 @@ func TestDispatchStep_QueryIssue_LocalAppURLDoesNotRenderActions(t *testing.T) {
 	}
 }
 
+func TestDispatchStep_QueryProgress_InReviewIncludesLatestReplyFullText(t *testing.T) {
+	t.Parallel()
+
+	fullReply := "方案如下：\n1. 新建远程 Agent\n2. 绑定 Runtime\n3. 在 Issue 里 @Agent 触发执行\n\n这段内容不应该被摘要替换。"
+	cfg, _, _, recCh := buildDispatchConfig()
+	cfg.IssueDigestFacade = facade.NewIssueDigestFacade(&fakeIssueDigestService{
+		progress: facade.IssueProgress{
+			Digest: facade.IssueDigest{
+				Issue: facade.IssueDigestIssue{
+					ID:         uuid(0x60),
+					Identifier: "STA-60",
+					Title:      "远程 agent 接入",
+					Status:     "in_review",
+				},
+				AssigneeName: "张三",
+			},
+			LatestReply: &facade.IssueProgressReply{
+				AuthorType: "agent",
+				AuthorName: "Orion",
+				Content:    fullReply,
+				CreatedAt:  time.Date(2026, 5, 12, 13, 0, 0, 0, time.UTC),
+			},
+			RecommendedNext: "看最新回复并决定通过。",
+		},
+	})
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentQueryProgress, map[string]string{"scope": "issue", "issue_key": "STA-60"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(recCh.cards) != 1 {
+		t.Fatalf("expected 1 rich card, got %d", len(recCh.cards))
+	}
+	body := recCh.cards[0].Body
+	for _, want := range []string{"STA-60", "in_review", "最新回复", "Orion", fullReply, "下一步"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("progress body missing %q: %q", want, body)
+		}
+	}
+}
+
+func TestDispatchStep_QueryProgress_Projects(t *testing.T) {
+	t.Parallel()
+
+	cfg, _, _, recCh := buildDispatchConfig()
+	cfg.IssueDigestFacade = facade.NewIssueDigestFacade(&fakeIssueDigestService{
+		projects: []facade.ProjectProgress{
+			{
+				ProjectName: "Station",
+				Total:       8,
+				Open:        3,
+				InProgress:  1,
+				InReview:    1,
+				Blocked:     1,
+				Done:        5,
+				FocusIssues: []facade.ProjectProgressIssue{
+					{Identifier: "STA-9", Title: "登录态刷新", Status: "blocked", Assignee: "张三"},
+				},
+			},
+		},
+	})
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentQueryProgress, map[string]string{"scope": "projects"})
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	body := recCh.cards[0].Body
+	for _, want := range []string{"项目进展", "Station", "开放 3", "Review 1", "阻塞 1", "STA-9"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("project progress body missing %q: %q", want, body)
+		}
+	}
+}
+
 func TestDispatchStep_IssueDetail_ReturnsChatNativeBody(t *testing.T) {
 	t.Parallel()
 
@@ -1418,6 +1554,76 @@ func TestDispatchStep_QueryIssue_NoTodos(t *testing.T) {
 	}
 }
 
+func TestDispatchStep_DirectUnknown_UsesReplyContextAsComment(t *testing.T) {
+	t.Parallel()
+
+	cfg, _, commentSvc, recCh := buildDispatchConfig()
+	cfg.ReplyContext = fakeReplyContextLookup{
+		ok: true,
+		ctx: inboundReplyContext{
+			WorkspaceID:     uuid(0x01),
+			IssueID:         uuid(0x71),
+			IssueIdentifier: "STA-71",
+			IssueTitle:      "远程 agent",
+			ExpiresAt:       time.Now().Add(time.Hour),
+		},
+	}
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentUnknown, map[string]string{})
+	evt.ChatType = port.ChatTypeDirect
+	evt.Text = "我看过了，按方案 2 做"
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(commentSvc.added) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(commentSvc.added))
+	}
+	if commentSvc.added[0].IssueID != uuid(0x71) || commentSvc.added[0].Content != evt.Text {
+		t.Fatalf("comment = %#v", commentSvc.added[0])
+	}
+	if len(recCh.sends) != 1 || !strings.Contains(recCh.sends[0].Text, "STA-71") {
+		t.Fatalf("reply should mention target issue, got %#v", recCh.sends)
+	}
+}
+
+func TestDispatchStep_DirectMutation_UsesReplyContextIssue(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, _, recCh := buildDispatchConfig()
+	cfg.ChatBinding = &fakeChatBinding{err: errors.New("direct chat has no workspace binding")}
+	cfg.ReplyContext = fakeReplyContextLookup{
+		ok: true,
+		ctx: inboundReplyContext{
+			WorkspaceID:     uuid(0x01),
+			IssueID:         uuid(0x72),
+			IssueIdentifier: "STA-72",
+			IssueTitle:      "远程 agent",
+			ExpiresAt:       time.Now().Add(time.Hour),
+		},
+	}
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x72), Identifier: "STA-72", Title: "远程 agent", Status: "in_review"}
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentSetStatus, map[string]string{"status": "done"})
+	evt.ChatType = port.ChatTypeDirect
+	evt.Text = "改成 done"
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(issueSvc.gotByID) != 1 || issueSvc.gotByID[0].Identifier != "STA-72" {
+		t.Fatalf("gotByID = %#v", issueSvc.gotByID)
+	}
+	if len(issueSvc.setStatus) != 1 || issueSvc.setStatus[0].Status != "done" {
+		t.Fatalf("setStatus = %#v", issueSvc.setStatus)
+	}
+	if len(recCh.sends) != 1 || !strings.Contains(recCh.sends[0].Text, "STATUS_CHANGED") {
+		t.Fatalf("reply = %#v", recCh.sends)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Unknown intent
 // ---------------------------------------------------------------------------
@@ -1433,8 +1639,8 @@ func TestDispatchStep_UnknownIntent_ReturnsUnknownTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(recCh.sends[0].Text, "UNKNOWN") {
-		t.Errorf("reply missing UNKNOWN: %q", recCh.sends[0].Text)
+	if strings.Contains(recCh.sends[0].Text, "UNKNOWN") {
+		t.Errorf("reply should not expose UNKNOWN tag: %q", recCh.sends[0].Text)
 	}
 }
 
@@ -1453,8 +1659,8 @@ func TestDispatchStep_ASKClarify_ReturnsAskClarifyTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(recCh.sends[0].Text, "ASK_CLARIFY") {
-		t.Errorf("reply missing ASK_CLARIFY: %q", recCh.sends[0].Text)
+	if strings.Contains(recCh.sends[0].Text, "ASK_CLARIFY") {
+		t.Errorf("reply should not expose ASK_CLARIFY tag: %q", recCh.sends[0].Text)
 	}
 }
 
@@ -1610,8 +1816,8 @@ func TestDispatchStep_InPipeline_AllPlaceholderStepsRunInOrder(t *testing.T) {
 	if len(recCh.sends) != 1 {
 		t.Fatalf("expected 1 send from dispatch, got %d", len(recCh.sends))
 	}
-	if !strings.Contains(recCh.sends[0].Text, "UNKNOWN") {
-		t.Errorf("pipeline reply should contain UNKNOWN: %q", recCh.sends[0].Text)
+	if strings.Contains(recCh.sends[0].Text, "UNKNOWN") {
+		t.Errorf("pipeline reply should not expose UNKNOWN tag: %q", recCh.sends[0].Text)
 	}
 }
 

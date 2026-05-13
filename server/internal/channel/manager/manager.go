@@ -25,6 +25,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel/outbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/multica-ai/multica/server/internal/channel/provider"
+	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 	"github.com/multica-ai/multica/server/internal/events"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -34,6 +35,10 @@ type RuntimeComponents struct {
 	PostPipeline  *inbound.Pipeline
 	RuleResolvers []chintent.IntentResolver
 	ChatIntent    chintent.AsyncChatIntentClient
+	TurnPlanner   chintent.ChannelTurnPlanner
+	ChannelTurn   chintent.ChannelAgentTurnClient
+	DispatchStore inbound.DispatchCompletionStore
+	ReplyContext  inbound.ReplyContextLookup
 }
 
 type RuntimeBuilder func() RuntimeComponents
@@ -325,6 +330,10 @@ func (m *Manager) startInboundRuntimeLocked(ctx context.Context) {
 		PostPipeline:         components.PostPipeline,
 		RuleResolvers:        components.RuleResolvers,
 		ChatIntent:           components.ChatIntent,
+		TurnPlanner:          components.TurnPlanner,
+		ChannelTurn:          components.ChannelTurn,
+		DispatchStore:        components.DispatchStore,
+		ReplyContext:         components.ReplyContext,
 		ReplySink:            inbound.NewGatewayReplySink(m.cfg.Gateway),
 		Workers:              m.cfg.Workers,
 		ClaimBatch:           m.cfg.ClaimBatch,
@@ -636,6 +645,7 @@ func (m *Manager) startOutbound(cfg provider.ConnectionConfig, ready *atomic.Boo
 		"",
 	)
 	sub.SetFailureRecorder(m.cfg.Queries)
+	sub.SetReplyContextStore(replyctx.NewDBStore(m.cfg.Pool))
 	if m.cfg.NotificationOutbox {
 		sub.SetNotificationEnqueuer(notificationStore)
 	}

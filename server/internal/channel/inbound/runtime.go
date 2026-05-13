@@ -13,6 +13,7 @@ import (
 
 	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	"github.com/multica-ai/multica/server/internal/util"
 )
 
 const (
@@ -23,22 +24,71 @@ const (
 	defaultInboundActionTaskTimeout    = 30 * time.Minute
 	defaultInboundClarificationTimeout = 30 * time.Minute
 	defaultInboundProcessingLease      = 5 * time.Minute
+	defaultFailureNoticeCooldown       = 5 * time.Minute
 )
 
+const (
+	failureCodeNoChannelAgent     = "no_channel_agent"
+	failureCodeChannelTurnFailed  = "channel_turn_failed"
+	failureCodeChannelTurnEmpty   = "channel_turn_empty"
+	failureCodeChannelTurnTimeout = "channel_turn_timeout"
+	failureCodeInboundDead        = "inbound_dead"
+)
+
+type FailureNoticeKey struct {
+	ConnectionID string
+	ChatID       string
+	SenderID     string
+	Code         string
+}
+
+type FailureNoticeLimiter interface {
+	ShouldSendFailureNotice(ctx context.Context, key FailureNoticeKey, cooldown time.Duration) (bool, error)
+}
+
+type memoryFailureNoticeLimiter struct {
+	mu   sync.Mutex
+	last map[FailureNoticeKey]time.Time
+}
+
+func newMemoryFailureNoticeLimiter() *memoryFailureNoticeLimiter {
+	return &memoryFailureNoticeLimiter{last: make(map[FailureNoticeKey]time.Time)}
+}
+
+func (l *memoryFailureNoticeLimiter) ShouldSendFailureNotice(_ context.Context, key FailureNoticeKey, cooldown time.Duration) (bool, error) {
+	if l == nil {
+		return true, nil
+	}
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if last, ok := l.last[key]; ok && now.Sub(last) < cooldown {
+		return false, nil
+	}
+	l.last[key] = now
+	return true, nil
+}
+
 type RuntimeConfig struct {
-	Store                InboundEventStore
-	PrePipeline          *Pipeline
-	PostPipeline         *Pipeline
-	RuleResolvers        []chintent.IntentResolver
-	ChatIntent           chintent.AsyncChatIntentClient
-	ReplySink            ChannelReplySink
-	Workers              int
-	ClaimBatch           int
-	PollInterval         time.Duration
-	IntentTaskTimeout    time.Duration
-	ActionTaskTimeout    time.Duration
-	ClarificationTimeout time.Duration
-	ProcessingLease      time.Duration
+	Store                 InboundEventStore
+	PrePipeline           *Pipeline
+	PostPipeline          *Pipeline
+	RuleResolvers         []chintent.IntentResolver
+	ChatIntent            chintent.AsyncChatIntentClient
+	TurnPlanner           chintent.ChannelTurnPlanner
+	ChannelTurn           chintent.ChannelAgentTurnClient
+	DispatchStore         DispatchCompletionStore
+	FailureLimiter        FailureNoticeLimiter
+	ReplyContext          ReplyContextLookup
+	ReplySink             ChannelReplySink
+	Workers               int
+	ClaimBatch            int
+	PollInterval          time.Duration
+	IntentTaskTimeout     time.Duration
+	ActionTaskTimeout     time.Duration
+	ClarificationTimeout  time.Duration
+	ProcessingLease       time.Duration
+	FailureNoticeCooldown time.Duration
 }
 
 type Runtime struct {
@@ -69,6 +119,22 @@ func NewRuntime(cfg RuntimeConfig) *Runtime {
 	}
 	if cfg.ProcessingLease <= 0 {
 		cfg.ProcessingLease = defaultInboundProcessingLease
+	}
+	if cfg.FailureNoticeCooldown <= 0 {
+		cfg.FailureNoticeCooldown = defaultFailureNoticeCooldown
+	}
+	if cfg.FailureLimiter == nil {
+		cfg.FailureLimiter = newMemoryFailureNoticeLimiter()
+	}
+	if cfg.TurnPlanner == nil {
+		if planner, ok := cfg.ChatIntent.(chintent.ChannelTurnPlanner); ok {
+			cfg.TurnPlanner = planner
+		}
+	}
+	if cfg.ChannelTurn == nil {
+		if turn, ok := cfg.ChatIntent.(chintent.ChannelAgentTurnClient); ok {
+			cfg.ChannelTurn = turn
+		}
 	}
 	return &Runtime{cfg: cfg, pendingAckByEvent: make(map[string]struct{})}
 }
@@ -115,11 +181,13 @@ func (r *Runtime) Accept(ctx context.Context, evt port.InboundEvent, opts Accept
 	case result.RejectedBackpressure:
 		r.send(ctx, evt, fmt.Sprintf("我现在忙不过来了，当前会话还有 %d 条在排队，请稍后再发。", result.QueueDepth))
 	case result.ClarificationConsumed:
-		r.send(ctx, evt, "收到补充，继续处理。")
+		// Legacy stores may still report this, but the product model no longer
+		// sends a mechanical "received clarification" acknowledgement.
 	case result.Accepted && result.QueueDepth == 0:
-		r.deferProcessingAck(result.EventID)
+		// Normal channel turns should feel like a teammate replying, not a bot
+		// acknowledging a command queue. The final post-pipeline reply is enough.
 	case result.Accepted:
-		r.deferProcessingAck(result.EventID)
+		// See above: no generic "start processing" acknowledgement.
 	}
 	return result, nil
 }
@@ -184,7 +252,7 @@ func (r *Runtime) workerLoop(ctx context.Context, workerID string) {
 			if markErr != nil {
 				slog.Error("channel inbound runtime: mark retry failed", "event_row_id", rec.ID, "error", markErr)
 			} else if result.Dead {
-				r.send(ctx, rec.Event, "处理失败了，这条消息我先停止处理，请稍后重试。")
+				r.sendFailureOnce(ctx, rec, failureCodeInboundDead, "处理失败了，这条消息我先停止处理，请稍后重试。", false)
 			}
 		}
 	}
@@ -265,56 +333,81 @@ func (r *Runtime) resolveIntent(ctx context.Context, rec *InboundEventRecord) (b
 		InboundEventID:   rec.ID,
 		SourceHint:       chintent.IntentSource(evt.Intent.Source),
 	}
+	req = r.applyReplyContext(ctx, req, evt, &chatCtx)
 
+	if isDeterministicChannelInput(evt, req) {
+		result, ok, err := r.resolveByRules(ctx, req)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return r.applyIntentResult(ctx, rec, result, chatCtx, false)
+		}
+		return r.applyIntentResult(ctx, rec, fallbackRuleUnknown(), chatCtx, false)
+	}
+
+	if r.cfg.ChannelTurn == nil || chatCtx.WorkspaceID == "" {
+		result, ok, err := r.resolveByRules(ctx, req)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return r.applyIntentResult(ctx, rec, result, chatCtx, false)
+		}
+		return r.applyIntentResult(ctx, rec, fallbackRuleUnknown(), chatCtx, false)
+	}
+
+	taskID, err := r.cfg.ChannelTurn.StartAgentTurn(ctx, req)
+	if err != nil {
+		slog.Warn("channel inbound runtime: start channel turn failed", "event_row_id", rec.ID, "error", err)
+		r.sendFailureOnce(ctx, rec, failureCodeNoChannelAgent, "我现在找不到可用的 channel agent，先不继续刷屏。等 agent 恢复后你可以再发一次。", true)
+		return true, nil
+	}
+	if err := r.cfg.Store.MarkWaitingAgent(ctx, rec.ID, evt, taskID, chatCtx, WaitKindChannelTurn); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func isDeterministicChannelInput(evt port.InboundEvent, req chintent.IntentRequest) bool {
+	if req.SourceHint == chintent.SourceCommand {
+		return true
+	}
+	return strings.HasPrefix(strings.TrimSpace(evt.Text), "/")
+}
+
+func (r *Runtime) resolveByRules(ctx context.Context, req chintent.IntentRequest) (chintent.IntentResult, bool, error) {
 	for _, resolver := range r.cfg.RuleResolvers {
 		if resolver == nil {
 			continue
 		}
 		result, err := resolver.Resolve(ctx, req)
 		if err != nil {
-			return false, err
+			return chintent.IntentResult{}, false, err
 		}
-		if !result.Matched {
-			continue
+		if result.Matched {
+			return result, true, nil
 		}
-		return r.applyIntentResult(ctx, rec, result, chatCtx, false)
 	}
+	return chintent.IntentResult{}, false, nil
+}
 
-	if r.cfg.ChatIntent == nil || chatCtx.WorkspaceID == "" {
-		result := chintent.IntentResult{
-			Matched: true,
-			Intent: chintent.Intent{
-				Kind:       chintent.IntentUnknown,
-				Confidence: 0,
-				Params:     map[string]string{},
-				Source:     chintent.SourceRule,
-			},
-		}
-		return r.applyIntentResult(ctx, rec, result, chatCtx, false)
+func fallbackRuleUnknown() chintent.IntentResult {
+	return chintent.IntentResult{
+		Matched: true,
+		Intent: chintent.Intent{
+			Kind:       chintent.IntentUnknown,
+			Confidence: 0,
+			Params:     map[string]string{},
+			Source:     chintent.SourceRule,
+		},
 	}
-
-	taskID, err := r.cfg.ChatIntent.StartIntent(ctx, req)
-	if err != nil {
-		return false, err
-	}
-	if err := r.cfg.Store.MarkWaitingAgent(ctx, rec.ID, evt, taskID, chatCtx); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 func (r *Runtime) applyIntentResult(ctx context.Context, rec *InboundEventRecord, result chintent.IntentResult, chatCtx ChatBindingContext, requeue bool) (bool, error) {
 	evt := rec.Event
 	evt.Intent = toPortIntent(result.Intent)
 	applyDefaultProject(&evt, chatCtx)
-	if evt.Intent.Kind == port.IntentASKClarify {
-		reply := "[ASK_CLARIFY] 我还不确定你要我做什么，请补充 Issue 标题、编号或要执行的动作。"
-		if err := r.cfg.Store.MarkWaitingUser(ctx, rec.ID, evt, reply, chatCtx, time.Now().Add(r.cfg.ClarificationTimeout)); err != nil {
-			return false, err
-		}
-		r.send(ctx, evt, reply)
-		return true, nil
-	}
 	if requeue {
 		if err := r.cfg.Store.MarkQueued(ctx, rec.ID, evt, InboundPhasePost, chatCtx); err != nil {
 			return false, err
@@ -356,6 +449,8 @@ func (r *Runtime) resumeWaitingAgents(ctx context.Context) {
 		timeout := r.cfg.IntentTaskTimeout
 		if item.WaitKind == WaitKindAction {
 			timeout = r.cfg.ActionTaskTimeout
+		} else if item.WaitKind == WaitKindChannelTurn {
+			timeout = r.cfg.ActionTaskTimeout
 		}
 		if time.Since(item.UpdatedAt) > timeout {
 			rec, _ := r.cfg.Store.Load(ctx, item.ID)
@@ -364,17 +459,21 @@ func (r *Runtime) resumeWaitingAgents(ctx context.Context) {
 				slog.Error("channel inbound runtime: mark timed-out event dead failed", "event_row_id", item.ID, "error", markErr)
 			}
 			if rec != nil {
-				r.send(ctx, rec.Event, "处理超时了，这条消息我先停止处理，请稍后重试。")
+				r.sendFailureOnce(ctx, rec, failureCodeChannelTurnTimeout, "处理超时了，这条消息我先停止处理，请稍后重试。", false)
 			}
+			continue
+		}
+		if item.WaitKind == WaitKindChannelTurn {
+			r.resumeChannelTurn(ctx, item)
 			continue
 		}
 		if item.WaitKind != WaitKindIntent {
 			continue
 		}
-		if r.cfg.ChatIntent == nil {
+		if r.cfg.TurnPlanner == nil {
 			continue
 		}
-		result, done, err := r.cfg.ChatIntent.ParseIntentResult(ctx, item.WaitTaskID)
+		result, done, err := r.cfg.TurnPlanner.ParseTurnResult(ctx, item.WaitTaskID)
 		if !done {
 			continue
 		}
@@ -384,10 +483,36 @@ func (r *Runtime) resumeWaitingAgents(ctx context.Context) {
 			continue
 		}
 		if err != nil {
-			if markErr := r.cfg.Store.MarkDead(ctx, item.ID, err); markErr != nil {
-				slog.Error("channel inbound runtime: mark failed intent dead failed", "event_row_id", item.ID, "error", markErr)
+			chatCtx := r.lookupChatContext(ctx, rec.Event)
+			if chatCtx.WorkspaceID == "" {
+				chatCtx.WorkspaceID = rec.WorkspaceID
+				chatCtx.DefaultProjectID = rec.DefaultProjectID
 			}
-			r.send(ctx, rec.Event, "语义理解失败了，这条消息我先停止处理，请稍后重试。")
+			req := chintent.IntentRequest{
+				WorkspaceID:      chatCtx.WorkspaceID,
+				DefaultProjectID: chatCtx.DefaultProjectID,
+				AgentID:          strings.TrimSpace(chatCtx.AgentID),
+				Text:             rec.Event.Text,
+				Channel:          rec.Event.ChannelName,
+				ConnectionID:     rec.Event.ConnectionID(),
+				ChatID:           rec.Event.ChatID,
+				ChatType:         string(rec.Event.ChatType),
+				SenderID:         rec.Event.SenderID,
+				SenderName:       rec.Event.SenderName,
+				InboundEventID:   rec.ID,
+				SourceHint:       chintent.IntentSource(rec.Event.Intent.Source),
+			}
+			if result, ok, ruleErr := r.resolveByRules(ctx, req); ruleErr != nil {
+				slog.Error("channel inbound runtime: fallback rule intent failed", "event_row_id", item.ID, "error", ruleErr)
+			} else if ok {
+				if _, applyErr := r.applyIntentResult(ctx, rec, result, chatCtx, true); applyErr != nil {
+					slog.Error("channel inbound runtime: apply fallback rule intent failed", "event_row_id", item.ID, "error", applyErr)
+				}
+				continue
+			}
+			if _, applyErr := r.applyIntentResult(ctx, rec, fallbackRuleUnknown(), chatCtx, true); applyErr != nil {
+				slog.Error("channel inbound runtime: apply fallback unknown failed", "event_row_id", item.ID, "error", applyErr)
+			}
 			continue
 		}
 		chatCtx := r.lookupChatContext(ctx, rec.Event)
@@ -398,6 +523,117 @@ func (r *Runtime) resumeWaitingAgents(ctx context.Context) {
 		if _, err := r.applyIntentResult(ctx, rec, result, chatCtx, true); err != nil {
 			slog.Error("channel inbound runtime: resume intent failed", "event_row_id", item.ID, "error", err)
 		}
+	}
+}
+
+func (r *Runtime) resumeChannelTurn(ctx context.Context, item WaitingAgentEvent) {
+	if r.cfg.ChannelTurn == nil {
+		return
+	}
+	reply, done, err := r.cfg.ChannelTurn.ParseAgentTurnResult(ctx, item.WaitTaskID)
+	if !done {
+		return
+	}
+	rec, loadErr := r.cfg.Store.Load(ctx, item.ID)
+	if loadErr != nil {
+		slog.Error("channel inbound runtime: load channel turn event failed", "event_row_id", item.ID, "error", loadErr)
+		return
+	}
+	if err != nil {
+		msg := "这次 channel agent 没能处理成功，请稍后重试。"
+		if strings.TrimSpace(err.Error()) != "" {
+			slog.Warn("channel inbound runtime: channel turn failed", "event_row_id", item.ID, "task_id", item.WaitTaskID, "error", err)
+		}
+		r.sendFailureOnce(ctx, rec, failureCodeChannelTurnFailed, msg, true)
+		return
+	}
+	if strings.TrimSpace(reply) == "" {
+		r.sendFailureOnce(ctx, rec, failureCodeChannelTurnEmpty, "我这边没有拿到有效回复，请再发一次。", true)
+		return
+	}
+	r.persistAndSendTurnReply(ctx, rec, strings.TrimSpace(reply))
+}
+
+func (r *Runtime) persistAndSendTurnReply(ctx context.Context, rec *InboundEventRecord, reply string) {
+	if rec == nil {
+		return
+	}
+	if r.cfg.DispatchStore != nil {
+		if saved, ok, err := r.cfg.DispatchStore.GetDispatchCompletion(ctx, rec.ID); err == nil && ok {
+			if saved != "" {
+				slog.Info("channel inbound runtime: channel turn completion already sent", "event_row_id", rec.ID)
+			}
+			if err := r.cfg.Store.MarkProcessed(ctx, rec.ID); err != nil {
+				slog.Error("channel inbound runtime: mark completed channel turn processed failed", "event_row_id", rec.ID, "error", err)
+			}
+			return
+		} else if err != nil {
+			slog.Error("channel inbound runtime: load channel turn completion failed", "event_row_id", rec.ID, "error", err)
+		} else if markErr := r.cfg.DispatchStore.MarkDispatchCompleted(ctx, rec.ID, reply); markErr != nil {
+			slog.Error("channel inbound runtime: persist channel turn completion failed", "event_row_id", rec.ID, "error", markErr)
+		}
+	}
+	r.send(ctx, rec.Event, reply)
+	if err := r.cfg.Store.MarkProcessed(ctx, rec.ID); err != nil {
+		slog.Error("channel inbound runtime: mark channel turn processed failed", "event_row_id", rec.ID, "error", err)
+	}
+}
+
+func (r *Runtime) sendFailureOnce(ctx context.Context, rec *InboundEventRecord, code, reply string, markProcessed bool) {
+	if rec == nil {
+		return
+	}
+	if r.cfg.DispatchStore != nil {
+		if _, ok, err := r.cfg.DispatchStore.GetDispatchCompletion(ctx, rec.ID); err == nil && ok {
+			r.markFailureTerminal(ctx, rec.ID, markProcessed)
+			return
+		} else if err != nil {
+			slog.Error("channel inbound runtime: load failure completion failed", "event_row_id", rec.ID, "failure_code", code, "error", err)
+		}
+	}
+	shouldSend := true
+	if r.cfg.FailureLimiter != nil {
+		key := FailureNoticeKey{
+			ConnectionID: rec.Event.ConnectionID(),
+			ChatID:       rec.Event.ChatID,
+			SenderID:     rec.Event.SenderID,
+			Code:         code,
+		}
+		ok, err := r.cfg.FailureLimiter.ShouldSendFailureNotice(ctx, key, r.cfg.FailureNoticeCooldown)
+		if err != nil {
+			slog.Error("channel inbound runtime: failure limiter failed", "event_row_id", rec.ID, "failure_code", code, "error", err)
+		} else {
+			shouldSend = ok
+		}
+	}
+	persistedReply := reply
+	if !shouldSend {
+		persistedReply = ""
+		slog.Warn("channel inbound runtime: suppressing repeated failure notice",
+			"event_row_id", rec.ID,
+			"failure_code", code,
+			"connection_id", rec.Event.ConnectionID(),
+			"chat_id", rec.Event.ChatID,
+			"sender_id", rec.Event.SenderID,
+		)
+	}
+	if r.cfg.DispatchStore != nil {
+		if err := r.cfg.DispatchStore.MarkDispatchCompleted(ctx, rec.ID, persistedReply); err != nil {
+			slog.Error("channel inbound runtime: persist failure completion failed", "event_row_id", rec.ID, "failure_code", code, "error", err)
+		}
+	}
+	if shouldSend {
+		r.send(ctx, rec.Event, reply)
+	}
+	r.markFailureTerminal(ctx, rec.ID, markProcessed)
+}
+
+func (r *Runtime) markFailureTerminal(ctx context.Context, eventRowID string, markProcessed bool) {
+	if !markProcessed || eventRowID == "" {
+		return
+	}
+	if err := r.cfg.Store.MarkProcessed(ctx, eventRowID); err != nil {
+		slog.Error("channel inbound runtime: mark failed event processed failed", "event_row_id", eventRowID, "error", err)
 	}
 }
 
@@ -443,6 +679,33 @@ func (r *Runtime) lookupChatContext(ctx context.Context, evt port.InboundEvent) 
 		)
 	}
 	return chatCtx
+}
+
+func (r *Runtime) applyReplyContext(ctx context.Context, req chintent.IntentRequest, evt port.InboundEvent, chatCtx *ChatBindingContext) chintent.IntentRequest {
+	if r.cfg.ReplyContext == nil || evt.ChatType != port.ChatTypeDirect {
+		return req
+	}
+	rc, ok, err := r.cfg.ReplyContext.Lookup(ctx, evt.ConnectionID(), evt.SenderID, time.Now())
+	if err != nil {
+		slog.Error("channel inbound runtime: lookup reply context failed",
+			"connection_id", evt.ConnectionID(),
+			"sender_id", evt.SenderID,
+			"error", err,
+		)
+		return req
+	}
+	if !ok {
+		return req
+	}
+	if chatCtx != nil && chatCtx.WorkspaceID == "" && rc.WorkspaceID.Valid {
+		chatCtx.WorkspaceID = util.UUIDToString(rc.WorkspaceID)
+		req.WorkspaceID = chatCtx.WorkspaceID
+	}
+	if req.ContextIssueKey == "" && strings.TrimSpace(rc.IssueIdentifier) != "" {
+		req.ContextIssueKey = strings.TrimSpace(rc.IssueIdentifier)
+		req.ContextMode = "reply"
+	}
+	return req
 }
 
 func (r *Runtime) send(ctx context.Context, evt port.InboundEvent, text string) {

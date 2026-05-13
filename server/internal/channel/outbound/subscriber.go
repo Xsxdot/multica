@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 	"github.com/multica-ai/multica/server/internal/events"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -110,6 +113,7 @@ type Subscriber struct {
 	aggregator  *Aggregator
 	failures    FailureRecorder
 	outbox      NotificationEnqueuer
+	replyCtx    replyctx.Store
 	activeFunc  func() bool
 
 	mu            sync.Mutex
@@ -192,6 +196,10 @@ func (s *Subscriber) SetNotificationEnqueuer(outbox NotificationEnqueuer) {
 	s.outbox = outbox
 }
 
+func (s *Subscriber) SetReplyContextStore(store replyctx.Store) {
+	s.replyCtx = store
+}
+
 // SetActiveFunc gates direct outbound delivery. Durable outbox enqueue is not
 // gated so every API node can persist notifications; workers/senders decide
 // which process is allowed to talk to the external channel.
@@ -262,12 +270,18 @@ func (s *Subscriber) handleCommentCreated(e events.Event) {
 		return
 	}
 	commentContent, _ := commentObj["content"].(string)
+	issueID, _ := commentObj["issue_id"].(string)
 
 	for _, userID := range subscriberIDs {
 		if userID == e.ActorID {
 			continue // don't notify self
 		}
-		s.sendToUser(e.WorkspaceID, userID, "comment_mention", issueTitle, commentContent)
+		s.sendToUser(e.WorkspaceID, userID, "comment_mention", issueTitle, commentContent, notificationContext{
+			WorkspaceID: e.WorkspaceID,
+			IssueID:     issueID,
+			IssueTitle:  issueTitle,
+			Replyable:   issueID != "",
+		})
 	}
 }
 
@@ -286,17 +300,37 @@ func (s *Subscriber) handleInboxNew(e events.Event) {
 		return
 	}
 
+	item := map[string]any(nil)
+	if rawItem, ok := payload["item"].(map[string]any); ok {
+		item = rawItem
+	}
+
 	userID, _ := payload["user_id"].(string)
+	if userID == "" && item != nil {
+		userID, _ = item["recipient_id"].(string)
+	}
 	if userID == "" || userID == e.ActorID {
 		return // no target or self-notification
 	}
 
 	issueTitle, _ := payload["title"].(string)
+	if issueTitle == "" && item != nil {
+		issueTitle, _ = item["title"].(string)
+	}
 	inboxType, _ := payload["inbox_type"].(string)
+	if inboxType == "" && item != nil {
+		inboxType, _ = item["type"].(string)
+	}
+	body, _ := payload["body"].(string)
+	if body == "" && item != nil {
+		body, _ = item["body"].(string)
+	}
 
 	eventKind := mapInboxTypeToEventKind(inboxType)
 
-	s.sendToUser(e.WorkspaceID, userID, eventKind, issueTitle, "")
+	ctxMeta := notificationContextFromInboxItem(e.WorkspaceID, issueTitle, item)
+	ctxMeta.Replyable = ctxMeta.IssueID != "" && replyableEventKind(eventKind)
+	s.sendToUser(e.WorkspaceID, userID, eventKind, issueTitle, body, ctxMeta)
 }
 
 // handleSubscriberAdded processes subscriber:added events.
@@ -320,7 +354,13 @@ func (s *Subscriber) handleSubscriberAdded(e events.Event) {
 
 	issueTitle, _ := payload["issue_title"].(string)
 
-	s.sendToUser(e.WorkspaceID, subscriberID, "issue_mention", issueTitle, "")
+	issueID, _ := payload["issue_id"].(string)
+	s.sendToUser(e.WorkspaceID, subscriberID, "issue_mention", issueTitle, "", notificationContext{
+		WorkspaceID: e.WorkspaceID,
+		IssueID:     issueID,
+		IssueTitle:  issueTitle,
+		Replyable:   issueID != "",
+	})
 }
 
 // handleIssueUpdated processes issue:updated events. When the status
@@ -363,7 +403,14 @@ func (s *Subscriber) handleIssueUpdated(e events.Event) {
 	assigneeID, _ := issueObj["assignee_id"].(string)
 	if assigneeID != "" && assigneeID != e.ActorID {
 		body := fmt.Sprintf("Issue %s 状态已变更为 %s", issueIdentifier, statusLabel(status))
-		s.sendToUser(e.WorkspaceID, assigneeID, eventKind, issueTitle, body)
+		issueID, _ := issueObj["id"].(string)
+		s.sendToUser(e.WorkspaceID, assigneeID, eventKind, issueTitle, body, notificationContext{
+			WorkspaceID:     e.WorkspaceID,
+			IssueID:         issueID,
+			IssueIdentifier: issueIdentifier,
+			IssueTitle:      issueTitle,
+			Replyable:       issueID != "",
+		})
 	}
 }
 
@@ -398,7 +445,16 @@ func statusLabel(status string) string {
 
 // sendToUser resolves the user's binding, checks preferences, and
 // sends a card message.
-func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body string) {
+type notificationContext struct {
+	WorkspaceID     string
+	IssueID         string
+	IssueIdentifier string
+	IssueTitle      string
+	InboxItemID     string
+	Replyable       bool
+}
+
+func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body string, ctxMeta notificationContext) {
 	ctx := context.Background()
 	providerName := channelProviderName(s.channel)
 	connectionID := channelConnectionID(s.channel)
@@ -440,6 +496,8 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 		return
 	}
 
+	s.rememberReplyContext(ctx, connectionID, externalUserID, wsUUID, title, ctxMeta)
+
 	card := port.OutboundCardMessage{
 		Target: port.TargetUser(externalUserID),
 		ChatID: externalUserID,
@@ -456,6 +514,12 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 			TargetExternalUserID: externalUserID,
 			Title:                title,
 			Body:                 body,
+			WorkspaceID:          wsUUID,
+			IssueID:              parseOptionalUUID(ctxMeta.IssueID),
+			IssueIdentifier:      ctxMeta.IssueIdentifier,
+			IssueTitle:           firstNonEmpty(ctxMeta.IssueTitle, title),
+			InboxItemID:          parseOptionalUUID(ctxMeta.InboxItemID),
+			Replyable:            ctxMeta.Replyable,
 		}); err != nil {
 			channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "outbox_enqueue", true)
 			slog.Error("outbound: enqueue notification", "user_id", userID, "error", err)
@@ -499,6 +563,77 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 		"platform_msg_id", result.PlatformMessageID,
 		"event_kind", eventKind,
 	)
+}
+
+func (s *Subscriber) rememberReplyContext(ctx context.Context, connectionID, externalUserID string, workspaceID pgtype.UUID, title string, meta notificationContext) {
+	if s.replyCtx == nil || !meta.Replyable || strings.TrimSpace(meta.IssueID) == "" {
+		return
+	}
+	issueID := parseOptionalUUID(meta.IssueID)
+	if !issueID.Valid {
+		return
+	}
+	if err := s.replyCtx.Upsert(ctx, replyctx.Context{
+		ConnectionID:    connectionID,
+		ExternalUserID:  externalUserID,
+		WorkspaceID:     workspaceID,
+		IssueID:         issueID,
+		IssueIdentifier: meta.IssueIdentifier,
+		IssueTitle:      firstNonEmpty(meta.IssueTitle, title),
+		InboxItemID:     parseOptionalUUID(meta.InboxItemID),
+		ExpiresAt:       time.Now().Add(24 * time.Hour),
+	}); err != nil {
+		channelmetrics.M.RecordOutboundFailure(channelProviderName(s.channel), "reply_context", "upsert", true)
+		slog.Error("outbound: remember reply context", "external_user_id", externalUserID, "error", err)
+	}
+}
+
+func notificationContextFromInboxItem(workspaceID, title string, item map[string]any) notificationContext {
+	if item == nil {
+		return notificationContext{WorkspaceID: workspaceID, IssueTitle: title}
+	}
+	issueID := stringFromAny(item["issue_id"])
+	inboxID := stringFromAny(item["id"])
+	return notificationContext{
+		WorkspaceID: workspaceID,
+		IssueID:     issueID,
+		IssueTitle:  firstNonEmpty(stringFromAny(item["title"]), title),
+		InboxItemID: inboxID,
+	}
+}
+
+func replyableEventKind(kind string) bool {
+	switch kind {
+	case "comment_mention", "issue_mention", "issue_assigned", "status_in_review", "status_blocked", "status_done":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseOptionalUUID(s string) pgtype.UUID {
+	if strings.TrimSpace(s) == "" {
+		return pgtype.UUID{}
+	}
+	u, err := parseUUID(s)
+	if err != nil {
+		return pgtype.UUID{}
+	}
+	return u
+}
+
+func stringFromAny(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case *string:
+		if x == nil {
+			return ""
+		}
+		return *x
+	default:
+		return ""
+	}
 }
 
 // mapInboxTypeToEventKind maps inbox notification types to the

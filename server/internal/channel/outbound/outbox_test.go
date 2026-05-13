@@ -83,6 +83,31 @@ func TestOutboxWorker_MergesDueNotificationsAndMarksSent(t *testing.T) {
 	}
 }
 
+func TestOutboxWorker_DoesNotMergeReplyableNotifications(t *testing.T) {
+	t.Parallel()
+
+	userID := pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}
+	store := &fakeNotificationStore{claimed: []OutboxNotification{
+		{ID: pgtype.UUID{Bytes: [16]byte{0x13}, Valid: true}, Provider: "feishu", EventKind: "mentioned", TargetUserID: userID, TargetExternalUserID: "ou_1", Title: "A", Body: "body A", Replyable: true, MaxAttempts: 3},
+		{ID: pgtype.UUID{Bytes: [16]byte{0x14}, Valid: true}, Provider: "feishu", EventKind: "mentioned", TargetUserID: userID, TargetExternalUserID: "ou_1", Title: "B", Body: "body B", Replyable: true, MaxAttempts: 3},
+	}}
+	sender := &mockRetrySender{}
+	worker := NewOutboxWorker(store, sender)
+
+	worker.processBatch(context.Background())
+
+	if len(sender.calls) != 2 {
+		t.Fatalf("send calls = %d, want 2", len(sender.calls))
+	}
+	titles := sender.calls[0].Payload.Title + "," + sender.calls[1].Payload.Title
+	if !strings.Contains(titles, "A") || !strings.Contains(titles, "B") {
+		t.Fatalf("titles = %q, want individual A and B notifications", titles)
+	}
+	if len(store.sent) != 2 {
+		t.Fatalf("sent ids = %d, want 2", len(store.sent))
+	}
+}
+
 func TestOutboxWorker_RetryableFailureSchedulesRetry(t *testing.T) {
 	t.Parallel()
 

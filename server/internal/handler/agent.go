@@ -174,7 +174,9 @@ type AgentTaskResponse struct {
 	QuickCreatePrompt       string                `json:"quick_create_prompt,omitempty"`       // user's natural-language input for quick-create tasks
 	ChannelIntentPrompt     string                `json:"channel_intent_prompt,omitempty"`     // internal channel semantic resolver prompt
 	ChannelIntentMessage    string                `json:"channel_intent_message,omitempty"`    // original channel message being classified
-	Kind                    string                `json:"kind"`                                // discriminator: "comment" | "autopilot" | "chat" | "quick_create" | "channel_intent" | "direct"
+	ChannelTurnPrompt       string                `json:"channel_turn_prompt,omitempty"`       // channel agent turn prompt
+	ChannelTurnMessage      string                `json:"channel_turn_message,omitempty"`      // original channel message for a channel turn
+	Kind                    string                `json:"kind"`                                // discriminator: "comment" | "autopilot" | "chat" | "quick_create" | "channel_intent" | "channel_turn" | "direct"
 }
 
 // TaskAgentData holds agent info included in claim responses so the daemon
@@ -243,6 +245,9 @@ func computeTaskKind(t db.AgentTaskQueue) string {
 	if uuidToString(t.IssueID) == "" {
 		if taskContextType(t) == service.ChannelIntentContextType {
 			return "channel_intent"
+		}
+		if taskContextType(t) == service.ChannelTurnContextType {
+			return "channel_turn"
 		}
 		return "quick_create"
 	}

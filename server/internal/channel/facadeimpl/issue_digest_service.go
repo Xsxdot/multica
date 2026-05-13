@@ -32,6 +32,53 @@ func (s *IssueDigestService) GetIssueDigest(ctx context.Context, workspaceID pgt
 	return digest, nil
 }
 
+func (s *IssueDigestService) GetIssueProgress(ctx context.Context, workspaceID pgtype.UUID, identifier string) (facade.IssueProgress, error) {
+	digest, err := s.GetIssueDigest(ctx, workspaceID, identifier)
+	if err != nil {
+		return facade.IssueProgress{}, err
+	}
+	latestStatus := s.latestStatusEvent(ctx, digest.Issue.ID)
+	return facade.IssueProgress{
+		Digest:          digest,
+		LatestReply:     s.latestReply(ctx, digest.Issue.ID),
+		LatestStatus:    latestStatus,
+		RecommendedNext: nextStepForStatus(digest.Issue.Status, digest.AgentSummary),
+	}, nil
+}
+
+func (s *IssueDigestService) ListProjectProgress(ctx context.Context, workspaceID pgtype.UUID) ([]facade.ProjectProgress, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT p.id, p.title,
+		       count(i.id)::bigint AS total,
+		       count(i.id) FILTER (WHERE i.status NOT IN ('done', 'cancelled'))::bigint AS open_count,
+		       count(i.id) FILTER (WHERE i.status = 'in_progress')::bigint AS in_progress_count,
+		       count(i.id) FILTER (WHERE i.status = 'in_review')::bigint AS in_review_count,
+		       count(i.id) FILTER (WHERE i.status = 'blocked')::bigint AS blocked_count,
+		       count(i.id) FILTER (WHERE i.status IN ('done', 'cancelled'))::bigint AS done_count
+		FROM project p
+		LEFT JOIN issue i ON i.project_id = p.id
+		WHERE p.workspace_id = $1
+		GROUP BY p.id, p.title
+		ORDER BY open_count DESC, p.updated_at DESC
+		LIMIT 8
+	`, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []facade.ProjectProgress{}
+	for rows.Next() {
+		var p facade.ProjectProgress
+		if err := rows.Scan(&p.ProjectID, &p.ProjectName, &p.Total, &p.Open, &p.InProgress, &p.InReview, &p.Blocked, &p.Done); err != nil {
+			return nil, err
+		}
+		p.FocusIssues = s.projectFocusIssues(ctx, workspaceID, p.ProjectID)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 func (s *IssueDigestService) GetIssueDetail(ctx context.Context, workspaceID pgtype.UUID, identifier string) (facade.IssueDetail, error) {
 	digest, err := s.GetIssueDigest(ctx, workspaceID, identifier)
 	if err != nil {
@@ -221,6 +268,79 @@ func (s *IssueDigestService) actorName(ctx context.Context, actorType string, ac
 func (s *IssueDigestService) recentEvents(ctx context.Context, issueID pgtype.UUID) []facade.IssueDigestEvent {
 	events, _ := s.timelineEvents(ctx, issueID, 3, 0)
 	return events
+}
+
+func (s *IssueDigestService) latestReply(ctx context.Context, issueID pgtype.UUID) *facade.IssueProgressReply {
+	var reply struct {
+		AuthorType string
+		AuthorID   pgtype.UUID
+		Content    string
+		CreatedAt  time.Time
+	}
+	if err := s.pool.QueryRow(ctx, `
+		SELECT author_type, author_id, content, created_at
+		FROM comment
+		WHERE issue_id = $1
+		  AND COALESCE(NULLIF(trim(content), ''), '') <> ''
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, issueID).Scan(&reply.AuthorType, &reply.AuthorID, &reply.Content, &reply.CreatedAt); err != nil {
+		return nil
+	}
+	return &facade.IssueProgressReply{
+		AuthorType: reply.AuthorType,
+		AuthorName: s.actorName(ctx, reply.AuthorType, reply.AuthorID),
+		Content:    strings.TrimSpace(reply.Content),
+		CreatedAt:  reply.CreatedAt,
+	}
+}
+
+func (s *IssueDigestService) latestStatusEvent(ctx context.Context, issueID pgtype.UUID) *facade.IssueDigestEvent {
+	events := s.statusHistory(ctx, issueID)
+	if len(events) == 0 {
+		return nil
+	}
+	return &events[0]
+}
+
+func (s *IssueDigestService) projectFocusIssues(ctx context.Context, workspaceID, projectID pgtype.UUID) []facade.ProjectProgressIssue {
+	rows, err := s.pool.Query(ctx, `
+		SELECT w.issue_prefix || '-' || i.number::text AS identifier,
+		       i.title, i.status, i.assignee_type, i.assignee_id, i.updated_at
+		FROM issue i
+		JOIN workspace w ON w.id = i.workspace_id
+		WHERE i.workspace_id = $1
+		  AND i.project_id = $2
+		  AND i.status NOT IN ('done', 'cancelled')
+		ORDER BY
+		  CASE i.status
+		    WHEN 'blocked' THEN 0
+		    WHEN 'in_review' THEN 1
+		    WHEN 'in_progress' THEN 2
+		    ELSE 3
+		  END,
+		  i.updated_at DESC
+		LIMIT 3
+	`, workspaceID, projectID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	out := []facade.ProjectProgressIssue{}
+	for rows.Next() {
+		var item facade.ProjectProgressIssue
+		var assigneeType pgtype.Text
+		var assigneeID pgtype.UUID
+		if err := rows.Scan(&item.Identifier, &item.Title, &item.Status, &assigneeType, &assigneeID, &item.UpdatedAt); err != nil {
+			return out
+		}
+		if assigneeType.Valid && assigneeID.Valid {
+			item.Assignee = s.actorName(ctx, assigneeType.String, assigneeID)
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func (s *IssueDigestService) statusHistory(ctx context.Context, issueID pgtype.UUID) []facade.IssueDigestEvent {
@@ -439,6 +559,26 @@ func truncateText(s string, max int) string {
 	}
 	r := []rune(s)
 	return string(r[:max]) + "..."
+}
+
+func nextStepForStatus(status string, summary *facade.IssueAgentSummary) string {
+	switch status {
+	case "in_review":
+		return "看最新回复并决定通过、补充修改意见，或把状态改成 done。"
+	case "blocked":
+		return "先补充阻塞原因或解除依赖，再继续推进。"
+	case "todo", "backlog":
+		return "确认负责人是否明确；需要 agent 处理时直接评论或指派。"
+	case "in_progress":
+		if summary != nil && (summary.Status == "queued" || summary.Status == "running" || summary.Status == "dispatched") {
+			return "agent 正在处理，关注最新回复即可。"
+		}
+		return "如果长时间没有新回复，可以追问负责人或补充上下文。"
+	case "done":
+		return "已完成；如果结果不符合预期，补充评论后重新打开或重跑 agent。"
+	default:
+		return "查看最新回复后决定是否补充评论、指派负责人或推进状态。"
+	}
 }
 
 var _ facade.IssueDigestService = (*IssueDigestService)(nil)

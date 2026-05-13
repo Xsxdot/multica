@@ -25,16 +25,18 @@ type IntentRequest struct {
 	DefaultProjectID string
 	// AgentID, when non-empty, forces channel intent to use that agent only
 	// (no fallback to another agent if unavailable).
-	AgentID        string
-	Text           string
-	Channel        string
-	ConnectionID   string
-	ChatID         string
-	ChatType       string
-	SenderID       string
-	SenderName     string
-	InboundEventID string
-	SourceHint     IntentSource
+	AgentID         string
+	Text            string
+	Channel         string
+	ConnectionID    string
+	ChatID          string
+	ChatType        string
+	SenderID        string
+	SenderName      string
+	InboundEventID  string
+	SourceHint      IntentSource
+	ContextIssueKey string
+	ContextMode     string
 }
 
 // IntentResult is a resolver's answer. Matched=false lets the chain continue.
@@ -87,6 +89,11 @@ type AsyncChatIntentClient interface {
 	ParseIntentResult(ctx context.Context, taskID string) (IntentResult, bool, error)
 }
 
+type ChannelAgentTurnClient interface {
+	StartAgentTurn(ctx context.Context, req IntentRequest) (string, error)
+	ParseAgentTurnResult(ctx context.Context, taskID string) (string, bool, error)
+}
+
 type ChatIntentResolver struct {
 	client  ChatIntentClient
 	timeout time.Duration
@@ -135,16 +142,51 @@ type chatIntentResponse struct {
 
 func BuildChatIntentPrompt(req IntentRequest) string {
 	var b strings.Builder
-	b.WriteString("You are resolving a Multica channel chat message into one safe structured intent.\n")
-	b.WriteString("Return only JSON: {\"intent\":\"<IntentKind>\",\"confidence\":0.0-1.0,\"params\":{...}}\n")
-	b.WriteString("Allowed intents: CreateIssue, AddComment, QueryIssue, IssueDetail, IssueTimeline, IssueLogs, SetStatus, SetAssignee, SetPriority, SetLabel, ConfirmAction, CancelAction, Unsupported, Unknown, ASK_CLARIFY.\n")
-	b.WriteString("Destructive operations such as delete must be Unsupported. Do not execute anything.\n\n")
+	b.WriteString("You are the Multica channel turn planner. Treat the message like a teammate asking in a work chat, not like a command parser.\n")
+	b.WriteString("Return only JSON: {\"mode\":\"query|mutation|reply|clarify|ignore\",\"intent\":\"<IntentKind>\",\"target\":\"<issue key if any>\",\"params\":{...},\"needs_confirmation\":false,\"user_reply_draft\":\"natural user-facing draft\",\"confidence\":0.0-1.0}\n")
+	b.WriteString("Allowed intents: CreateIssue, AddComment, QueryIssue, QueryProgress, IssueDetail, IssueTimeline, IssueLogs, SetStatus, SetAssignee, SetPriority, SetLabel, ConfirmAction, CancelAction, Unsupported, Unknown, ASK_CLARIFY.\n")
+	b.WriteString("You only plan. Do not claim that you executed anything. Destructive operations such as delete must be Unsupported.\n\n")
 	b.WriteString("Rules:\n")
 	b.WriteString("- If the message contains an issue key such as sta-1 or STA-1, return it as uppercase params.issue_key.\n")
+	b.WriteString("- Use QueryProgress with params.scope=issue for questions like 某 issue 怎么样了 / 进展怎么样 / 什么情况.\n")
+	b.WriteString("- Use QueryProgress with params.scope=projects for questions about all project progress.\n")
 	b.WriteString("- QueryIssue without params.issue_key is only for todo-list requests such as 我的待办, 待办列表, 看一下待办, 我有哪些待办.\n")
-	b.WriteString("- If the user appears to ask about a specific issue but the issue key or action is unclear, return ASK_CLARIFY instead of QueryIssue.\n\n")
-	fmt.Fprintf(&b, "Workspace ID: %s\nDefault project ID: %s\nChannel: %s\nConnection ID: %s\nChat type: %s\nSender: %s (%s)\n\n", req.WorkspaceID, req.DefaultProjectID, req.Channel, req.ConnectionID, req.ChatType, req.SenderName, req.SenderID)
+	b.WriteString("- For CreateIssue, include params.assignee when the user says 指派给/分配给 someone.\n")
+	b.WriteString("- If the user replies in a notification context and does not give a new issue key, use the reply context issue.\n")
+	b.WriteString("- If the user appears to ask about a specific issue but the issue key or action is unclear, return mode=clarify and intent=ASK_CLARIFY with a human user_reply_draft.\n")
+	b.WriteString("- user_reply_draft must never contain internal tags such as [ASK_CLARIFY] or UNKNOWN.\n\n")
+	fmt.Fprintf(&b, "Workspace ID: %s\nDefault project ID: %s\nChannel: %s\nConnection ID: %s\nChat type: %s\nSender: %s (%s)\n", req.WorkspaceID, req.DefaultProjectID, req.Channel, req.ConnectionID, req.ChatType, req.SenderName, req.SenderID)
+	if req.ContextIssueKey != "" {
+		fmt.Fprintf(&b, "Reply context issue: %s (%s)\n", req.ContextIssueKey, req.ContextMode)
+	}
+	b.WriteString("\n")
 	fmt.Fprintf(&b, "User message:\n%s\n", req.Text)
+	return b.String()
+}
+
+func BuildChannelAgentTurnPrompt(req IntentRequest) string {
+	var b strings.Builder
+	b.WriteString("You are handling a Multica channel message as a teammate in a work chat.\n")
+	b.WriteString("This is NOT an intent-classification task. Use the existing `multica` CLI when you need workspace facts or need to make low-risk changes.\n\n")
+	b.WriteString("User-visible reply rules:\n")
+	b.WriteString("- Reply naturally and concisely in the user's language.\n")
+	b.WriteString("- Never expose internal tags such as [ASK_CLARIFY], UNKNOWN, JSON plans, task IDs, or implementation labels.\n")
+	b.WriteString("- If a critical parameter is missing, ask one clear question instead of guessing.\n")
+	b.WriteString("- Do not perform delete or irreversible/destructive operations from channel. Explain that this is not supported here.\n\n")
+	b.WriteString("Work rules:\n")
+	b.WriteString("- For workspace or project progress questions, do not stop at project records. If no explicit projects exist, use `multica issue list --output json` and summarize open, blocked, in_review, and recently active issues.\n")
+	b.WriteString("- For issue progress questions, use `multica issue get <id> --output json` and `multica issue comment list <id> --output json`. Include status, assignee if useful, the latest meaningful member/agent reply, and the next step.\n")
+	b.WriteString("- For creates and updates, use the existing CLI such as `multica issue create`, `multica issue status`, `multica issue assign`, and `multica issue comment add --content-stdin`.\n")
+	b.WriteString("- For comments, if the user named the issue but did not provide comment body, ask what they want to write. Do not invent the comment.\n")
+	b.WriteString("- If the message is a direct reply to a notification and a reply context issue is provided, treat that issue as the default target unless the user explicitly names another issue.\n\n")
+	fmt.Fprintf(&b, "Workspace ID: %s\nDefault project ID: %s\nChannel: %s\nConnection ID: %s\nChat ID: %s\nChat type: %s\nSender: %s (%s)\n", req.WorkspaceID, req.DefaultProjectID, req.Channel, req.ConnectionID, req.ChatID, req.ChatType, req.SenderName, req.SenderID)
+	if req.ContextIssueKey != "" {
+		fmt.Fprintf(&b, "Reply context issue: %s (%s)\n", req.ContextIssueKey, req.ContextMode)
+	}
+	b.WriteString("\nUser message:\n")
+	b.WriteString(req.Text)
+	b.WriteString("\n\nFinal output:\n")
+	b.WriteString("Write the exact message that should be sent back to the channel. If you performed a CLI mutation, summarize what changed and mention any relevant issue key.\n")
 	return b.String()
 }
 
@@ -185,6 +227,15 @@ func NormalizeChatIntentResultForRequest(raw string, req IntentRequest) (IntentR
 }
 
 func NormalizeChatIntentResultForText(raw string, sourceText string) (IntentResult, error) {
+	if plan, ok, err := parseChannelTurnPlan(raw); err != nil {
+		return IntentResult{}, err
+	} else if ok {
+		result := IntentFromTurnPlan(plan, sourceText)
+		if result.Intent.Confidence < minChatConfidence {
+			return IntentResult{Matched: true, Intent: fallbackIntent(IntentASKClarify)}, nil
+		}
+		return result, nil
+	}
 	in, err := parseChatIntent(raw)
 	if err != nil {
 		return IntentResult{}, err
@@ -200,12 +251,36 @@ func NormalizeChatIntentResultForText(raw string, sourceText string) (IntentResu
 	return IntentResult{Matched: true, Intent: in}, nil
 }
 
+func parseChannelTurnPlan(raw string) (ChannelTurnPlan, bool, error) {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stripMarkdownFences(raw)), &probe); err != nil {
+		return ChannelTurnPlan{}, false, err
+	}
+	if _, ok := probe["mode"]; !ok {
+		return ChannelTurnPlan{}, false, nil
+	}
+	var plan ChannelTurnPlan
+	if err := json.Unmarshal([]byte(stripMarkdownFences(raw)), &plan); err != nil {
+		return ChannelTurnPlan{}, false, err
+	}
+	return plan, true, nil
+}
+
 func refineChatIntentWithSourceText(in Intent, sourceText string) Intent {
-	if in.Kind != IntentQueryIssue {
+	if in.Kind != IntentQueryIssue && in.Kind != IntentQueryProgress {
 		return in
 	}
 	if in.Params == nil {
 		in.Params = map[string]string{}
+	}
+	if in.Kind == IntentQueryProgress && strings.TrimSpace(in.Params["scope"]) == "" {
+		in.Params["scope"] = "issue"
+	}
+	if in.Kind == IntentQueryProgress {
+		scope := strings.TrimSpace(in.Params["scope"])
+		if scope == "projects" || scope == "my_todos" {
+			return in
+		}
 	}
 	if issueKey := strings.TrimSpace(in.Params["issue_key"]); issueKey != "" {
 		in.Params["issue_key"] = keyParam(issueKey)
@@ -224,6 +299,9 @@ func refineChatIntentWithSourceText(in Intent, sourceText string) Intent {
 	}
 	if len(keys) > 0 || len(issueLikes) > 0 || !isTodoListQuery(text) {
 		return fallbackIntent(IntentASKClarify)
+	}
+	if in.Kind == IntentQueryProgress {
+		in.Params["scope"] = "my_todos"
 	}
 	return in
 }
@@ -274,6 +352,7 @@ func fallbackIntent(kind IntentKind) Intent {
 func isValidIntentKind(k IntentKind) bool {
 	switch k {
 	case IntentCreateIssue, IntentAddComment, IntentQueryIssue, IntentIssueDetail, IntentIssueTimeline, IntentIssueLogs,
+		IntentQueryProgress,
 		IntentSetStatus, IntentSetAssignee, IntentSetPriority, IntentSetLabel,
 		IntentConfirmAction, IntentCancelAction,
 		IntentUnsupported, IntentUnknown, IntentASKClarify:
@@ -289,6 +368,16 @@ func intentHasRequiredParams(in Intent) bool {
 		return strings.TrimSpace(in.Params["title"]) != ""
 	case IntentAddComment:
 		return strings.TrimSpace(in.Params["issue_key"]) != "" && strings.TrimSpace(in.Params["comment"]) != ""
+	case IntentQueryProgress:
+		scope := strings.TrimSpace(in.Params["scope"])
+		if scope == "" {
+			scope = "issue"
+			in.Params["scope"] = scope
+		}
+		if scope == "issue" {
+			return strings.TrimSpace(in.Params["issue_key"]) != ""
+		}
+		return scope == "projects" || scope == "my_todos"
 	case IntentIssueDetail, IntentIssueTimeline, IntentIssueLogs:
 		return strings.TrimSpace(in.Params["issue_key"]) != ""
 	case IntentSetStatus:

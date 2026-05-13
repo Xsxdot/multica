@@ -49,6 +49,11 @@ func (s *IssueService) CreateIssue(ctx context.Context, req facade.CreateIssueRe
 		if err != nil {
 			return channelActionPayload{}, fmt.Errorf("insert issue: %w", err)
 		}
+		if strings.TrimSpace(req.AssigneeIdentifier) != "" {
+			if err := setIssueAssigneeTx(ctx, tx, issue.ID, req.AssigneeIdentifier); err != nil {
+				return channelActionPayload{}, err
+			}
+		}
 		return channelActionPayload{IssueID: util.UUIDToString(issue.ID)}, nil
 	})
 	if err != nil {

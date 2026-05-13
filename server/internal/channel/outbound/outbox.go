@@ -28,6 +28,12 @@ type NotificationEnqueueRequest struct {
 	TargetExternalUserID string
 	Title                string
 	Body                 string
+	WorkspaceID          pgtype.UUID
+	IssueID              pgtype.UUID
+	IssueIdentifier      string
+	IssueTitle           string
+	InboxItemID          pgtype.UUID
+	Replyable            bool
 }
 
 type NotificationEnqueuer interface {
@@ -43,6 +49,12 @@ type OutboxNotification struct {
 	TargetExternalUserID string
 	Title                string
 	Body                 string
+	WorkspaceID          pgtype.UUID
+	IssueID              pgtype.UUID
+	IssueIdentifier      string
+	IssueTitle           string
+	InboxItemID          pgtype.UUID
+	Replyable            bool
 	Attempts             int32
 	MaxAttempts          int32
 }
@@ -74,8 +86,9 @@ func (s *DBNotificationStore) EnqueueNotification(ctx context.Context, req Notif
 	const q = `
 INSERT INTO channel_outbound_notification (
     provider, connection_id, event_kind, target_user_id, target_external_user_id,
-    title, body, aggregation_due_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, now() + $8::interval)
+    title, body, workspace_id, issue_id, issue_identifier, issue_title, inbox_item_id,
+    replyable, aggregation_due_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now() + $14::interval)
 `
 	_, err := s.db.Exec(ctx, q,
 		req.Provider,
@@ -85,6 +98,12 @@ INSERT INTO channel_outbound_notification (
 		req.TargetExternalUserID,
 		req.Title,
 		req.Body,
+		nullableUUID(req.WorkspaceID),
+		nullableUUID(req.IssueID),
+		strings.TrimSpace(req.IssueIdentifier),
+		strings.TrimSpace(req.IssueTitle),
+		nullableUUID(req.InboxItemID),
+		req.Replyable,
 		pgInterval(window),
 	)
 	return err
@@ -111,7 +130,8 @@ WHERE id IN (
     FOR UPDATE SKIP LOCKED
 )
 RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
-          title, body, attempts, max_attempts
+          title, body, workspace_id, issue_id, issue_identifier, issue_title, inbox_item_id,
+          replyable, attempts, max_attempts
 `
 		return s.queryNotifications(ctx, q, limit, readyConnectionIDs)
 	}
@@ -130,7 +150,8 @@ WHERE id IN (
     FOR UPDATE SKIP LOCKED
 )
 RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
-          title, body, attempts, max_attempts
+          title, body, workspace_id, issue_id, issue_identifier, issue_title, inbox_item_id,
+          replyable, attempts, max_attempts
 `
 	return s.queryNotifications(ctx, q, limit)
 }
@@ -155,7 +176,8 @@ WHERE id IN (
     FOR UPDATE SKIP LOCKED
 )
 RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
-          title, body, attempts, max_attempts
+          title, body, workspace_id, issue_id, issue_identifier, issue_title, inbox_item_id,
+          replyable, attempts, max_attempts
 `
 		return s.queryNotifications(ctx, q, limit, pgInterval(staleAfter), readyConnectionIDs)
 	}
@@ -173,7 +195,8 @@ WHERE id IN (
     FOR UPDATE SKIP LOCKED
 )
 RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
-          title, body, attempts, max_attempts
+          title, body, workspace_id, issue_id, issue_identifier, issue_title, inbox_item_id,
+          replyable, attempts, max_attempts
 `
 	return s.queryNotifications(ctx, q, limit, pgInterval(staleAfter))
 }
@@ -197,6 +220,12 @@ func (s *DBNotificationStore) queryNotifications(ctx context.Context, q string, 
 			&n.TargetExternalUserID,
 			&n.Title,
 			&n.Body,
+			&n.WorkspaceID,
+			&n.IssueID,
+			&n.IssueIdentifier,
+			&n.IssueTitle,
+			&n.InboxItemID,
+			&n.Replyable,
 			&n.Attempts,
 			&n.MaxAttempts,
 		); err != nil {
@@ -381,6 +410,9 @@ func groupNotifications(rows []OutboxNotification) []notificationGroup {
 	byKey := map[string]*notificationGroup{}
 	for _, n := range rows {
 		key := n.ConnectionID + "\x00" + n.EventKind + "\x00" + n.TargetExternalUserID + "\x00" + uuidStr(n.TargetUserID)
+		if n.Replyable {
+			key += "\x00" + uuidStr(n.ID)
+		}
 		g := byKey[key]
 		if g == nil {
 			g = &notificationGroup{
@@ -481,4 +513,11 @@ func truncateError(s string) string {
 		return s[:2000]
 	}
 	return s
+}
+
+func nullableUUID(id pgtype.UUID) any {
+	if !id.Valid {
+		return nil
+	}
+	return id
 }

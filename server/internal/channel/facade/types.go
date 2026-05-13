@@ -45,12 +45,13 @@ type ChannelMutationContext struct {
 // passed through verbatim so existing service-level permission checks stay
 // the single source of truth (TC-facade-1).
 type CreateIssueReq struct {
-	WorkspaceID    pgtype.UUID
-	ActorID        pgtype.UUID
-	ProjectID      pgtype.UUID
-	InboundEventID pgtype.UUID
-	Title          string
-	Description    string
+	WorkspaceID        pgtype.UUID
+	ActorID            pgtype.UUID
+	ProjectID          pgtype.UUID
+	InboundEventID     pgtype.UUID
+	Title              string
+	Description        string
+	AssigneeIdentifier string
 }
 
 // AddCommentReq carries the inputs AddComment needs from the channel layer.
@@ -162,4 +163,38 @@ type IssueTaskLogEvent struct {
 	Tool      string
 	Content   string
 	CreatedAt time.Time
+}
+
+type IssueProgress struct {
+	Digest          IssueDigest
+	LatestReply     *IssueProgressReply
+	LatestStatus    *IssueDigestEvent
+	RecommendedNext string
+}
+
+type IssueProgressReply struct {
+	AuthorType string
+	AuthorName string
+	Content    string
+	CreatedAt  time.Time
+}
+
+type ProjectProgress struct {
+	ProjectID   pgtype.UUID
+	ProjectName string
+	Total       int64
+	Open        int64
+	InProgress  int64
+	InReview    int64
+	Blocked     int64
+	Done        int64
+	FocusIssues []ProjectProgressIssue
+}
+
+type ProjectProgressIssue struct {
+	Identifier string
+	Title      string
+	Status     string
+	Assignee   string
+	UpdatedAt  time.Time
 }

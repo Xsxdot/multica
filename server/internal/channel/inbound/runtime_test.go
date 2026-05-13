@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -200,20 +201,16 @@ func TestRuntimeProcessRecord_RuleIntentDoesNotWaitForAgent(t *testing.T) {
 	}
 }
 
-func TestRuntimeApplyIntentResult_WaitingUserSetsExpiry(t *testing.T) {
+func TestRuntimeApplyIntentResult_ClarifyContinuesToPostPipeline(t *testing.T) {
 	store := &fakeRuntimeStore{}
-	sink := &recordingReplySink{}
 	rt := NewRuntime(RuntimeConfig{
-		Store:                store,
-		ReplySink:            sink,
-		ClarificationTimeout: 5 * time.Minute,
+		Store: store,
 	})
 	rec := &InboundEventRecord{
 		ID:    "row-1",
 		Phase: InboundPhaseIntent,
 		Event: port.InboundEvent{ChannelName: "feishu", EventID: "evt-1", ChatID: "oc_1", SenderID: "ou_1"},
 	}
-	before := time.Now().Add(4 * time.Minute)
 	waiting, err := rt.applyIntentResult(context.Background(), rec, chintent.IntentResult{
 		Matched: true,
 		Intent: chintent.Intent{
@@ -225,14 +222,199 @@ func TestRuntimeApplyIntentResult_WaitingUserSetsExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("applyIntentResult: %v", err)
 	}
-	if !waiting {
-		t.Fatal("ASKClarify should enter waiting_user")
+	if waiting {
+		t.Fatal("ASKClarify should not enter waiting_user")
 	}
-	if !store.waitingUserExpiresAt.After(before) {
-		t.Fatalf("waiting_user expires_at = %s, want after %s", store.waitingUserExpiresAt, before)
+	if rec.Phase != InboundPhasePost {
+		t.Fatalf("phase = %q, want post", rec.Phase)
 	}
-	if sink.last() == "" {
-		t.Fatal("clarification reply was not sent")
+}
+
+func TestRuntimeProcessRecord_NaturalLanguageStartsChannelTurnBeforeRules(t *testing.T) {
+	store := &fakeRuntimeStore{}
+	rt := NewRuntime(RuntimeConfig{
+		Store: store,
+		RuleResolvers: []chintent.IntentResolver{fakeResolver{
+			result: chintent.IntentResult{
+				Matched: true,
+				Intent:  chintent.Intent{Kind: chintent.IntentQueryProgress, Params: map[string]string{"scope": "projects"}},
+			},
+		}},
+		ChatIntent: fakeAsyncIntentClient{taskID: "550e8400-e29b-41d4-a716-446655440000"},
+	})
+
+	err := rt.processRecord(context.Background(), &InboundEventRecord{
+		ID:          "row-1",
+		Phase:       InboundPhaseIntent,
+		WorkspaceID: "550e8400-e29b-41d4-a716-446655440001",
+		Event: port.InboundEvent{
+			ChannelName: "feishu",
+			EventID:     "evt-1",
+			Type:        port.EventTypeMessageReceived,
+			ChatID:      "oc_1",
+			ChatType:    port.ChatTypeGroup,
+			SenderID:    "ou_1",
+			Text:        "各项目进展怎么样？",
+		},
+	})
+	if err != nil {
+		t.Fatalf("processRecord: %v", err)
+	}
+	if !store.waitingAgent {
+		t.Fatal("natural-language turn should wait for channel agent")
+	}
+	if store.waitKind != WaitKindChannelTurn {
+		t.Fatalf("wait kind = %q, want %q", store.waitKind, WaitKindChannelTurn)
+	}
+}
+
+func TestRuntimeResumeChannelTurnSendsFinalReply(t *testing.T) {
+	store := &fakeRuntimeStore{
+		load: &InboundEventRecord{
+			ID: "row-1",
+			Event: port.InboundEvent{
+				ChannelName: "feishu",
+				EventID:     "evt-1",
+				ChatID:      "oc_1",
+				ChatType:    port.ChatTypeGroup,
+				SenderID:    "ou_1",
+			},
+		},
+	}
+	sink := &recordingReplySink{}
+	dispatch := &fakeDispatchStore{}
+	rt := NewRuntime(RuntimeConfig{
+		Store:         store,
+		ReplySink:     sink,
+		DispatchStore: dispatch,
+		ChannelTurn:   fakeAsyncIntentClient{done: true},
+	})
+
+	rt.resumeChannelTurn(context.Background(), WaitingAgentEvent{
+		ID:         "row-1",
+		WaitKind:   WaitKindChannelTurn,
+		WaitTaskID: "550e8400-e29b-41d4-a716-446655440000",
+	})
+
+	if got := sink.last(); got != "channel reply" {
+		t.Fatalf("reply = %q, want channel reply", got)
+	}
+	if !store.processed {
+		t.Fatal("channel turn completion should mark event processed")
+	}
+	if dispatch.reply != "channel reply" {
+		t.Fatalf("persisted reply = %q", dispatch.reply)
+	}
+}
+
+func TestRuntimeStartChannelTurnFailureSendsOncePerEvent(t *testing.T) {
+	store := &fakeRuntimeStore{}
+	sink := &recordingReplySink{}
+	dispatch := &fakeDispatchStore{}
+	rt := NewRuntime(RuntimeConfig{
+		Store:         store,
+		ReplySink:     sink,
+		DispatchStore: dispatch,
+		ChatIntent:    fakeAsyncIntentClient{err: errors.New("no runtime")},
+	})
+	rec := &InboundEventRecord{
+		ID:          "row-1",
+		Phase:       InboundPhaseIntent,
+		WorkspaceID: "550e8400-e29b-41d4-a716-446655440001",
+		Event: port.InboundEvent{
+			ChannelName:         "feishu",
+			ChannelConnectionID: "conn-1",
+			EventID:             "evt-1",
+			Type:                port.EventTypeMessageReceived,
+			ChatID:              "oc_1",
+			ChatType:            port.ChatTypeGroup,
+			SenderID:            "ou_1",
+			Text:                "各项目进展怎么样？",
+		},
+	}
+
+	if err := rt.processRecord(context.Background(), rec); err != nil {
+		t.Fatalf("processRecord first: %v", err)
+	}
+	if err := rt.processRecord(context.Background(), rec); err != nil {
+		t.Fatalf("processRecord second: %v", err)
+	}
+	if got := len(sink.replies); got != 1 {
+		t.Fatalf("reply count = %d, want 1", got)
+	}
+}
+
+func TestRuntimeStartChannelTurnFailureCooldownSuppressesChatSpam(t *testing.T) {
+	store := &fakeRuntimeStore{}
+	sink := &recordingReplySink{}
+	dispatch := &fakeDispatchStore{}
+	rt := NewRuntime(RuntimeConfig{
+		Store:         store,
+		ReplySink:     sink,
+		DispatchStore: dispatch,
+		ChatIntent:    fakeAsyncIntentClient{err: errors.New("no runtime")},
+	})
+
+	for _, id := range []string{"row-1", "row-2"} {
+		err := rt.processRecord(context.Background(), &InboundEventRecord{
+			ID:          id,
+			Phase:       InboundPhaseIntent,
+			WorkspaceID: "550e8400-e29b-41d4-a716-446655440001",
+			Event: port.InboundEvent{
+				ChannelName:         "feishu",
+				ChannelConnectionID: "conn-1",
+				EventID:             "evt-" + id,
+				Type:                port.EventTypeMessageReceived,
+				ChatID:              "oc_1",
+				ChatType:            port.ChatTypeGroup,
+				SenderID:            "ou_1",
+				Text:                "各项目进展怎么样？",
+			},
+		})
+		if err != nil {
+			t.Fatalf("processRecord %s: %v", id, err)
+		}
+	}
+	if got := len(sink.replies); got != 1 {
+		t.Fatalf("reply count = %d, want 1", got)
+	}
+	if _, ok := dispatch.completion("row-2"); !ok {
+		t.Fatal("suppressed failure should still persist dispatch completion")
+	}
+}
+
+func TestRuntimeResumeChannelTurnFailureUsesFailureOnce(t *testing.T) {
+	store := &fakeRuntimeStore{
+		load: &InboundEventRecord{
+			ID: "row-1",
+			Event: port.InboundEvent{
+				ChannelName:         "feishu",
+				ChannelConnectionID: "conn-1",
+				EventID:             "evt-1",
+				ChatID:              "oc_1",
+				ChatType:            port.ChatTypeGroup,
+				SenderID:            "ou_1",
+			},
+		},
+	}
+	sink := &recordingReplySink{}
+	dispatch := &fakeDispatchStore{}
+	rt := NewRuntime(RuntimeConfig{
+		Store:         store,
+		ReplySink:     sink,
+		DispatchStore: dispatch,
+		ChannelTurn:   fakeAsyncIntentClient{done: true, err: errors.New("task failed")},
+	})
+
+	item := WaitingAgentEvent{ID: "row-1", WaitKind: WaitKindChannelTurn, WaitTaskID: "550e8400-e29b-41d4-a716-446655440000"}
+	rt.resumeChannelTurn(context.Background(), item)
+	rt.resumeChannelTurn(context.Background(), item)
+
+	if got := len(sink.replies); got != 1 {
+		t.Fatalf("reply count = %d, want 1", got)
+	}
+	if !store.processed {
+		t.Fatal("failed channel turn should mark event processed")
 	}
 }
 
@@ -268,8 +450,10 @@ func TestRuntimeWorker_DeadRetryNotifiesUser(t *testing.T) {
 type fakeRuntimeStore struct {
 	accept               AcceptResult
 	claim                InboundEventRecord
+	load                 *InboundEventRecord
 	claimed              bool
 	waitingAgent         bool
+	waitKind             string
 	waitingUserExpiresAt time.Time
 	processed            bool
 	retry                RetryResult
@@ -281,6 +465,10 @@ func (s *fakeRuntimeStore) AcceptEvent(context.Context, port.InboundEvent, Accep
 }
 
 func (s *fakeRuntimeStore) Load(context.Context, string) (*InboundEventRecord, error) {
+	if s.load != nil {
+		rec := *s.load
+		return &rec, nil
+	}
 	return nil, nil
 }
 
@@ -301,8 +489,9 @@ func (s *fakeRuntimeStore) MarkQueued(context.Context, string, port.InboundEvent
 	return nil
 }
 
-func (s *fakeRuntimeStore) MarkWaitingAgent(context.Context, string, port.InboundEvent, string, ChatBindingContext) error {
+func (s *fakeRuntimeStore) MarkWaitingAgent(_ context.Context, _ string, _ port.InboundEvent, _ string, _ ChatBindingContext, waitKind string) error {
 	s.waitingAgent = true
+	s.waitKind = waitKind
 	return nil
 }
 
@@ -364,6 +553,47 @@ func (s *recordingReplySink) last() string {
 	return s.replies[len(s.replies)-1]
 }
 
+type fakeDispatchStore struct {
+	reply     string
+	ok        bool
+	replies   map[string]string
+	completed map[string]bool
+}
+
+func (s *fakeDispatchStore) GetDispatchCompletion(_ context.Context, id string) (string, bool, error) {
+	if s.completed != nil {
+		if s.completed[id] {
+			return s.replies[id], true, nil
+		}
+		return "", false, nil
+	}
+	if s.ok || s.reply != "" {
+		return s.reply, true, nil
+	}
+	return "", false, nil
+}
+
+func (s *fakeDispatchStore) MarkDispatchCompleted(_ context.Context, id string, reply string) error {
+	if s.replies == nil {
+		s.replies = map[string]string{}
+	}
+	if s.completed == nil {
+		s.completed = map[string]bool{}
+	}
+	s.reply = reply
+	s.ok = true
+	s.replies[id] = reply
+	s.completed[id] = true
+	return nil
+}
+
+func (s *fakeDispatchStore) completion(id string) (string, bool) {
+	if s.completed == nil || !s.completed[id] {
+		return "", false
+	}
+	return s.replies[id], true
+}
+
 type fakeResolver struct {
 	result chintent.IntentResult
 	err    error
@@ -373,6 +603,42 @@ func (r fakeResolver) Name() string { return "fake" }
 
 func (r fakeResolver) Resolve(context.Context, chintent.IntentRequest) (chintent.IntentResult, error) {
 	return r.result, r.err
+}
+
+type fakeAsyncIntentClient struct {
+	taskID string
+	result chintent.IntentResult
+	done   bool
+	err    error
+	reply  string
+}
+
+func (f fakeAsyncIntentClient) StartIntent(context.Context, chintent.IntentRequest) (string, error) {
+	return f.taskID, f.err
+}
+
+func (f fakeAsyncIntentClient) ParseIntentResult(context.Context, string) (chintent.IntentResult, bool, error) {
+	return f.result, f.done, f.err
+}
+
+func (f fakeAsyncIntentClient) StartTurn(ctx context.Context, req chintent.IntentRequest) (string, error) {
+	return f.StartIntent(ctx, req)
+}
+
+func (f fakeAsyncIntentClient) ParseTurnResult(ctx context.Context, taskID string) (chintent.IntentResult, bool, error) {
+	return f.ParseIntentResult(ctx, taskID)
+}
+
+func (f fakeAsyncIntentClient) StartAgentTurn(context.Context, chintent.IntentRequest) (string, error) {
+	return f.taskID, f.err
+}
+
+func (f fakeAsyncIntentClient) ParseAgentTurnResult(context.Context, string) (string, bool, error) {
+	reply := f.reply
+	if reply == "" {
+		reply = "channel reply"
+	}
+	return reply, f.done, f.err
 }
 
 type fnStep struct {

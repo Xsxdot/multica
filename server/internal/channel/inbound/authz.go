@@ -159,7 +159,10 @@ func (*authzStep) Name() string { return "authz" }
 
 func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
 	if evt.ChatType == port.ChatTypeDirect {
-		return s.reject(ctx, evt, AuthzPrivateUnsupported)
+		// Direct chats are used for notification replies. Dispatch resolves
+		// the concrete issue through channel_reply_context; commands that still
+		// need a chat workspace binding fail in their handler.
+		return evt, DecisionContinue, nil
 	}
 
 	// --- 1. Chat binding (TC-authz-1) ---

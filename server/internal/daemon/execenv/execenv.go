@@ -61,6 +61,7 @@ type TaskContextForEnv struct {
 	AutopilotTriggerPayload string
 	QuickCreatePrompt       string // non-empty for quick-create tasks
 	ChannelIntentPrompt     string // non-empty for internal channel intent tasks
+	ChannelTurnPrompt       string // non-empty for channel agent turn tasks
 }
 
 // SkillContextForEnv represents a skill to be written into the execution environment.
