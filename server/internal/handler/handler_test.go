@@ -1800,7 +1800,26 @@ func TestResolveActor(t *testing.T) {
 		t.Fatalf("failed to create test task: %v", err)
 	}
 
+	channelTurnContext, err := json.Marshal(service.ChannelTurnContext{
+		Type:        service.ChannelTurnContextType,
+		WorkspaceID: testWorkspaceID,
+		RequesterID: testUserID,
+	})
+	if err != nil {
+		t.Fatalf("marshal channel turn context: %v", err)
+	}
+	var channelTurnTaskID string
+	err = testPool.QueryRow(ctx,
+		`INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, context)
+		 VALUES ($1, $2, NULL, 'queued', 0, $3)
+		 RETURNING id`, agentID, runtimeID, channelTurnContext,
+	).Scan(&channelTurnTaskID)
+	if err != nil {
+		t.Fatalf("failed to create channel turn test task: %v", err)
+	}
+
 	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, channelTurnTaskID)
 		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
 		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
 	})
@@ -1809,8 +1828,10 @@ func TestResolveActor(t *testing.T) {
 		name          string
 		agentIDHeader string
 		taskIDHeader  string
+		requestUserID string
 		wantActorType string
 		wantIsAgent   bool
+		wantActorID   string
 	}{
 		{
 			name:          "no headers returns member",
@@ -1835,6 +1856,14 @@ func TestResolveActor(t *testing.T) {
 			wantIsAgent:   true,
 		},
 		{
+			name:          "valid agent + channel turn task returns requester member",
+			agentIDHeader: agentID,
+			taskIDHeader:  channelTurnTaskID,
+			requestUserID: "00000000-0000-0000-0000-0000000000aa",
+			wantActorType: "member",
+			wantActorID:   testUserID,
+		},
+		{
 			name:          "valid agent + wrong task returns member",
 			agentIDHeader: agentID,
 			taskIDHeader:  "00000000-0000-0000-0000-000000000099",
@@ -1852,7 +1881,11 @@ func TestResolveActor(t *testing.T) {
 				req.Header.Set("X-Task-ID", tt.taskIDHeader)
 			}
 
-			actorType, actorID := testHandler.resolveActor(req, testUserID, testWorkspaceID)
+			requestUserID := tt.requestUserID
+			if requestUserID == "" {
+				requestUserID = testUserID
+			}
+			actorType, actorID := testHandler.resolveActor(req, requestUserID, testWorkspaceID)
 
 			if actorType != tt.wantActorType {
 				t.Errorf("actorType = %q, want %q", actorType, tt.wantActorType)
@@ -1861,9 +1894,13 @@ func TestResolveActor(t *testing.T) {
 				if actorID != tt.agentIDHeader {
 					t.Errorf("actorID = %q, want agent %q", actorID, tt.agentIDHeader)
 				}
+			} else if tt.wantActorID != "" {
+				if actorID != tt.wantActorID {
+					t.Errorf("actorID = %q, want %q", actorID, tt.wantActorID)
+				}
 			} else {
-				if actorID != testUserID {
-					t.Errorf("actorID = %q, want user %q", actorID, testUserID)
+				if actorID != requestUserID {
+					t.Errorf("actorID = %q, want user %q", actorID, requestUserID)
 				}
 			}
 		})

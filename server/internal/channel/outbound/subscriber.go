@@ -286,6 +286,9 @@ func (s *Subscriber) handleCommentCreated(e events.Event) {
 		return
 	}
 	commentContent, _ := commentObj["content"].(string)
+	if strings.TrimSpace(commentContent) == "" {
+		commentContent = "有一条新评论（无正文）。"
+	}
 	issueID, _ := commentObj["issue_id"].(string)
 
 	for _, userID := range subscriberIDs {
@@ -338,9 +341,9 @@ func (s *Subscriber) handleInboxNew(e events.Event) {
 	if inboxType == "" && item != nil {
 		inboxType, _ = item["type"].(string)
 	}
-	body, _ := payload["body"].(string)
+	body := stringFromAny(payload["body"])
 	if body == "" && item != nil {
-		body, _ = item["body"].(string)
+		body = stringFromAny(item["body"])
 	}
 
 	eventKind := mapInboxTypeToEventKind(inboxType)
@@ -373,7 +376,7 @@ func (s *Subscriber) handleSubscriberAdded(e events.Event) {
 
 	issueID, _ := payload["issue_id"].(string)
 	issueIdentifier, _ := payload["issue_identifier"].(string)
-	s.sendToUser(e.WorkspaceID, subscriberID, "issue_mention", issueTitle, "", notificationContext{
+	s.sendToUser(e.WorkspaceID, subscriberID, "issue_mention", issueTitle, "你已订阅该 Issue，后续更新将通知你。", notificationContext{
 		WorkspaceID:     e.WorkspaceID,
 		IssueID:         issueID,
 		IssueIdentifier: issueIdentifier,

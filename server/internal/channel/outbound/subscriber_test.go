@@ -278,6 +278,7 @@ func TestSubscriber_UnboundUser_SendsGroupCardWithoutMention(t *testing.T) {
 			"inbox_type": "issue_assigned",
 			"issue_id":   "issue-1",
 			"title":      "Test Issue",
+			"body":       "Notification body",
 		},
 	})
 
@@ -322,6 +323,7 @@ func TestSubscriber_BoundUser_SendsCard(t *testing.T) {
 			"inbox_type": "issue_assigned",
 			"issue_id":   "issue-1",
 			"title":      "Test Issue",
+			"body":       "Notification body",
 		},
 	})
 	elapsed := time.Since(start)
@@ -339,6 +341,49 @@ func TestSubscriber_BoundUser_SendsCard(t *testing.T) {
 	}
 	if len(msgs[0].Mentions) != 1 || msgs[0].Mentions[0].ID != "ext-user-1" {
 		t.Errorf("TC-out-1: expected mention ext-user-1, got %#v", msgs[0].Mentions)
+	}
+	if msgs[0].Body != "Notification body" {
+		t.Errorf("TC-out-1: body = %q, want notification body", msgs[0].Body)
+	}
+}
+
+func TestSubscriber_InboxItemBodySendsCardBody(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	userID := "00000000-0000-0000-0000-000000000099"
+	bindingStore := &mockBindingStore{
+		bindings: map[string]map[string]string{
+			"feishu": {"ext-user-1": userID},
+		},
+	}
+	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.Start()
+
+	body := "在新的评论中@我，而不是回复我的评论"
+	bus.Publish(events.Event{
+		Type:        protocol.EventInboxNew,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     "actor-1",
+		Payload: map[string]any{
+			"item": map[string]any{
+				"recipient_id":     userID,
+				"type":             "mentioned",
+				"issue_id":         "00000000-0000-0000-0000-000000000101",
+				"issue_identifier": "STA-1",
+				"title":            "Test Issue",
+				"body":             &body,
+			},
+		},
+	})
+
+	msgs := ch.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	if msgs[0].Body != body {
+		t.Fatalf("body = %q, want %q", msgs[0].Body, body)
 	}
 }
 
