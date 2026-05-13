@@ -359,7 +359,7 @@ func TestChannelIntegration_TC_int_5_M2_OutboundMergesWithinWindow(t *testing.T)
 	if calls[0].ExternalUserID != externalUserID {
 		t.Fatalf("merged card external_user_id = %q, want %q", calls[0].ExternalUserID, externalUserID)
 	}
-	if want := "你有 2 条新通知"; calls[0].Card.Title != want {
+	if want := "Multica 有 2 条新通知"; calls[0].Card.Title != want {
 		t.Fatalf("merged title = %q, want %q", calls[0].Card.Title, want)
 	}
 	body := calls[0].Card.Body

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/channel/port"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -100,16 +101,16 @@ type mockRetrySender struct {
 }
 
 type mockRetryCall struct {
-	Provider       string
-	ExternalUserID string
-	Payload        RetryPayload
+	Provider string
+	Target   port.OutboundTarget
+	Payload  RetryPayload
 }
 
-func (m *mockRetrySender) SendCard(_ context.Context, provider string, externalUserID string, card RetryPayload) error {
+func (m *mockRetrySender) SendCard(_ context.Context, provider string, target port.OutboundTarget, card RetryPayload) error {
 	m.calls = append(m.calls, mockRetryCall{
-		Provider:       provider,
-		ExternalUserID: externalUserID,
-		Payload:        card,
+		Provider: provider,
+		Target:   target,
+		Payload:  card,
 	})
 	return m.err
 }
@@ -406,8 +407,7 @@ func TestProcessOne_BadPayload_MarksDead(t *testing.T) {
 
 // R3: target_external_user_id column is the single source of truth.
 // When column is invalid/empty, mark dead immediately — do not fall back
-// to payload (which is a separate field for audit/replay, not addressing).
-// See ReviewBot v2 R3.
+// to payload fields that are not part of RetryPayload.
 func TestProcessOne_NoExternalUserID_MarksDead(t *testing.T) {
 	store := &mockFailureStore{}
 	sender := &mockRetrySender{}
@@ -415,9 +415,8 @@ func TestProcessOne_NoExternalUserID_MarksDead(t *testing.T) {
 
 	// Column invalid. Payload happens to contain an "external_user_id"
 	// JSON key — RetryPayload no longer declares that field, so it is
-	// dropped by encoding/json. Even if a stale row from an earlier
-	// schema persists in the table, processOne must not address from
-	// the payload — the column is the only legitimate source.
+	// dropped by encoding/json. Even if a stale row from an earlier schema
+	// persists in the table, processOne must not address from that payload key.
 	f := db.ChannelOutboundFailure{
 		ID:                   pgtype.UUID{Bytes: testID1, Valid: true},
 		Provider:             "feishu",
@@ -432,8 +431,8 @@ func TestProcessOne_NoExternalUserID_MarksDead(t *testing.T) {
 	if len(store.markDeadCalls) != 1 {
 		t.Fatalf("expected 1 MarkDead call, got %d", len(store.markDeadCalls))
 	}
-	if !strings.Contains(store.markDeadCalls[0].LastError.String, "target_external_user_id") {
-		t.Errorf("markDead reason = %q, want substring %q", store.markDeadCalls[0].LastError.String, "target_external_user_id")
+	if !strings.Contains(store.markDeadCalls[0].LastError.String, "missing outbound failure target") {
+		t.Errorf("markDead reason = %q, want substring %q", store.markDeadCalls[0].LastError.String, "missing outbound failure target")
 	}
 	// Critically, must not have called sender (no fallback to payload).
 	if len(sender.calls) != 0 {

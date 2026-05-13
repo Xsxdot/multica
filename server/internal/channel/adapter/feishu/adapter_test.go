@@ -408,6 +408,38 @@ func TestAdapter_SendCard_TargetChatUsesChatID(t *testing.T) {
 	}
 }
 
+func TestAdapter_SendCard_RendersMentions(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeFeishuClient("ou_bot_xxx")
+	adapter := feishu.NewAdapter(fake, feishu.Config{AppID: "cli_test"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := adapter.Connect(ctx); err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = adapter.Disconnect(context.Background()) })
+
+	if _, err := adapter.SendCard(ctx, port.OutboundCardMessage{
+		Target:   port.TargetChat("oc_003"),
+		Title:    "x",
+		Body:     "body",
+		Mentions: []port.OutboundMention{port.MentionUser("ou_user_001", "")},
+	}); err != nil {
+		t.Fatalf("SendCard returned error: %v", err)
+	}
+
+	calls := fake.snapshotSendCalls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d SendMessage calls, want 1", len(calls))
+	}
+	if !strings.Contains(calls[0].body, "ou_user_001") {
+		t.Fatalf("body = %s, want Feishu at mention", calls[0].body)
+	}
+}
+
 // SendCard with empty ChatID must fail fast without calling the Client.
 func TestAdapter_SendCard_EmptyChatID(t *testing.T) {
 	t.Parallel()

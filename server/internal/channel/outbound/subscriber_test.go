@@ -52,8 +52,10 @@ func (m *mockChannel) Messages() []port.OutboundCardMessage {
 // mockBindingStore implements BindingStore and also supports reverse
 // lookup for testing (user_id → external_user_id).
 type mockBindingStore struct {
-	bindings map[string]map[string]string // provider -> external_user_id -> user_id
-	mu       sync.RWMutex
+	bindings       map[string]map[string]string // provider -> external_user_id -> user_id
+	primaryChatID  string
+	primaryChatErr error
+	mu             sync.RWMutex
 }
 
 func (m *mockBindingStore) FindUserID(_ context.Context, provider, externalUserID string) (pgtype.UUID, error) {
@@ -78,6 +80,16 @@ func (m *mockBindingStore) ResolveExternalID(_ context.Context, provider, userID
 		}
 	}
 	return "", ErrNotBound
+}
+
+func (m *mockBindingStore) FindPrimaryChatID(_ context.Context, _ string, _ pgtype.UUID) (string, error) {
+	if m.primaryChatErr != nil {
+		return "", m.primaryChatErr
+	}
+	if m.primaryChatID != "" {
+		return m.primaryChatID, nil
+	}
+	return "group-chat-1", nil
 }
 
 type mockPrefStore struct {
@@ -238,13 +250,16 @@ func TestSubscriber_OutboxEnqueuesWhenDirectDeliveryInactive(t *testing.T) {
 	if len(requests) != 1 {
 		t.Fatalf("outbox requests = %d, want 1", len(requests))
 	}
-	if requests[0].TargetExternalUserID != "ext-user-1" {
-		t.Fatalf("target external user = %q, want ext-user-1", requests[0].TargetExternalUserID)
+	if requests[0].TargetType != string(port.OutboundTargetChat) || requests[0].TargetChatID != "group-chat-1" {
+		t.Fatalf("target = %s/%q, want chat/group-chat-1", requests[0].TargetType, requests[0].TargetChatID)
+	}
+	if requests[0].MentionExternalUserID != "ext-user-1" {
+		t.Fatalf("mention external user = %q, want ext-user-1", requests[0].MentionExternalUserID)
 	}
 }
 
-// TC-out-2: Unbound user → drop, no message sent
-func TestSubscriber_UnboundUser_DropsEvent(t *testing.T) {
+// TC-out-2: Unbound user → send to group without an @ mention
+func TestSubscriber_UnboundUser_SendsGroupCardWithoutMention(t *testing.T) {
 	bus := events.New()
 	ch := &mockChannel{name: "feishu"}
 	bindingStore := &mockBindingStore{bindings: map[string]map[string]string{}}
@@ -269,8 +284,14 @@ func TestSubscriber_UnboundUser_DropsEvent(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	msgs := ch.Messages()
-	if len(msgs) != 0 {
-		t.Errorf("TC-out-2: expected 0 messages for unbound user, got %d", len(msgs))
+	if len(msgs) != 1 {
+		t.Fatalf("TC-out-2: expected 1 group message for unbound user, got %d", len(msgs))
+	}
+	if msgs[0].Target.Type != port.OutboundTargetChat || msgs[0].ChatID != "group-chat-1" {
+		t.Fatalf("TC-out-2: target = %#v chat_id=%q, want group-chat-1", msgs[0].Target, msgs[0].ChatID)
+	}
+	if len(msgs[0].Mentions) != 0 {
+		t.Fatalf("TC-out-2: mentions = %#v, want none", msgs[0].Mentions)
 	}
 }
 
@@ -313,8 +334,46 @@ func TestSubscriber_BoundUser_SendsCard(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("TC-out-1: expected 1 message, got %d", len(msgs))
 	}
-	if msgs[0].ChatID != "ext-user-1" {
-		t.Errorf("TC-out-1: expected ChatID ext-user-1, got %s", msgs[0].ChatID)
+	if msgs[0].Target.Type != port.OutboundTargetChat || msgs[0].ChatID != "group-chat-1" {
+		t.Errorf("TC-out-1: expected group-chat-1, got target=%#v chat_id=%s", msgs[0].Target, msgs[0].ChatID)
+	}
+	if len(msgs[0].Mentions) != 1 || msgs[0].Mentions[0].ID != "ext-user-1" {
+		t.Errorf("TC-out-1: expected mention ext-user-1, got %#v", msgs[0].Mentions)
+	}
+}
+
+func TestSubscriber_NoPrimaryChat_DropsWithoutPrivateFallback(t *testing.T) {
+	bus := events.New()
+	ch := &mockChannel{name: "feishu"}
+	userID := "00000000-0000-0000-0000-000000000099"
+	bindingStore := &mockBindingStore{
+		bindings: map[string]map[string]string{
+			"feishu": {"ext-user-1": userID},
+		},
+		primaryChatErr: ErrNoPrimaryChat,
+	}
+	prefStore := &mockPrefStore{prefs: map[string]map[string]string{}}
+
+	sub := NewSubscriber(bus, ch, bindingStore, prefStore, "00000000-0000-0000-0000-000000000100")
+	sub.Start()
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventInboxNew,
+		WorkspaceID: "00000000-0000-0000-0000-000000000100",
+		ActorID:     "actor-1",
+		Payload: map[string]any{
+			"user_id":    userID,
+			"user_type":  "member",
+			"inbox_type": "issue_assigned",
+			"issue_id":   "issue-1",
+			"title":      "Test Issue",
+		},
+	})
+
+	time.Sleep(10 * time.Millisecond)
+
+	if msgs := ch.Messages(); len(msgs) != 0 {
+		t.Fatalf("messages = %d, want 0 without primary chat", len(msgs))
 	}
 }
 
@@ -509,8 +568,11 @@ func TestSubscriber_StatusInReview_SendsCard(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message for in_review status, got %d", len(msgs))
 	}
-	if msgs[0].ChatID != "ext-user-1" {
-		t.Errorf("expected ChatID ext-user-1, got %s", msgs[0].ChatID)
+	if msgs[0].Target.Type != port.OutboundTargetChat || msgs[0].ChatID != "group-chat-1" {
+		t.Errorf("expected group-chat-1, got target=%#v chat_id=%s", msgs[0].Target, msgs[0].ChatID)
+	}
+	if len(msgs[0].Mentions) != 1 || msgs[0].Mentions[0].ID != "ext-user-1" {
+		t.Errorf("expected mention ext-user-1, got %#v", msgs[0].Mentions)
 	}
 	wantBody := "Issue MUL-1 状态已变更为 评审中"
 	if msgs[0].Body != wantBody {

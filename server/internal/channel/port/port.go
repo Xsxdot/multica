@@ -203,15 +203,26 @@ type OutboundMessage struct {
 type OutboundRichMessage struct {
 	Target OutboundTarget
 	// ChatID is the legacy chat target. New call sites should set Target.
-	ChatID  string
-	Title   string
-	Body    string
-	Actions []OutboundAction
+	ChatID   string
+	Title    string
+	Body     string
+	Actions  []OutboundAction
+	Mentions []OutboundMention
 }
 
 type OutboundAction struct {
 	Label string
 	URL   string
+}
+
+type OutboundMention struct {
+	Type  OutboundTargetType
+	ID    string
+	Label string
+}
+
+func MentionUser(id, label string) OutboundMention {
+	return OutboundMention{Type: OutboundTargetUser, ID: id, Label: label}
 }
 
 // OutboundCardMessage is kept as the current public name used throughout the

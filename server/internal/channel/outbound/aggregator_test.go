@@ -44,7 +44,7 @@ func (m *mockSender) Calls() []sendCall {
 // --- Tests ---
 
 // TC-out-aggregator-a: 60s window merges 5 notifications into 1 card
-// "你有 5 条新通知"
+// "Multica 有 5 条新通知"
 func TestAggregator_Merge(t *testing.T) {
 	sender := &mockSender{}
 	agg := NewAggregator(sender, 200*time.Millisecond)
@@ -71,8 +71,8 @@ func TestAggregator_Merge(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("TC-a: expected 1 merged card, got %d", len(calls))
 	}
-	if calls[0].Card.Title != "你有 5 条新通知" {
-		t.Errorf("TC-a: expected title '你有 5 条新通知', got %q", calls[0].Card.Title)
+	if calls[0].Card.Title != "Multica 有 5 条新通知" {
+		t.Errorf("TC-a: expected title 'Multica 有 5 条新通知', got %q", calls[0].Card.Title)
 	}
 	if calls[0].ExternalUserID != userID {
 		t.Errorf("TC-a: expected ExternalUserID %q, got %q", userID, calls[0].ExternalUserID)
@@ -100,8 +100,8 @@ func TestAggregator_BufferLimit(t *testing.T) {
 		t.Fatalf("TC-b: expected 2 send calls (flush at 50 + immediate for 51st), got %d", len(calls))
 	}
 	// First call: merged 50 notifications
-	if calls[0].Card.Title != "你有 50 条新通知" {
-		t.Errorf("TC-b: first call title = %q, want '你有 50 条新通知'", calls[0].Card.Title)
+	if calls[0].Card.Title != "Multica 有 50 条新通知" {
+		t.Errorf("TC-b: first call title = %q, want 'Multica 有 50 条新通知'", calls[0].Card.Title)
 	}
 	// Second call: single notification (51st, immediate)
 	if calls[1].Card.Title != "Issue 51" {
@@ -254,11 +254,11 @@ func TestAggregator_MultiUser(t *testing.T) {
 	if callA == nil || callB == nil {
 		t.Fatalf("expected calls for user-A and user-B, got %v", calls)
 	}
-	if callA.Card.Title != "你有 2 条新通知" {
-		t.Errorf("user-A title = %q, want '你有 2 条新通知'", callA.Card.Title)
+	if callA.Card.Title != "Multica 有 2 条新通知" {
+		t.Errorf("user-A title = %q, want 'Multica 有 2 条新通知'", callA.Card.Title)
 	}
-	if callB.Card.Title != "你有 1 条新通知" {
-		t.Errorf("user-B title = %q, want '你有 1 条新通知'", callB.Card.Title)
+	if callB.Card.Title != "Multica 有 1 条新通知" {
+		t.Errorf("user-B title = %q, want 'Multica 有 1 条新通知'", callB.Card.Title)
 	}
 }
 
@@ -357,12 +357,12 @@ func TestAggregator_AddAfterTimerFlush_StartsNewWindow(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("first window: expected 1 merged card, got %d", len(calls))
 	}
-	if calls[0].Card.Title != "你有 2 条新通知" {
-		t.Errorf("first window title = %q, want '你有 2 条新通知'", calls[0].Card.Title)
+	if calls[0].Card.Title != "Multica 有 2 条新通知" {
+		t.Errorf("first window title = %q, want 'Multica 有 2 条新通知'", calls[0].Card.Title)
 	}
 
 	// Second window for the SAME user: 1 notification. Must trigger a
-	// fresh timer-flushed card "你有 1 条新通知".
+	// fresh timer-flushed card "Multica 有 1 条新通知".
 	agg.Add(userID, port.OutboundCardMessage{ChatID: userID, Title: "B1"}, false)
 	time.Sleep(300 * time.Millisecond)
 
@@ -370,8 +370,8 @@ func TestAggregator_AddAfterTimerFlush_StartsNewWindow(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("after second Add+wait: expected 2 total cards, got %d", len(calls))
 	}
-	if calls[1].Card.Title != "你有 1 条新通知" {
-		t.Errorf("second window title = %q, want '你有 1 条新通知' (stale buffer would carry old A1/A2 items)", calls[1].Card.Title)
+	if calls[1].Card.Title != "Multica 有 1 条新通知" {
+		t.Errorf("second window title = %q, want 'Multica 有 1 条新通知' (stale buffer would carry old A1/A2 items)", calls[1].Card.Title)
 	}
 	// Must contain only B1, not A1 or A2.
 	if got := calls[1].Card.Body; got != "B1" {
@@ -402,7 +402,7 @@ func TestAggregator_AddAfterBufferLimit_StartsNewWindow(t *testing.T) {
 	}
 
 	// One more notification for the same user. Must start a fresh window
-	// (new timer) and flush as a single-item card "你有 1 条新通知".
+	// (new timer) and flush as a single-item card "Multica 有 1 条新通知".
 	agg.Add(userID, port.OutboundCardMessage{
 		ChatID: userID,
 		Title:  "Issue 52",
@@ -414,8 +414,8 @@ func TestAggregator_AddAfterBufferLimit_StartsNewWindow(t *testing.T) {
 		t.Fatalf("after 52nd Add+wait: expected 3 total sends, got %d", len(calls))
 	}
 	third := calls[2]
-	if third.Card.Title != "你有 1 条新通知" {
-		t.Errorf("third send title = %q, want '你有 1 条新通知' (a re-merge of stale items would say '你有 50 条新通知')", third.Card.Title)
+	if third.Card.Title != "Multica 有 1 条新通知" {
+		t.Errorf("third send title = %q, want 'Multica 有 1 条新通知' (a re-merge of stale items would say 'Multica 有 50 条新通知')", third.Card.Title)
 	}
 }
 

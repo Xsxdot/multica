@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
+	"github.com/multica-ai/multica/server/internal/channel/port"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -56,21 +57,21 @@ func IsRetryable(err error) bool {
 	return errors.As(err, &re)
 }
 
-// RetryPayload is the JSON structure stored in channel_outbound_failure.payload.
-// It captures the rendered card content for replay. Addressing comes from
-// the channel_outbound_failure.target_external_user_id column (single source
-// of truth — see ReviewBot v2 R3); the user id is intentionally NOT stored
-// here, to prevent the addressing-from-payload class of bug.
+// RetryPayload is the JSON structure stored for outbound card replay. The
+// retry workers keep addressing outside the human-visible card content and pass
+// it to adapters through port.OutboundTarget.
 type RetryPayload struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	Title      string                 `json:"title"`
+	Body       string                 `json:"body"`
+	TargetType string                 `json:"target_type,omitempty"`
+	Mentions   []port.OutboundMention `json:"mentions,omitempty"`
 }
 
 // RetrySender abstracts the channel send operation so the worker can be
 // tested without a real adapter. The connectionID parameter identifies the
 // concrete channel connection to use.
 type RetrySender interface {
-	SendCard(ctx context.Context, connectionID string, externalUserID string, card RetryPayload) error
+	SendCard(ctx context.Context, connectionID string, target port.OutboundTarget, card RetryPayload) error
 }
 
 // FailureStore abstracts the DB operations needed by RetryWorker.
@@ -236,21 +237,20 @@ func (w *RetryWorker) processOne(ctx context.Context, f db.ChannelOutboundFailur
 		return
 	}
 
-	// target_external_user_id column is the single source of truth for
-	// addressing. payload.ExternalUserID exists for audit/replay only —
-	// if the column is missing, mark dead instead of silently falling back
-	// (a fallback would hide upstream inserter bugs). See ReviewBot v2 R3.
 	if !f.TargetExternalUserID.Valid || f.TargetExternalUserID.String == "" {
 		channelmetrics.M.RecordOutboundRetry(f.Provider, "missing_target")
 		channelmetrics.M.RecordOutboundDead(f.Provider, "missing_target")
 		slog.Error("retry worker: missing target_external_user_id, marking dead",
 			"id", uuidStr(f.ID))
-		w.markDead(ctx, f, "missing target_external_user_id (column is single source of truth)")
+		w.markDead(ctx, f, "missing outbound failure target")
 		return
 	}
-	externalUserID := f.TargetExternalUserID.String
+	target := port.TargetUser(f.TargetExternalUserID.String)
+	if payload.TargetType == string(port.OutboundTargetChat) {
+		target = port.TargetChat(f.TargetExternalUserID.String)
+	}
 
-	err := w.sender.SendCard(ctx, f.ConnectionID, externalUserID, payload)
+	err := w.sender.SendCard(ctx, f.ConnectionID, target, payload)
 
 	if err == nil {
 		// Success — delete the failure record entirely.

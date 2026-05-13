@@ -71,7 +71,7 @@ func TestOutboxWorker_MergesDueNotificationsAndMarksSent(t *testing.T) {
 	if len(sender.calls) != 1 {
 		t.Fatalf("send calls = %d, want 1", len(sender.calls))
 	}
-	if sender.calls[0].Payload.Title != "你有 2 条新通知" {
+	if sender.calls[0].Payload.Title != "Multica 有 2 条新通知" {
 		t.Fatalf("title = %q", sender.calls[0].Payload.Title)
 	}
 	if !strings.Contains(sender.calls[0].Payload.Body, "[1] A: body A") ||
@@ -83,7 +83,7 @@ func TestOutboxWorker_MergesDueNotificationsAndMarksSent(t *testing.T) {
 	}
 }
 
-func TestOutboxWorker_DoesNotMergeReplyableNotifications(t *testing.T) {
+func TestOutboxWorker_MergesReplyableNotificationsInGroupPolicy(t *testing.T) {
 	t.Parallel()
 
 	userID := pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}
@@ -96,15 +96,49 @@ func TestOutboxWorker_DoesNotMergeReplyableNotifications(t *testing.T) {
 
 	worker.processBatch(context.Background())
 
-	if len(sender.calls) != 2 {
-		t.Fatalf("send calls = %d, want 2", len(sender.calls))
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(sender.calls))
 	}
-	titles := sender.calls[0].Payload.Title + "," + sender.calls[1].Payload.Title
-	if !strings.Contains(titles, "A") || !strings.Contains(titles, "B") {
-		t.Fatalf("titles = %q, want individual A and B notifications", titles)
+	if !strings.Contains(sender.calls[0].Payload.Body, "[1] A: body A") ||
+		!strings.Contains(sender.calls[0].Payload.Body, "[2] B: body B") {
+		t.Fatalf("body = %q, want merged replyable notifications", sender.calls[0].Payload.Body)
 	}
 	if len(store.sent) != 2 {
 		t.Fatalf("sent ids = %d, want 2", len(store.sent))
+	}
+}
+
+func TestOutboxWorker_GroupTargetSendsChatAndMention(t *testing.T) {
+	t.Parallel()
+
+	userID := pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}
+	store := &fakeNotificationStore{claimed: []OutboxNotification{
+		{
+			ID:                    pgtype.UUID{Bytes: [16]byte{0x13}, Valid: true},
+			Provider:              "feishu",
+			EventKind:             "mentioned",
+			TargetUserID:          userID,
+			TargetType:            "chat",
+			TargetChatID:          "oc_group",
+			MentionExternalUserID: "ou_1",
+			Title:                 "A",
+			Body:                  "body A",
+			MaxAttempts:           3,
+		},
+	}}
+	sender := &mockRetrySender{}
+	worker := NewOutboxWorker(store, sender)
+
+	worker.processBatch(context.Background())
+
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(sender.calls))
+	}
+	if sender.calls[0].Target.Type != "chat" || sender.calls[0].Target.ID != "oc_group" {
+		t.Fatalf("target = %#v, want chat oc_group", sender.calls[0].Target)
+	}
+	if len(sender.calls[0].Payload.Mentions) != 1 || sender.calls[0].Payload.Mentions[0].ID != "ou_1" {
+		t.Fatalf("mentions = %#v, want ou_1", sender.calls[0].Payload.Mentions)
 	}
 }
 

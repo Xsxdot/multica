@@ -53,8 +53,10 @@ func (s *FailureRecordingCardSender) recordFailure(externalUserID string, card p
 		return
 	}
 	payload, err := json.Marshal(RetryPayload{
-		Title: card.Title,
-		Body:  card.Body,
+		Title:      card.Title,
+		Body:       card.Body,
+		TargetType: string(card.Target.Type),
+		Mentions:   card.Mentions,
 	})
 	if err != nil {
 		slog.Error("outbound aggregator: marshal retry payload", "external_user_id", externalUserID, "error", err)
@@ -69,7 +71,7 @@ func (s *FailureRecordingCardSender) recordFailure(externalUserID string, card p
 		ConnectionID:         firstNonEmpty(meta.ConnectionID, s.channel.Name()),
 		EventKind:            eventKind,
 		TargetUserID:         meta.TargetUserID,
-		TargetExternalUserID: pgtype.Text{String: externalUserID, Valid: externalUserID != ""},
+		TargetExternalUserID: pgtype.Text{String: card.Target.ID, Valid: card.Target.ID != ""},
 		Payload:              payload,
 		MaxAttempts:          3,
 	}); err != nil {

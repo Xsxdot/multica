@@ -8,13 +8,11 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
 	"github.com/multica-ai/multica/server/internal/channel/port"
-	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 	"github.com/multica-ai/multica/server/internal/events"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -23,6 +21,8 @@ import (
 var (
 	// ErrNotBound is returned when a user has no channel_user_binding row.
 	ErrNotBound = errors.New("outbound: user not bound to channel")
+	// ErrNoPrimaryChat is returned when a workspace has no primary chat binding.
+	ErrNoPrimaryChat = errors.New("outbound: workspace has no primary channel chat")
 )
 
 // BindingStore abstracts the channel_user_binding lookup so the subscriber
@@ -35,6 +35,10 @@ type BindingStore interface {
 	// ResolveExternalID returns the external_user_id for the given
 	// (provider, user_id) pair. Returns ErrNotBound if no binding exists.
 	ResolveExternalID(ctx context.Context, provider, userID string) (string, error)
+
+	// FindPrimaryChatID returns the external chat id for the primary group
+	// bound to (connection_id, workspace_id).
+	FindPrimaryChatID(ctx context.Context, connectionID string, workspaceID pgtype.UUID) (string, error)
 }
 
 // FailureRecorder records retryable outbound send failures. *db.Queries
@@ -94,6 +98,22 @@ func (s *DBBindingStore) ResolveExternalID(ctx context.Context, connectionID, us
 	return extID, nil
 }
 
+// FindPrimaryChatID looks up the primary external chat for a workspace and channel connection.
+func (s *DBBindingStore) FindPrimaryChatID(ctx context.Context, connectionID string, workspaceID pgtype.UUID) (string, error) {
+	var chatID string
+	err := s.pool.QueryRow(ctx,
+		`SELECT external_chat_id FROM channel_chat_binding WHERE connection_id = $1 AND workspace_id = $2 AND is_primary = TRUE`,
+		connectionID, workspaceID,
+	).Scan(&chatID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNoPrimaryChat
+	}
+	if err != nil {
+		return "", fmt.Errorf("find primary chat id: %w", err)
+	}
+	return chatID, nil
+}
+
 // Subscriber subscribes to events.Bus and forwards qualifying events to
 // the channel adapter as card messages. It implements the outbound
 // notification pipeline for M2 T13.
@@ -113,7 +133,6 @@ type Subscriber struct {
 	aggregator  *Aggregator
 	failures    FailureRecorder
 	outbox      NotificationEnqueuer
-	replyCtx    replyctx.Store
 	activeFunc  func() bool
 
 	mu            sync.Mutex
@@ -196,10 +215,6 @@ func (s *Subscriber) SetNotificationEnqueuer(outbox NotificationEnqueuer) {
 	s.outbox = outbox
 }
 
-func (s *Subscriber) SetReplyContextStore(store replyctx.Store) {
-	s.replyCtx = store
-}
-
 // SetActiveFunc gates direct outbound delivery. Durable outbox enqueue is not
 // gated so every API node can persist notifications; workers/senders decide
 // which process is allowed to talk to the external channel.
@@ -264,6 +279,7 @@ func (s *Subscriber) handleCommentCreated(e events.Event) {
 	}
 
 	issueTitle, _ := payload["issue_title"].(string)
+	issueIdentifier, _ := payload["issue_identifier"].(string)
 
 	commentObj, ok := payload["comment"].(map[string]any)
 	if !ok {
@@ -277,16 +293,17 @@ func (s *Subscriber) handleCommentCreated(e events.Event) {
 			continue // don't notify self
 		}
 		s.sendToUser(e.WorkspaceID, userID, "comment_mention", issueTitle, commentContent, notificationContext{
-			WorkspaceID: e.WorkspaceID,
-			IssueID:     issueID,
-			IssueTitle:  issueTitle,
-			Replyable:   issueID != "",
+			WorkspaceID:     e.WorkspaceID,
+			IssueID:         issueID,
+			IssueIdentifier: issueIdentifier,
+			IssueTitle:      issueTitle,
+			Replyable:       issueID != "",
 		})
 	}
 }
 
 // handleInboxNew processes inbox:new events.
-// Sends a card to the target user.
+// Sends a card to the workspace's primary group and mentions the target user.
 func (s *Subscriber) handleInboxNew(e events.Event) {
 	if !s.shouldHandleEvent() {
 		return
@@ -355,11 +372,13 @@ func (s *Subscriber) handleSubscriberAdded(e events.Event) {
 	issueTitle, _ := payload["issue_title"].(string)
 
 	issueID, _ := payload["issue_id"].(string)
+	issueIdentifier, _ := payload["issue_identifier"].(string)
 	s.sendToUser(e.WorkspaceID, subscriberID, "issue_mention", issueTitle, "", notificationContext{
-		WorkspaceID: e.WorkspaceID,
-		IssueID:     issueID,
-		IssueTitle:  issueTitle,
-		Replyable:   issueID != "",
+		WorkspaceID:     e.WorkspaceID,
+		IssueID:         issueID,
+		IssueIdentifier: issueIdentifier,
+		IssueTitle:      issueTitle,
+		Replyable:       issueID != "",
 	})
 }
 
@@ -443,8 +462,8 @@ func statusLabel(status string) string {
 	}
 }
 
-// sendToUser resolves the user's binding, checks preferences, and
-// sends a card message.
+// sendToUser checks the target user's preferences, resolves the workspace's
+// primary group, and sends a group card that mentions the user when possible.
 type notificationContext struct {
 	WorkspaceID     string
 	IssueID         string
@@ -484,42 +503,60 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 		return // muted
 	}
 
-	// R5: Inline ResolveExternalID (removed wrapper).
-	externalUserID, err := s.bindings.ResolveExternalID(ctx, connectionID, userID)
+	targetChatID, err := s.bindings.FindPrimaryChatID(ctx, connectionID, wsUUID)
 	if err != nil {
-		if errors.Is(err, ErrNotBound) {
-			channelmetrics.M.RecordOutboundCard(providerName, eventKind, "unbound")
-			return // TC-out-2: unbound -> drop silently
+		result := "primary_chat_lookup"
+		if errors.Is(err, ErrNoPrimaryChat) {
+			result = "no_primary_chat"
 		}
-		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "binding_lookup", false)
-		slog.Error("outbound: resolve binding", "user_id", userID, "error", err)
+		channelmetrics.M.RecordOutboundCard(providerName, eventKind, result)
+		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, result, false)
+		slog.Error("outbound: resolve primary chat",
+			"workspace_id", workspaceID,
+			"user_id", userID,
+			"event_kind", eventKind,
+			"error", err,
+		)
 		return
 	}
 
-	s.rememberReplyContext(ctx, connectionID, externalUserID, wsUUID, title, ctxMeta)
+	mentionExternalUserID, err := s.bindings.ResolveExternalID(ctx, connectionID, userID)
+	if err != nil {
+		if errors.Is(err, ErrNotBound) {
+			channelmetrics.M.RecordOutboundCard(providerName, eventKind, "unbound_mention")
+		} else {
+			channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "binding_lookup", false)
+			slog.Error("outbound: resolve binding", "user_id", userID, "error", err)
+			return
+		}
+	}
 
 	card := port.OutboundCardMessage{
-		Target: port.TargetUser(externalUserID),
-		ChatID: externalUserID,
-		Title:  title,
-		Body:   body,
+		Target:   port.TargetChat(targetChatID),
+		ChatID:   targetChatID,
+		Title:    notificationTitle(title, ctxMeta),
+		Body:     body,
+		Mentions: mentionList(mentionExternalUserID),
 	}
 
 	if s.outbox != nil {
 		if err := s.outbox.EnqueueNotification(ctx, NotificationEnqueueRequest{
-			Provider:             providerName,
-			ConnectionID:         connectionID,
-			EventKind:            eventKind,
-			TargetUserID:         userUUID,
-			TargetExternalUserID: externalUserID,
-			Title:                title,
-			Body:                 body,
-			WorkspaceID:          wsUUID,
-			IssueID:              parseOptionalUUID(ctxMeta.IssueID),
-			IssueIdentifier:      ctxMeta.IssueIdentifier,
-			IssueTitle:           firstNonEmpty(ctxMeta.IssueTitle, title),
-			InboxItemID:          parseOptionalUUID(ctxMeta.InboxItemID),
-			Replyable:            ctxMeta.Replyable,
+			Provider:              providerName,
+			ConnectionID:          connectionID,
+			EventKind:             eventKind,
+			TargetUserID:          userUUID,
+			TargetType:            string(port.OutboundTargetChat),
+			TargetChatID:          targetChatID,
+			MentionExternalUserID: mentionExternalUserID,
+			TargetExternalUserID:  mentionExternalUserID,
+			Title:                 card.Title,
+			Body:                  body,
+			WorkspaceID:           wsUUID,
+			IssueID:               parseOptionalUUID(ctxMeta.IssueID),
+			IssueIdentifier:       ctxMeta.IssueIdentifier,
+			IssueTitle:            firstNonEmpty(ctxMeta.IssueTitle, title),
+			InboxItemID:           parseOptionalUUID(ctxMeta.InboxItemID),
+			Replyable:             ctxMeta.Replyable,
 		}); err != nil {
 			channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "outbox_enqueue", true)
 			slog.Error("outbound: enqueue notification", "user_id", userID, "error", err)
@@ -536,7 +573,7 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 	}
 
 	if s.aggregator != nil {
-		s.aggregator.AddWithMeta(externalUserID, card, AggregationMeta{
+		s.aggregator.AddWithMeta(targetChatID, card, AggregationMeta{
 			Provider:     providerName,
 			ConnectionID: connectionID,
 			EventKind:    eventKind,
@@ -551,7 +588,7 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 		channelmetrics.M.RecordOutboundCard(providerName, eventKind, "error")
 		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "send", result.Retryable)
 		if result.Retryable {
-			s.recordFailure(ctx, providerName, connectionID, eventKind, userUUID, externalUserID, card, err)
+			s.recordFailure(ctx, providerName, connectionID, eventKind, userUUID, card, err)
 		}
 		slog.Error("outbound: send card", "user_id", userID, "error", err)
 		return
@@ -565,40 +602,23 @@ func (s *Subscriber) sendToUser(workspaceID, userID, eventKind, title, body stri
 	)
 }
 
-func (s *Subscriber) rememberReplyContext(ctx context.Context, connectionID, externalUserID string, workspaceID pgtype.UUID, title string, meta notificationContext) {
-	if s.replyCtx == nil || !meta.Replyable || strings.TrimSpace(meta.IssueID) == "" {
-		return
-	}
-	issueID := parseOptionalUUID(meta.IssueID)
-	if !issueID.Valid {
-		return
-	}
-	if err := s.replyCtx.Upsert(ctx, replyctx.Context{
-		ConnectionID:    connectionID,
-		ExternalUserID:  externalUserID,
-		WorkspaceID:     workspaceID,
-		IssueID:         issueID,
-		IssueIdentifier: meta.IssueIdentifier,
-		IssueTitle:      firstNonEmpty(meta.IssueTitle, title),
-		InboxItemID:     parseOptionalUUID(meta.InboxItemID),
-		ExpiresAt:       time.Now().Add(24 * time.Hour),
-	}); err != nil {
-		channelmetrics.M.RecordOutboundFailure(channelProviderName(s.channel), "reply_context", "upsert", true)
-		slog.Error("outbound: remember reply context", "external_user_id", externalUserID, "error", err)
-	}
-}
-
 func notificationContextFromInboxItem(workspaceID, title string, item map[string]any) notificationContext {
 	if item == nil {
 		return notificationContext{WorkspaceID: workspaceID, IssueTitle: title}
 	}
 	issueID := stringFromAny(item["issue_id"])
 	inboxID := stringFromAny(item["id"])
+	issueIdentifier := firstNonEmpty(
+		stringFromAny(item["issue_identifier"]),
+		stringFromAny(item["identifier"]),
+		stringFromDetails(item["details"], "identifier"),
+	)
 	return notificationContext{
-		WorkspaceID: workspaceID,
-		IssueID:     issueID,
-		IssueTitle:  firstNonEmpty(stringFromAny(item["title"]), title),
-		InboxItemID: inboxID,
+		WorkspaceID:     workspaceID,
+		IssueID:         issueID,
+		IssueIdentifier: issueIdentifier,
+		IssueTitle:      firstNonEmpty(stringFromAny(item["title"]), title),
+		InboxItemID:     inboxID,
 	}
 }
 
@@ -634,6 +654,19 @@ func stringFromAny(v any) string {
 	default:
 		return ""
 	}
+}
+
+func stringFromDetails(v any, key string) string {
+	switch x := v.(type) {
+	case map[string]any:
+		return stringFromAny(x[key])
+	case json.RawMessage:
+		var m map[string]any
+		if err := json.Unmarshal(x, &m); err == nil {
+			return stringFromAny(m[key])
+		}
+	}
+	return ""
 }
 
 // mapInboxTypeToEventKind maps inbox notification types to the
@@ -672,13 +705,34 @@ func extractStringSlice(v any) []string {
 	return nil
 }
 
-func (s *Subscriber) recordFailure(ctx context.Context, providerName, connectionID, eventKind string, targetUserID pgtype.UUID, externalUserID string, card port.OutboundCardMessage, sendErr error) {
+func mentionList(externalUserID string) []port.OutboundMention {
+	if strings.TrimSpace(externalUserID) == "" {
+		return nil
+	}
+	return []port.OutboundMention{port.MentionUser(externalUserID, "")}
+}
+
+func notificationTitle(title string, meta notificationContext) string {
+	identifier := strings.TrimSpace(meta.IssueIdentifier)
+	title = strings.TrimSpace(title)
+	if identifier == "" {
+		return title
+	}
+	if title == "" || strings.Contains(title, identifier) {
+		return firstNonEmpty(title, identifier)
+	}
+	return fmt.Sprintf("[%s] %s", identifier, title)
+}
+
+func (s *Subscriber) recordFailure(ctx context.Context, providerName, connectionID, eventKind string, targetUserID pgtype.UUID, card port.OutboundCardMessage, sendErr error) {
 	if s.failures == nil {
 		return
 	}
 	payload, err := json.Marshal(RetryPayload{
-		Title: card.Title,
-		Body:  card.Body,
+		Title:      card.Title,
+		Body:       card.Body,
+		TargetType: string(card.Target.Type),
+		Mentions:   card.Mentions,
 	})
 	if err != nil {
 		channelmetrics.M.RecordOutboundFailure(providerName, eventKind, "retry_payload_marshal", true)
@@ -690,7 +744,7 @@ func (s *Subscriber) recordFailure(ctx context.Context, providerName, connection
 		ConnectionID:         connectionID,
 		EventKind:            eventKind,
 		TargetUserID:         targetUserID,
-		TargetExternalUserID: pgtype.Text{String: externalUserID, Valid: externalUserID != ""},
+		TargetExternalUserID: pgtype.Text{String: card.Target.ID, Valid: card.Target.ID != ""},
 		Payload:              payload,
 		MaxAttempts:          3,
 	}); err != nil {

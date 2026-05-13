@@ -58,7 +58,7 @@ var replyTemplates = map[AuthzErrCode]string{
 	AuthzIdentityUnresolved: "[IDENTITY_UNRESOLVED] 无法识别发送者身份，请稍后重试。",
 	AuthzNoPermission:       "[NO_PERMISSION] 你没有权限修改此 Issue 的状态。",
 	AuthzUnsupportedDelete:  "[UNSUPPORTED_DELETE] 删除操作不支持在群内执行，请回 Web 端操作。",
-	AuthzPrivateUnsupported: "[PRIVATE_UNSUPPORTED] 私聊暂只用于绑定和接收通知，请在已绑定的群里使用指令。",
+	AuthzPrivateUnsupported: "[PRIVATE_UNSUPPORTED] 私聊仅用于账号绑定和系统提示，请在已绑定群里处理业务。",
 }
 
 // AuthzError is returned by the authz step when the event is rejected.
@@ -159,9 +159,9 @@ func (*authzStep) Name() string { return "authz" }
 
 func (s *authzStep) Run(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
 	if evt.ChatType == port.ChatTypeDirect {
-		// Direct chats are used for notification replies. Dispatch resolves
-		// the concrete issue through channel_reply_context; commands that still
-		// need a chat workspace binding fail in their handler.
+		// Production direct chats are stopped by direct-chat-policy before
+		// authz. Keep this bypass as defence against duplicate rejection if a
+		// test or custom pipeline still invokes authz directly.
 		return evt, DecisionContinue, nil
 	}
 

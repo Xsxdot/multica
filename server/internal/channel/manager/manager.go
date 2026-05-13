@@ -25,7 +25,6 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel/outbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/multica-ai/multica/server/internal/channel/provider"
-	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 	"github.com/multica-ai/multica/server/internal/events"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -645,7 +644,6 @@ func (m *Manager) startOutbound(cfg provider.ConnectionConfig, ready *atomic.Boo
 		"",
 	)
 	sub.SetFailureRecorder(m.cfg.Queries)
-	sub.SetReplyContextStore(replyctx.NewDBStore(m.cfg.Pool))
 	if m.cfg.NotificationOutbox {
 		sub.SetNotificationEnqueuer(notificationStore)
 	}
@@ -812,16 +810,17 @@ func newRegistryRetrySender(registry *channel.Registry) *registryRetrySender {
 	return &registryRetrySender{registry: registry}
 }
 
-func (s *registryRetrySender) SendCard(ctx context.Context, connectionID string, externalUserID string, payload outbound.RetryPayload) error {
+func (s *registryRetrySender) SendCard(ctx context.Context, connectionID string, target port.OutboundTarget, payload outbound.RetryPayload) error {
 	ch, err := s.registry.Get(connectionID)
 	if err != nil {
 		return outbound.WrapRetryable(fmt.Errorf("retry sender: get %s: %w", connectionID, err))
 	}
 	result, err := ch.SendCard(ctx, port.OutboundCardMessage{
-		Target: port.TargetUser(externalUserID),
-		ChatID: externalUserID,
-		Title:  payload.Title,
-		Body:   payload.Body,
+		Target:   target,
+		ChatID:   target.ID,
+		Title:    payload.Title,
+		Body:     payload.Body,
+		Mentions: payload.Mentions,
 	})
 	if err != nil && result.Retryable {
 		return outbound.WrapRetryable(err)

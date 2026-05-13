@@ -1588,6 +1588,8 @@ func (s *TaskService) createAgentComment(ctx context.Context, issueID, agentID p
 	if err != nil {
 		return
 	}
+	prefix := s.getIssuePrefix(issue.WorkspaceID)
+	identifier := fmt.Sprintf("%s-%d", prefix, issue.Number)
 	s.Bus.Publish(events.Event{
 		Type:        protocol.EventCommentCreated,
 		WorkspaceID: util.UUIDToString(issue.WorkspaceID),
@@ -1604,8 +1606,9 @@ func (s *TaskService) createAgentComment(ctx context.Context, issueID, agentID p
 				"parent_id":   util.UUIDToPtr(comment.ParentID),
 				"created_at":  comment.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
 			},
-			"issue_title":  issue.Title,
-			"issue_status": issue.Status,
+			"issue_identifier": identifier,
+			"issue_title":      issue.Title,
+			"issue_status":     issue.Status,
 		},
 	})
 }
@@ -1771,16 +1774,20 @@ func (s *TaskService) notifyQuickCreateCompleted(ctx context.Context, task db.Ag
 			"error", err,
 		)
 	} else {
+		prefix := s.getIssuePrefix(workspaceID)
+		identifier := fmt.Sprintf("%s-%d", prefix, issue.Number)
 		s.Bus.Publish(events.Event{
 			Type:        protocol.EventSubscriberAdded,
 			WorkspaceID: qc.WorkspaceID,
 			ActorType:   "agent",
 			ActorID:     util.UUIDToString(task.AgentID),
 			Payload: map[string]any{
-				"issue_id":  util.UUIDToString(issue.ID),
-				"user_type": "member",
-				"user_id":   qc.RequesterID,
-				"reason":    "creator",
+				"issue_id":         util.UUIDToString(issue.ID),
+				"issue_identifier": identifier,
+				"issue_title":      issue.Title,
+				"user_type":        "member",
+				"user_id":          qc.RequesterID,
+				"reason":           "creator",
 			},
 		})
 	}

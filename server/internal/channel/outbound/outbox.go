@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
+	"github.com/multica-ai/multica/server/internal/channel/port"
 )
 
 const (
@@ -21,19 +22,22 @@ const (
 )
 
 type NotificationEnqueueRequest struct {
-	Provider             string
-	ConnectionID         string
-	EventKind            string
-	TargetUserID         pgtype.UUID
-	TargetExternalUserID string
-	Title                string
-	Body                 string
-	WorkspaceID          pgtype.UUID
-	IssueID              pgtype.UUID
-	IssueIdentifier      string
-	IssueTitle           string
-	InboxItemID          pgtype.UUID
-	Replyable            bool
+	Provider              string
+	ConnectionID          string
+	EventKind             string
+	TargetUserID          pgtype.UUID
+	TargetExternalUserID  string
+	TargetType            string
+	TargetChatID          string
+	MentionExternalUserID string
+	Title                 string
+	Body                  string
+	WorkspaceID           pgtype.UUID
+	IssueID               pgtype.UUID
+	IssueIdentifier       string
+	IssueTitle            string
+	InboxItemID           pgtype.UUID
+	Replyable             bool
 }
 
 type NotificationEnqueuer interface {
@@ -41,22 +45,25 @@ type NotificationEnqueuer interface {
 }
 
 type OutboxNotification struct {
-	ID                   pgtype.UUID
-	Provider             string
-	ConnectionID         string
-	EventKind            string
-	TargetUserID         pgtype.UUID
-	TargetExternalUserID string
-	Title                string
-	Body                 string
-	WorkspaceID          pgtype.UUID
-	IssueID              pgtype.UUID
-	IssueIdentifier      string
-	IssueTitle           string
-	InboxItemID          pgtype.UUID
-	Replyable            bool
-	Attempts             int32
-	MaxAttempts          int32
+	ID                    pgtype.UUID
+	Provider              string
+	ConnectionID          string
+	EventKind             string
+	TargetUserID          pgtype.UUID
+	TargetExternalUserID  string
+	TargetType            string
+	TargetChatID          string
+	MentionExternalUserID string
+	Title                 string
+	Body                  string
+	WorkspaceID           pgtype.UUID
+	IssueID               pgtype.UUID
+	IssueIdentifier       string
+	IssueTitle            string
+	InboxItemID           pgtype.UUID
+	Replyable             bool
+	Attempts              int32
+	MaxAttempts           int32
 }
 
 type outboxDB interface {
@@ -74,10 +81,21 @@ func NewDBNotificationStore(db outboxDB) *DBNotificationStore {
 }
 
 func (s *DBNotificationStore) EnqueueNotification(ctx context.Context, req NotificationEnqueueRequest) error {
+	targetType := strings.TrimSpace(req.TargetType)
+	if targetType == "" {
+		targetType = string(port.OutboundTargetUser)
+	}
 	if strings.TrimSpace(req.Provider) == "" || strings.TrimSpace(req.ConnectionID) == "" ||
 		strings.TrimSpace(req.EventKind) == "" ||
-		strings.TrimSpace(req.TargetExternalUserID) == "" || !req.TargetUserID.Valid {
+		!req.TargetUserID.Valid {
 		return errors.New("outbox: invalid notification enqueue request")
+	}
+	if targetType == string(port.OutboundTargetChat) {
+		if strings.TrimSpace(req.TargetChatID) == "" {
+			return errors.New("outbox: invalid chat notification enqueue request")
+		}
+	} else if strings.TrimSpace(req.TargetExternalUserID) == "" {
+		return errors.New("outbox: invalid user notification enqueue request")
 	}
 	window := s.window
 	if window <= 0 {
@@ -86,16 +104,20 @@ func (s *DBNotificationStore) EnqueueNotification(ctx context.Context, req Notif
 	const q = `
 INSERT INTO channel_outbound_notification (
     provider, connection_id, event_kind, target_user_id, target_external_user_id,
+    target_type, target_chat_id, mention_external_user_id,
     title, body, workspace_id, issue_id, issue_identifier, issue_title, inbox_item_id,
     replyable, aggregation_due_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now() + $14::interval)
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now() + $17::interval)
 `
 	_, err := s.db.Exec(ctx, q,
 		req.Provider,
 		req.ConnectionID,
 		req.EventKind,
 		req.TargetUserID,
-		req.TargetExternalUserID,
+		nullableString(req.TargetExternalUserID),
+		targetType,
+		strings.TrimSpace(req.TargetChatID),
+		strings.TrimSpace(req.MentionExternalUserID),
 		req.Title,
 		req.Body,
 		nullableUUID(req.WorkspaceID),
@@ -129,7 +151,9 @@ WHERE id IN (
     LIMIT $1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
+RETURNING id, provider, connection_id, event_kind, target_user_id,
+          COALESCE(target_external_user_id, '') AS target_external_user_id,
+          target_type, target_chat_id, mention_external_user_id,
           title, body, workspace_id, issue_id, issue_identifier, issue_title, inbox_item_id,
           replyable, attempts, max_attempts
 `
@@ -149,7 +173,9 @@ WHERE id IN (
     LIMIT $1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
+RETURNING id, provider, connection_id, event_kind, target_user_id,
+          COALESCE(target_external_user_id, '') AS target_external_user_id,
+          target_type, target_chat_id, mention_external_user_id,
           title, body, workspace_id, issue_id, issue_identifier, issue_title, inbox_item_id,
           replyable, attempts, max_attempts
 `
@@ -175,7 +201,9 @@ WHERE id IN (
     LIMIT $1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
+RETURNING id, provider, connection_id, event_kind, target_user_id,
+          COALESCE(target_external_user_id, '') AS target_external_user_id,
+          target_type, target_chat_id, mention_external_user_id,
           title, body, workspace_id, issue_id, issue_identifier, issue_title, inbox_item_id,
           replyable, attempts, max_attempts
 `
@@ -194,7 +222,9 @@ WHERE id IN (
     LIMIT $1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, provider, connection_id, event_kind, target_user_id, target_external_user_id,
+RETURNING id, provider, connection_id, event_kind, target_user_id,
+          COALESCE(target_external_user_id, '') AS target_external_user_id,
+          target_type, target_chat_id, mention_external_user_id,
           title, body, workspace_id, issue_id, issue_identifier, issue_title, inbox_item_id,
           replyable, attempts, max_attempts
 `
@@ -218,6 +248,9 @@ func (s *DBNotificationStore) queryNotifications(ctx context.Context, q string, 
 			&n.EventKind,
 			&n.TargetUserID,
 			&n.TargetExternalUserID,
+			&n.TargetType,
+			&n.TargetChatID,
+			&n.MentionExternalUserID,
 			&n.Title,
 			&n.Body,
 			&n.WorkspaceID,
@@ -398,29 +431,32 @@ func normalizeConnectionIDs(ids []string) []string {
 }
 
 type notificationGroup struct {
-	provider       string
-	connectionID   string
-	eventKind      string
-	externalUserID string
-	targetUserID   pgtype.UUID
-	items          []OutboxNotification
+	provider      string
+	connectionID  string
+	eventKind     string
+	target        port.OutboundTarget
+	mentionUserID string
+	targetUserID  pgtype.UUID
+	items         []OutboxNotification
 }
 
 func groupNotifications(rows []OutboxNotification) []notificationGroup {
 	byKey := map[string]*notificationGroup{}
 	for _, n := range rows {
-		key := n.ConnectionID + "\x00" + n.EventKind + "\x00" + n.TargetExternalUserID + "\x00" + uuidStr(n.TargetUserID)
-		if n.Replyable {
-			key += "\x00" + uuidStr(n.ID)
+		target := notificationTarget(n)
+		if target.ID == "" {
+			continue
 		}
+		key := n.ConnectionID + "\x00" + n.EventKind + "\x00" + string(target.Type) + "\x00" + target.ID + "\x00" + uuidStr(n.TargetUserID)
 		g := byKey[key]
 		if g == nil {
 			g = &notificationGroup{
-				provider:       n.Provider,
-				connectionID:   n.ConnectionID,
-				eventKind:      n.EventKind,
-				externalUserID: n.TargetExternalUserID,
-				targetUserID:   n.TargetUserID,
+				provider:      n.Provider,
+				connectionID:  n.ConnectionID,
+				eventKind:     n.EventKind,
+				target:        target,
+				mentionUserID: strings.TrimSpace(n.MentionExternalUserID),
+				targetUserID:  n.TargetUserID,
 			}
 			byKey[key] = g
 		}
@@ -433,6 +469,15 @@ func groupNotifications(rows []OutboxNotification) []notificationGroup {
 	return out
 }
 
+func notificationTarget(n OutboxNotification) port.OutboundTarget {
+	switch n.TargetType {
+	case string(port.OutboundTargetChat):
+		return port.TargetChat(strings.TrimSpace(n.TargetChatID))
+	default:
+		return port.TargetUser(strings.TrimSpace(n.TargetExternalUserID))
+	}
+}
+
 func (w *OutboxWorker) processGroup(ctx context.Context, g notificationGroup) {
 	if len(g.items) == 0 {
 		return
@@ -442,14 +487,15 @@ func (w *OutboxWorker) processGroup(ctx context.Context, g notificationGroup) {
 		ids = append(ids, item.ID)
 	}
 	payload := RetryPayload{
-		Title: fmt.Sprintf("你有 %d 条新通知", len(g.items)),
-		Body:  buildOutboxBody(g.items),
+		Title:    fmt.Sprintf("Multica 有 %d 条新通知", len(g.items)),
+		Body:     buildOutboxBody(g.items),
+		Mentions: mentionList(g.mentionUserID),
 	}
 	if len(g.items) == 1 {
 		payload.Title = g.items[0].Title
 		payload.Body = g.items[0].Body
 	}
-	err := w.sender.SendCard(ctx, g.connectionID, g.externalUserID, payload)
+	err := w.sender.SendCard(ctx, g.connectionID, g.target, payload)
 	if err == nil {
 		channelmetrics.M.RecordOutboundOutbox(g.provider, "sent", len(g.items))
 		if markErr := w.store.MarkSent(ctx, ids); markErr != nil {
@@ -520,4 +566,12 @@ func nullableUUID(id pgtype.UUID) any {
 		return nil
 	}
 	return id
+}
+
+func nullableString(s string) any {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	return s
 }

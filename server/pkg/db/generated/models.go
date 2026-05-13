@@ -308,28 +308,31 @@ type ChannelOutboundFailure struct {
 }
 
 type ChannelOutboundNotification struct {
-	ID                   pgtype.UUID        `json:"id"`
-	Provider             string             `json:"provider"`
-	EventKind            string             `json:"event_kind"`
-	TargetUserID         pgtype.UUID        `json:"target_user_id"`
-	TargetExternalUserID string             `json:"target_external_user_id"`
-	Title                string             `json:"title"`
-	Body                 string             `json:"body"`
-	Status               string             `json:"status"`
-	Attempts             int32              `json:"attempts"`
-	MaxAttempts          int32              `json:"max_attempts"`
-	AggregationDueAt     pgtype.Timestamptz `json:"aggregation_due_at"`
-	NextAttemptAt        pgtype.Timestamptz `json:"next_attempt_at"`
-	LastError            pgtype.Text        `json:"last_error"`
-	CreatedAt            pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
-	ConnectionID         string             `json:"connection_id"`
-	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
-	IssueID              pgtype.UUID        `json:"issue_id"`
-	IssueIdentifier      string             `json:"issue_identifier"`
-	IssueTitle           string             `json:"issue_title"`
-	InboxItemID          pgtype.UUID        `json:"inbox_item_id"`
-	Replyable            bool               `json:"replyable"`
+	ID                    pgtype.UUID        `json:"id"`
+	Provider              string             `json:"provider"`
+	EventKind             string             `json:"event_kind"`
+	TargetUserID          pgtype.UUID        `json:"target_user_id"`
+	TargetExternalUserID  string             `json:"target_external_user_id"`
+	Title                 string             `json:"title"`
+	Body                  string             `json:"body"`
+	Status                string             `json:"status"`
+	Attempts              int32              `json:"attempts"`
+	MaxAttempts           int32              `json:"max_attempts"`
+	AggregationDueAt      pgtype.Timestamptz `json:"aggregation_due_at"`
+	NextAttemptAt         pgtype.Timestamptz `json:"next_attempt_at"`
+	LastError             pgtype.Text        `json:"last_error"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+	ConnectionID          string             `json:"connection_id"`
+	WorkspaceID           pgtype.UUID        `json:"workspace_id"`
+	IssueID               pgtype.UUID        `json:"issue_id"`
+	IssueIdentifier       string             `json:"issue_identifier"`
+	IssueTitle            string             `json:"issue_title"`
+	InboxItemID           pgtype.UUID        `json:"inbox_item_id"`
+	Replyable             bool               `json:"replyable"`
+	TargetType            string             `json:"target_type"`
+	TargetChatID          string             `json:"target_chat_id"`
+	MentionExternalUserID string             `json:"mention_external_user_id"`
 }
 
 type ChannelReplyContext struct {

@@ -11,7 +11,6 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/port"
-	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -70,6 +69,7 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 		inbound.NewNormalizeStep(),
 		inbound.NewUserIdentityBindStep(pool, replySink, issuer),
 		inbound.NewChatBindCommandStep(opt.Gateway, replySink, issuer, bindings),
+		inbound.NewDirectChatPolicyStep(replySink),
 		inbound.NewChatSettingsFilterStep(inbound.NewDBInboundEventStore(pool)),
 		inbound.NewSlashStep(inbound.SlashConfig{ReplySink: replySink}),
 	)
@@ -108,7 +108,6 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 			ProjectValidator:  inbound.NewDBProjectWorkspaceValidator(pool),
 			DispatchStore:     inbound.NewDBDispatchCompletionStore(pool),
 			ProposalStore:     inbound.NewDBActionProposalStore(pool),
-			ReplyContext:      replyctx.NewDBStore(pool),
 		}),
 		inbound.NewReplyStep(),
 	)
@@ -123,7 +122,6 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 		TurnPlanner:   turnPlannerFromAsync(asyncChatIntent),
 		ChannelTurn:   channelTurnFromAsync(asyncChatIntent),
 		DispatchStore: inbound.NewDBDispatchCompletionStore(pool),
-		ReplyContext:  replyctx.NewDBStore(pool),
 	}
 }
 

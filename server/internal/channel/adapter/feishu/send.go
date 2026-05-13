@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	feishucard "github.com/multica-ai/multica/server/internal/channel/adapter/feishu/card"
 	"github.com/multica-ai/multica/server/internal/channel/port"
@@ -89,7 +90,7 @@ func (a *Adapter) sendCard(ctx context.Context, msg port.OutboundCardMessage) (p
 	if receiveID == "" {
 		return port.SendResult{Retryable: false}, errors.New("feishu: OutboundCardMessage target is empty")
 	}
-	content, err := renderCard(msg.Title, msg.Body, msg.Actions)
+	content, err := renderCard(msg.Title, msg.Body, msg.Actions, msg.Mentions)
 	if err != nil {
 		return port.SendResult{Retryable: false}, fmt.Errorf("feishu: render card: %w", err)
 	}
@@ -109,8 +110,11 @@ func (a *Adapter) sendCard(ctx context.Context, msg port.OutboundCardMessage) (p
 	}, nil
 }
 
-func renderCard(title, body string, actions []port.OutboundAction) (string, error) {
+func renderCard(title, body string, actions []port.OutboundAction, mentions []port.OutboundMention) (string, error) {
 	card := feishucard.NewCard(title, "blue")
+	if mentionLine := renderMentionLine(mentions); mentionLine != "" {
+		card.AddMarkdown(mentionLine)
+	}
 	if body != "" {
 		card.AddMarkdown(body)
 	}
@@ -121,6 +125,30 @@ func renderCard(title, body string, actions []port.OutboundAction) (string, erro
 		card.AddButton(action.Label, action.URL)
 	}
 	return card.Render()
+}
+
+func renderMentionLine(mentions []port.OutboundMention) string {
+	var b strings.Builder
+	for _, mention := range mentions {
+		if mention.Type != port.OutboundTargetUser || strings.TrimSpace(mention.ID) == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString("<at id=")
+		b.WriteString(sanitizeMentionID(mention.ID))
+		b.WriteString("></at>")
+	}
+	return b.String()
+}
+
+func sanitizeMentionID(id string) string {
+	id = strings.TrimSpace(id)
+	id = strings.ReplaceAll(id, ">", "")
+	id = strings.ReplaceAll(id, "<", "")
+	id = strings.ReplaceAll(id, " ", "")
+	return id
 }
 
 func resolveReceiveID(target port.OutboundTarget, legacyChatID string) (string, string) {

@@ -45,15 +45,15 @@ func TestSubscriber_StatusChange_InReview_SendsCard(t *testing.T) {
 		ActorID:     "actor-1",
 		Payload: map[string]any{
 			"issue": map[string]any{
-				"id":             "issue-1",
-				"workspace_id":   "00000000-0000-0000-0000-000000000100",
-				"identifier":     "STA-1",
-				"title":          "Test Issue",
-				"status":         "in_review",
-				"creator_type":   "member",
-				"creator_id":     "00000000-0000-0000-0000-000000000001",
-				"assignee_type":  "member",
-				"assignee_id":    userID,
+				"id":            "issue-1",
+				"workspace_id":  "00000000-0000-0000-0000-000000000100",
+				"identifier":    "STA-1",
+				"title":         "Test Issue",
+				"status":        "in_review",
+				"creator_type":  "member",
+				"creator_id":    "00000000-0000-0000-0000-000000000001",
+				"assignee_type": "member",
+				"assignee_id":   userID,
 			},
 			"status_changed": true,
 			"prev_status":    "todo",
@@ -66,8 +66,11 @@ func TestSubscriber_StatusChange_InReview_SendsCard(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 card for in_review, got %d", len(msgs))
 	}
-	if msgs[0].ChatID != "ext-user-1" {
-		t.Errorf("ChatID = %q, want ext-user-1", msgs[0].ChatID)
+	if msgs[0].ChatID != "group-chat-1" {
+		t.Errorf("ChatID = %q, want group-chat-1", msgs[0].ChatID)
+	}
+	if len(msgs[0].Mentions) != 1 || msgs[0].Mentions[0].ID != "ext-user-1" {
+		t.Errorf("Mentions = %#v, want ext-user-1", msgs[0].Mentions)
 	}
 	body := msgs[0].Body
 	if body == "" {

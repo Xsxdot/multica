@@ -70,9 +70,8 @@ type AggregationMeta struct {
 
 // notification is a single pending outbound notification for a user.
 type notification struct {
-	title string
-	body  string
-	meta  AggregationMeta
+	card port.OutboundCardMessage
+	meta AggregationMeta
 }
 
 // userBuffer holds buffered notifications for a single external user.
@@ -189,9 +188,8 @@ func (a *Aggregator) AddWithMeta(externalUserID string, card port.OutboundCardMe
 	}
 
 	buf.items = append(buf.items, notification{
-		title: card.Title,
-		body:  card.Body,
-		meta:  meta,
+		card: withFallbackTarget(card, externalUserID),
+		meta: meta,
 	})
 
 	// Buffer limit exceeded — prepare both cards, then unlock and send.
@@ -199,9 +197,8 @@ func (a *Aggregator) AddWithMeta(externalUserID string, card port.OutboundCardMe
 		// Pop the last item (the 51st) — it will be sent directly.
 		lastIdx := len(buf.items) - 1
 		last := notification{
-			title: buf.items[lastIdx].title,
-			body:  buf.items[lastIdx].body,
-			meta:  buf.items[lastIdx].meta,
+			card: buf.items[lastIdx].card,
+			meta: buf.items[lastIdx].meta,
 		}
 		buf.items = buf.items[:lastIdx]
 
@@ -221,12 +218,7 @@ func (a *Aggregator) AddWithMeta(externalUserID string, card port.OutboundCardMe
 			aggregatedTotal.Inc()
 		}
 
-		if sendCardSafe(a.sender, externalUserID, port.OutboundCardMessage{
-			Target: port.TargetUser(externalUserID),
-			ChatID: externalUserID,
-			Title:  last.title,
-			Body:   last.body,
-		}, last.meta) {
+		if sendCardSafe(a.sender, externalUserID, last.card, last.meta) {
 			channelmetrics.M.RecordOutboundAggregate(last.meta.Provider, last.meta.EventKind, "sent", 1)
 		} else {
 			channelmetrics.M.RecordOutboundAggregate(last.meta.Provider, last.meta.EventKind, "error", 1)
@@ -279,6 +271,7 @@ func (a *Aggregator) prepareMerge(key string) *pendingCard {
 	count := len(buf.items)
 	mergedBody := buildMergedBody(buf.items)
 	meta := buf.items[0].meta
+	firstCard := buf.items[0].card
 
 	// Clear buffer state in a single place — see TestAggregator_AddAfter*.
 	delete(a.buffers, key)
@@ -286,24 +279,35 @@ func (a *Aggregator) prepareMerge(key string) *pendingCard {
 	return &pendingCard{
 		externalUserID: buf.externalUserID,
 		card: port.OutboundCardMessage{
-			Target: port.TargetUser(buf.externalUserID),
-			ChatID: buf.externalUserID,
-			Title:  fmt.Sprintf("你有 %d 条新通知", count),
-			Body:   mergedBody,
+			Target:   firstCard.Target,
+			ChatID:   firstNonEmpty(firstCard.ChatID, firstCard.Target.ID),
+			Title:    fmt.Sprintf("Multica 有 %d 条新通知", count),
+			Body:     mergedBody,
+			Mentions: firstCard.Mentions,
 		},
 		meta:  meta,
 		count: count,
 	}
 }
 
+func withFallbackTarget(card port.OutboundCardMessage, externalUserID string) port.OutboundCardMessage {
+	if card.Target.ID == "" {
+		card.Target = port.TargetUser(externalUserID)
+	}
+	if card.ChatID == "" {
+		card.ChatID = card.Target.ID
+	}
+	return card
+}
+
 // buildMergedBody concatenates notification titles and bodies into a
 // single body string for the merged card.
 func buildMergedBody(items []notification) string {
 	if len(items) == 1 {
-		if items[0].body != "" {
-			return items[0].title + "\n" + items[0].body
+		if items[0].card.Body != "" {
+			return items[0].card.Title + "\n" + items[0].card.Body
 		}
-		return items[0].title
+		return items[0].card.Title
 	}
 
 	result := ""
@@ -311,9 +315,9 @@ func buildMergedBody(items []notification) string {
 		if i > 0 {
 			result += "\n"
 		}
-		result += fmt.Sprintf("[%d] %s", i+1, item.title)
-		if item.body != "" {
-			result += ": " + item.body
+		result += fmt.Sprintf("[%d] %s", i+1, item.card.Title)
+		if item.card.Body != "" {
+			result += ": " + item.card.Body
 		}
 	}
 	return result
