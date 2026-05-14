@@ -12,6 +12,9 @@ export const workspaceKeys = {
   squads: (wsId: string) => ["workspaces", wsId, "squads"] as const,
   skills: (wsId: string) => ["workspaces", wsId, "skills"] as const,
   assigneeFrequency: (wsId: string) => ["workspaces", wsId, "assignee-frequency"] as const,
+  channelProviders: () => ["channel-providers"] as const,
+  channelConnections: () => ["channel-connections"] as const,
+  channelBindings: (wsId: string) => ["workspaces", wsId, "channel-bindings"] as const,
 };
 
 export function workspaceListOptions() {
@@ -113,5 +116,26 @@ export function assigneeFrequencyOptions(wsId: string) {
   return queryOptions({
     queryKey: workspaceKeys.assigneeFrequency(wsId),
     queryFn: () => api.getAssigneeFrequency(),
+  });
+}
+
+export function channelBindingListOptions(wsId: string) {
+  return queryOptions({
+    queryKey: workspaceKeys.channelBindings(wsId),
+    queryFn: () => api.listChannelBindings(wsId),
+  });
+}
+
+export function channelConnectionListOptions() {
+  return queryOptions({
+    queryKey: workspaceKeys.channelConnections(),
+    queryFn: () => api.listChannelConnections(),
+  });
+}
+
+export function channelProviderListOptions() {
+  return queryOptions({
+    queryKey: workspaceKeys.channelProviders(),
+    queryFn: () => api.listChannelProviders(),
   });
 }

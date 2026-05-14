@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
+	channelprovider "github.com/multica-ai/multica/server/internal/channel/provider"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -71,27 +73,29 @@ type Config struct {
 }
 
 type Handler struct {
-	Queries               *db.Queries
-	DB                    dbExecutor
-	TxStarter             txStarter
-	Hub                   *realtime.Hub
-	DaemonHub             *daemonws.Hub
-	Bus                   *events.Bus
-	TaskService           *service.TaskService
-	AutopilotService      *service.AutopilotService
-	EmailService          *service.EmailService
-	UpdateStore           UpdateStore
-	ModelListStore        ModelListStore
-	LocalSkillListStore   LocalSkillListStore
-	LocalSkillImportStore LocalSkillImportStore
-	LivenessStore         LivenessStore
-	HeartbeatScheduler    HeartbeatScheduler
-	Storage               storage.Storage
-	CFSigner              *auth.CloudFrontSigner
-	Analytics             analytics.Client
-	PATCache              *auth.PATCache
-	DaemonTokenCache      *auth.DaemonTokenCache
-	cfg                   Config
+	Queries                  *db.Queries
+	DB                       dbExecutor
+	TxStarter                txStarter
+	Hub                      *realtime.Hub
+	DaemonHub                *daemonws.Hub
+	Bus                      *events.Bus
+	TaskService              *service.TaskService
+	AutopilotService         *service.AutopilotService
+	EmailService             *service.EmailService
+	UpdateStore              UpdateStore
+	ModelListStore           ModelListStore
+	LocalSkillListStore      LocalSkillListStore
+	LocalSkillImportStore    LocalSkillImportStore
+	LivenessStore            LivenessStore
+	HeartbeatScheduler       HeartbeatScheduler
+	Storage                  storage.Storage
+	CFSigner                 *auth.CloudFrontSigner
+	Analytics                analytics.Client
+	PATCache                 *auth.PATCache
+	DaemonTokenCache         *auth.DaemonTokenCache
+	ChannelProviderSchemas   map[string][]ChannelConfigFieldResponse
+	ChannelProviderFactories map[string]channelprovider.Factory
+	cfg                      Config
 }
 
 func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config, daemonHubs ...*daemonws.Hub) *Handler {
@@ -292,8 +296,43 @@ func (h *Handler) resolveActor(r *http.Request, userID, workspaceID string) (act
 		slog.Debug("resolveActor: X-Task-ID rejected, task not found or agent mismatch", "agent_id", agentID, "task_id", taskID)
 		return "member", userID
 	}
+	if requesterID, ok := h.channelTurnRequesterActorID(r.Context(), task, workspaceID); ok {
+		return "member", requesterID
+	}
 
 	return "agent", agentID
+}
+
+func (h *Handler) channelTurnRequesterActorID(ctx context.Context, task db.AgentTaskQueue, workspaceID string) (string, bool) {
+	if task.IssueID.Valid || task.ChatSessionID.Valid || task.AutopilotRunID.Valid || len(task.Context) == 0 {
+		return "", false
+	}
+	var ct service.ChannelTurnContext
+	if err := json.Unmarshal(task.Context, &ct); err != nil || ct.Type != service.ChannelTurnContextType {
+		return "", false
+	}
+	requesterID := strings.TrimSpace(ct.RequesterID)
+	if requesterID == "" {
+		return "", false
+	}
+	if ct.WorkspaceID != "" && ct.WorkspaceID != workspaceID {
+		slog.Debug("resolveActor: channel turn requester rejected, workspace mismatch",
+			"task_id", uuidToString(task.ID),
+			"task_workspace_id", ct.WorkspaceID,
+			"request_workspace_id", workspaceID,
+		)
+		return "", false
+	}
+	if _, err := h.getWorkspaceMember(ctx, requesterID, workspaceID); err != nil {
+		slog.Debug("resolveActor: channel turn requester rejected, not a workspace member",
+			"task_id", uuidToString(task.ID),
+			"requester_id", requesterID,
+			"workspace_id", workspaceID,
+			"error", err,
+		)
+		return "", false
+	}
+	return requesterID, true
 }
 
 func requireUserID(w http.ResponseWriter, r *http.Request) (string, bool) {

@@ -503,6 +503,73 @@ type QuickCreateContext struct {
 // QuickCreateContextType marks a task as a quick-create job.
 const QuickCreateContextType = "quick_create"
 
+// ChannelIntentContext is the JSON payload stored on an internal channel
+// intent task. These tasks reuse the daemon/agent runtime to classify a
+// channel message, but they are not user-visible chat sessions and must not
+// perform business side effects directly.
+type ChannelIntentContext struct {
+	Type           string `json:"type"`
+	Prompt         string `json:"prompt"`
+	Message        string `json:"message"`
+	WorkspaceID    string `json:"workspace_id"`
+	RequesterID    string `json:"requester_id,omitempty"`
+	Channel        string `json:"channel,omitempty"`
+	ChatID         string `json:"chat_id,omitempty"`
+	ChatType       string `json:"chat_type,omitempty"`
+	SenderID       string `json:"sender_id,omitempty"`
+	SenderName     string `json:"sender_name,omitempty"`
+	InboundEventID string `json:"channel_inbound_event_id,omitempty"`
+}
+
+// ChannelIntentContextType marks an internal channel intent classification job.
+const ChannelIntentContextType = "channel_intent"
+
+// ChannelTurnContext is the JSON payload stored on an internal channel agent
+// turn. These tasks reuse the daemon/agent runtime as the product path for
+// natural-language channel messages.
+type ChannelTurnContext struct {
+	Type              string `json:"type"`
+	Prompt            string `json:"prompt"`
+	Message           string `json:"message"`
+	WorkspaceID       string `json:"workspace_id"`
+	RequesterID       string `json:"requester_id,omitempty"`
+	Channel           string `json:"channel,omitempty"`
+	ChatID            string `json:"chat_id,omitempty"`
+	ChatType          string `json:"chat_type,omitempty"`
+	SenderID          string `json:"sender_id,omitempty"`
+	SenderName        string `json:"sender_name,omitempty"`
+	InboundEventID    string `json:"channel_inbound_event_id,omitempty"`
+	ReplyContextIssue string `json:"reply_context_issue,omitempty"`
+}
+
+// ChannelTurnContextType marks an internal channel agent turn.
+const ChannelTurnContextType = "channel_turn"
+
+type ChannelIntentTaskParams struct {
+	Prompt         string
+	Message        string
+	RequesterID    string
+	Channel        string
+	ChatID         string
+	ChatType       string
+	SenderID       string
+	SenderName     string
+	InboundEventID string
+}
+
+type ChannelTurnTaskParams struct {
+	Prompt            string
+	Message           string
+	RequesterID       string
+	Channel           string
+	ChatID            string
+	ChatType          string
+	SenderID          string
+	SenderName        string
+	InboundEventID    string
+	ReplyContextIssue string
+}
+
 // EnqueueQuickCreateTask creates a queued task that has no issue / chat /
 // autopilot link — the user's natural-language prompt is stored in the
 // task's context JSONB and the agent is expected to translate it into a
@@ -571,6 +638,112 @@ func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, r
 	// triggered" because the modal closes immediately and the task
 	// sits in 'queued' until the next sleepWithContextOrWakeup tick.
 	s.NotifyTaskEnqueued(ctx, task)
+	return task, nil
+}
+
+// EnqueueChannelIntentTask creates an internal queued task for semantic
+// channel intent classification. It intentionally skips task broadcasts:
+// callers synchronously wait for the task result, and no user-facing activity
+// row or chat message should appear for this resolver implementation detail.
+func (s *TaskService) EnqueueChannelIntentTask(ctx context.Context, workspaceID pgtype.UUID, agentID pgtype.UUID, params ChannelIntentTaskParams) (db.AgentTaskQueue, error) {
+	agent, err := s.Queries.GetAgent(ctx, agentID)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
+	}
+	if agent.ArchivedAt.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("agent is archived")
+	}
+	if !agent.RuntimeID.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
+	}
+
+	payload := ChannelIntentContext{
+		Type:           ChannelIntentContextType,
+		Prompt:         params.Prompt,
+		Message:        params.Message,
+		WorkspaceID:    util.UUIDToString(workspaceID),
+		RequesterID:    params.RequesterID,
+		Channel:        params.Channel,
+		ChatID:         params.ChatID,
+		ChatType:       params.ChatType,
+		SenderID:       params.SenderID,
+		SenderName:     params.SenderName,
+		InboundEventID: params.InboundEventID,
+	}
+	contextJSON, err := json.Marshal(payload)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("marshal channel intent context: %w", err)
+	}
+
+	task, err := s.Queries.CreateChannelIntentTask(ctx, db.CreateChannelIntentTaskParams{
+		AgentID:   agentID,
+		RuntimeID: agent.RuntimeID,
+		Priority:  priorityToInt("high"),
+		Context:   contextJSON,
+	})
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("create channel intent task: %w", err)
+	}
+
+	slog.Info("channel intent task enqueued",
+		"task_id", util.UUIDToString(task.ID),
+		"workspace_id", util.UUIDToString(workspaceID),
+		"agent_id", util.UUIDToString(agentID),
+	)
+	s.notifyTaskAvailable(task)
+	return task, nil
+}
+
+// EnqueueChannelTurnTask creates an internal queued task for a channel agent
+// turn. Unlike channel-intent tasks, this is the product path for natural
+// language channel messages and the agent may use the Multica CLI.
+func (s *TaskService) EnqueueChannelTurnTask(ctx context.Context, workspaceID pgtype.UUID, agentID pgtype.UUID, params ChannelTurnTaskParams) (db.AgentTaskQueue, error) {
+	agent, err := s.Queries.GetAgent(ctx, agentID)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
+	}
+	if agent.ArchivedAt.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("agent is archived")
+	}
+	if !agent.RuntimeID.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
+	}
+
+	payload := ChannelTurnContext{
+		Type:              ChannelTurnContextType,
+		Prompt:            params.Prompt,
+		Message:           params.Message,
+		WorkspaceID:       util.UUIDToString(workspaceID),
+		RequesterID:       params.RequesterID,
+		Channel:           params.Channel,
+		ChatID:            params.ChatID,
+		ChatType:          params.ChatType,
+		SenderID:          params.SenderID,
+		SenderName:        params.SenderName,
+		InboundEventID:    params.InboundEventID,
+		ReplyContextIssue: params.ReplyContextIssue,
+	}
+	contextJSON, err := json.Marshal(payload)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("marshal channel turn context: %w", err)
+	}
+
+	task, err := s.Queries.CreateChannelTurnTask(ctx, db.CreateChannelTurnTaskParams{
+		AgentID:   agentID,
+		RuntimeID: agent.RuntimeID,
+		Priority:  priorityToInt("high"),
+		Context:   contextJSON,
+	})
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("create channel turn task: %w", err)
+	}
+
+	slog.Info("channel turn task enqueued",
+		"task_id", util.UUIDToString(task.ID),
+		"workspace_id", util.UUIDToString(workspaceID),
+		"agent_id", util.UUIDToString(agentID),
+	)
+	s.notifyTaskAvailable(task)
 	return task, nil
 }
 
@@ -1621,6 +1794,9 @@ func (s *TaskService) notifyTaskAvailable(task db.AgentTaskQueue) {
 }
 
 func (s *TaskService) broadcastTaskDispatch(ctx context.Context, task db.AgentTaskQueue) {
+	if s.isInternalChannelTask(task) {
+		return
+	}
 	var payload map[string]any
 	if task.Context != nil {
 		json.Unmarshal(task.Context, &payload)
@@ -1653,6 +1829,9 @@ func (s *TaskService) broadcastTaskDispatch(ctx context.Context, task db.AgentTa
 }
 
 func (s *TaskService) broadcastTaskEvent(ctx context.Context, eventType string, task db.AgentTaskQueue) {
+	if s.isInternalChannelTask(task) {
+		return
+	}
 	workspaceID := s.ResolveTaskWorkspaceID(ctx, task)
 	if workspaceID == "" {
 		return
@@ -1677,7 +1856,8 @@ func (s *TaskService) broadcastTaskEvent(ctx context.Context, eventType string, 
 
 // ResolveTaskWorkspaceID determines the workspace ID for a task.
 // For issue tasks, it comes from the issue. For chat tasks, from the chat session.
-// For autopilot tasks, from the autopilot via its run.
+// For autopilot tasks, from the autopilot via its run. For internal context
+// tasks such as quick-create and channel-intent, from the context JSONB.
 // Returns "" when none of the links resolve — callers treat that as "not found".
 func (s *TaskService) ResolveTaskWorkspaceID(ctx context.Context, task db.AgentTaskQueue) string {
 	if task.IssueID.Valid {
@@ -1704,6 +1884,12 @@ func (s *TaskService) ResolveTaskWorkspaceID(ctx context.Context, task db.AgentT
 	// broadcasts, which is why quick-create tasks appeared stuck queued.
 	if qc, ok := s.parseQuickCreateContext(task); ok {
 		return qc.WorkspaceID
+	}
+	if ci, ok := s.parseChannelIntentContext(task); ok {
+		return ci.WorkspaceID
+	}
+	if ct, ok := s.parseChannelTurnContext(task); ok {
+		return ct.WorkspaceID
 	}
 	return ""
 }
@@ -1796,6 +1982,8 @@ func (s *TaskService) createAgentComment(ctx context.Context, issueID, agentID p
 	if err != nil {
 		return
 	}
+	prefix := s.getIssuePrefix(issue.WorkspaceID)
+	identifier := fmt.Sprintf("%s-%d", prefix, issue.Number)
 	s.Bus.Publish(events.Event{
 		Type:        protocol.EventCommentCreated,
 		WorkspaceID: util.UUIDToString(issue.WorkspaceID),
@@ -1812,8 +2000,9 @@ func (s *TaskService) createAgentComment(ctx context.Context, issueID, agentID p
 				"parent_id":   util.UUIDToPtr(comment.ParentID),
 				"created_at":  comment.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
 			},
-			"issue_title":  issue.Title,
-			"issue_status": issue.Status,
+			"issue_identifier": identifier,
+			"issue_title":      issue.Title,
+			"issue_status":     issue.Status,
 		},
 	})
 	s.AutoUnresolveThreadOnReply(ctx, rootComment, util.UUIDToString(issue.WorkspaceID), "agent", util.UUIDToString(agentID))
@@ -1902,6 +2091,53 @@ func (s *TaskService) parseQuickCreateContext(task db.AgentTaskQueue) (QuickCrea
 	return qc, true
 }
 
+func (s *TaskService) parseChannelIntentContext(task db.AgentTaskQueue) (ChannelIntentContext, bool) {
+	if task.IssueID.Valid || task.ChatSessionID.Valid || task.AutopilotRunID.Valid {
+		return ChannelIntentContext{}, false
+	}
+	if len(task.Context) == 0 {
+		return ChannelIntentContext{}, false
+	}
+	var ci ChannelIntentContext
+	if err := json.Unmarshal(task.Context, &ci); err != nil {
+		return ChannelIntentContext{}, false
+	}
+	if ci.Type != ChannelIntentContextType {
+		return ChannelIntentContext{}, false
+	}
+	return ci, true
+}
+
+func (s *TaskService) parseChannelTurnContext(task db.AgentTaskQueue) (ChannelTurnContext, bool) {
+	if task.IssueID.Valid || task.ChatSessionID.Valid || task.AutopilotRunID.Valid {
+		return ChannelTurnContext{}, false
+	}
+	if len(task.Context) == 0 {
+		return ChannelTurnContext{}, false
+	}
+	var ct ChannelTurnContext
+	if err := json.Unmarshal(task.Context, &ct); err != nil {
+		return ChannelTurnContext{}, false
+	}
+	if ct.Type != ChannelTurnContextType {
+		return ChannelTurnContext{}, false
+	}
+	return ct, true
+}
+
+func (s *TaskService) isChannelIntentTask(task db.AgentTaskQueue) bool {
+	_, ok := s.parseChannelIntentContext(task)
+	return ok
+}
+
+func (s *TaskService) isInternalChannelTask(task db.AgentTaskQueue) bool {
+	if s.isChannelIntentTask(task) {
+		return true
+	}
+	_, ok := s.parseChannelTurnContext(task)
+	return ok
+}
+
 // notifyQuickCreateCompleted writes a success inbox notification to the
 // requester pointing at the issue the agent just created. The issue is
 // stamped with origin_type=quick_create + origin_id=<task_id> by the
@@ -1972,16 +2208,20 @@ func (s *TaskService) notifyQuickCreateCompleted(ctx context.Context, task db.Ag
 			"error", err,
 		)
 	} else {
+		prefix := s.getIssuePrefix(workspaceID)
+		identifier := fmt.Sprintf("%s-%d", prefix, issue.Number)
 		s.Bus.Publish(events.Event{
 			Type:        protocol.EventSubscriberAdded,
 			WorkspaceID: qc.WorkspaceID,
 			ActorType:   "agent",
 			ActorID:     util.UUIDToString(task.AgentID),
 			Payload: map[string]any{
-				"issue_id":  util.UUIDToString(issue.ID),
-				"user_type": "member",
-				"user_id":   qc.RequesterID,
-				"reason":    "creator",
+				"issue_id":         util.UUIDToString(issue.ID),
+				"issue_identifier": identifier,
+				"issue_title":      issue.Title,
+				"user_type":        "member",
+				"user_id":          qc.RequesterID,
+				"reason":           "creator",
 			},
 		})
 	}

@@ -7,6 +7,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
+	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
+	"github.com/multica-ai/multica/server/internal/channel/outbound"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/realtime"
 )
@@ -38,6 +40,8 @@ func NewRegistry(opts RegistryOptions) *Registry {
 
 	httpMetrics := NewHTTPMetrics()
 	reg.MustRegister(httpMetrics.Collectors()...)
+	reg.MustRegister(channelmetrics.M.Collectors()...)
+	reg.MustRegister(outbound.AggregatorCollectors()...)
 
 	if opts.Pool != nil {
 		reg.MustRegister(NewDBCollector(opts.Pool))

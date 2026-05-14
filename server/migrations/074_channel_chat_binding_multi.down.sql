@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_channel_chat_binding_ws_provider;

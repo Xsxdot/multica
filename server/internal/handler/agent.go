@@ -176,7 +176,11 @@ type AgentTaskResponse struct {
 	QuickCreatePrompt       string                `json:"quick_create_prompt,omitempty"`       // user's natural-language input for quick-create tasks
 	SquadID                 string                `json:"squad_id,omitempty"`                  // for quick-create tasks where the picker was a squad; Agent is still the resolved leader
 	SquadName               string                `json:"squad_name,omitempty"`                // display name for the picker squad
-	Kind                    string                `json:"kind"`                                // discriminator: "comment" | "autopilot" | "chat" | "quick_create" | "direct" — used by the activity row to label tasks that have no linked issue
+	ChannelIntentPrompt     string                `json:"channel_intent_prompt,omitempty"`     // internal channel semantic resolver prompt
+	ChannelIntentMessage    string                `json:"channel_intent_message,omitempty"`    // original channel message being classified
+	ChannelTurnPrompt       string                `json:"channel_turn_prompt,omitempty"`       // channel agent turn prompt
+	ChannelTurnMessage      string                `json:"channel_turn_message,omitempty"`      // original channel message for a channel turn
+	Kind                    string                `json:"kind"`                                // discriminator: "comment" | "autopilot" | "chat" | "quick_create" | "channel_intent" | "channel_turn" | "direct" — used by the activity row to label tasks that have no linked issue
 }
 
 // ChatAttachmentMeta is the structured attachment metadata embedded in
@@ -260,12 +264,31 @@ func computeTaskKind(t db.AgentTaskQueue) string {
 		return "autopilot"
 	}
 	if uuidToString(t.IssueID) == "" {
+		if taskContextType(t) == service.ChannelIntentContextType {
+			return "channel_intent"
+		}
+		if taskContextType(t) == service.ChannelTurnContextType {
+			return "channel_turn"
+		}
 		return "quick_create"
 	}
 	if uuidToString(t.TriggerCommentID) != "" {
 		return "comment"
 	}
 	return "direct"
+}
+
+func taskContextType(t db.AgentTaskQueue) string {
+	if len(t.Context) == 0 {
+		return ""
+	}
+	var payload struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(t.Context, &payload); err != nil {
+		return ""
+	}
+	return payload.Type
 }
 
 func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
