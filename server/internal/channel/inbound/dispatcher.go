@@ -57,10 +57,6 @@ type ProjectWorkspaceValidator interface {
 	ValidateProjectInWorkspace(ctx context.Context, workspaceID, projectID pgtype.UUID) error
 }
 
-type ReplyContextLookup interface {
-	Lookup(ctx context.Context, connectionID, externalUserID string, now time.Time) (replyctx.Context, bool, error)
-}
-
 type ResolvedUser struct {
 	MulticaUserID pgtype.UUID
 	DisplayName   string
@@ -76,7 +72,7 @@ type DispatchConfig struct {
 	ProjectValidator  ProjectWorkspaceValidator
 	DispatchStore     DispatchCompletionStore
 	ProposalStore     ActionProposalStore
-	ReplyContext      ReplyContextLookup
+	ReplyContext      replyctx.Store
 }
 
 type dispatchStep struct {

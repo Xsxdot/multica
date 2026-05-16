@@ -25,6 +25,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel/outbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/multica-ai/multica/server/internal/channel/provider"
+	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 	"github.com/multica-ai/multica/server/internal/events"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -37,7 +38,7 @@ type RuntimeComponents struct {
 	TurnPlanner   chintent.ChannelTurnPlanner
 	ChannelTurn   chintent.ChannelAgentTurnClient
 	DispatchStore inbound.DispatchCompletionStore
-	ReplyContext  inbound.ReplyContextLookup
+	ReplyContext  replyctx.Store
 }
 
 type RuntimeBuilder func() RuntimeComponents

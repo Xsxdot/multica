@@ -13,6 +13,7 @@ import (
 
 	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 	"github.com/multica-ai/multica/server/internal/util"
 )
 
@@ -79,7 +80,7 @@ type RuntimeConfig struct {
 	ChannelTurn           chintent.ChannelAgentTurnClient
 	DispatchStore         DispatchCompletionStore
 	FailureLimiter        FailureNoticeLimiter
-	ReplyContext          ReplyContextLookup
+	ReplyContext          replyctx.Store
 	ReplySink             ChannelReplySink
 	Workers               int
 	ClaimBatch            int
