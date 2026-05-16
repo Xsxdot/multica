@@ -18,7 +18,7 @@ type Context struct {
 	ConnectionID   string
 	ExternalUserID string
 	ChatID         string
-	// TODO(STA-78-P1): wire thread_id for thread-level isolation
+	// TODO: runtime-only, do not persist
 	ThreadID        string
 	WorkspaceID     pgtype.UUID
 	IssueID         pgtype.UUID
@@ -47,8 +47,11 @@ func (s *DBStore) Upsert(ctx context.Context, item Context) error {
 	if s == nil || s.pool == nil {
 		return errors.New("reply context store is not configured")
 	}
-	if item.ConnectionID == "" || item.ExternalUserID == "" || item.ChatID == "" || !item.WorkspaceID.Valid || !item.IssueID.Valid || item.ExpiresAt.IsZero() {
+	if item.ConnectionID == "" || item.ExternalUserID == "" || !item.WorkspaceID.Valid || !item.IssueID.Valid || item.ExpiresAt.IsZero() {
 		return errors.New("reply context: invalid context")
+	}
+	if item.ChatID == "" {
+		return errors.New("reply context: chat_id is required")
 	}
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO channel_reply_context (
