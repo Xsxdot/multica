@@ -12,12 +12,13 @@ import (
 )
 
 // DefaultTTL is the default expiration duration for reply contexts.
-const DefaultTTL = 24 * time.Hour
+const DefaultTTL = 30 * time.Minute
 
 type Context struct {
-	ConnectionID    string
-	ExternalUserID  string
-	ChatID          string
+	ConnectionID   string
+	ExternalUserID string
+	ChatID         string
+	// TODO(STA-78-P1): wire thread_id for thread-level isolation
 	ThreadID        string
 	WorkspaceID     pgtype.UUID
 	IssueID         pgtype.UUID
@@ -51,12 +52,10 @@ func (s *DBStore) Upsert(ctx context.Context, item Context) error {
 	}
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO channel_reply_context (
-    connection_id, external_user_id, chat_id, thread_id, workspace_id, issue_id,
+    connection_id, external_user_id, chat_id, workspace_id, issue_id,
     issue_identifier, issue_title, inbox_item_id, expires_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-ON CONFLICT (connection_id, external_user_id) DO UPDATE SET
-    chat_id = EXCLUDED.chat_id,
-    thread_id = EXCLUDED.thread_id,
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (connection_id, external_user_id, chat_id) DO UPDATE SET
     workspace_id = EXCLUDED.workspace_id,
     issue_id = EXCLUDED.issue_id,
     issue_identifier = EXCLUDED.issue_identifier,
@@ -64,7 +63,7 @@ ON CONFLICT (connection_id, external_user_id) DO UPDATE SET
     inbox_item_id = EXCLUDED.inbox_item_id,
     expires_at = EXCLUDED.expires_at,
     updated_at = now()
-`, item.ConnectionID, item.ExternalUserID, item.ChatID, item.ThreadID, item.WorkspaceID, item.IssueID,
+`, item.ConnectionID, item.ExternalUserID, item.ChatID, item.WorkspaceID, item.IssueID,
 		item.IssueIdentifier, item.IssueTitle, item.InboxItemID, item.ExpiresAt)
 	return err
 }
@@ -78,7 +77,7 @@ func (s *DBStore) Lookup(ctx context.Context, connectionID, externalUserID, chat
 	}
 	var item Context
 	err := s.pool.QueryRow(ctx, `
-SELECT connection_id, external_user_id, chat_id, thread_id, workspace_id, issue_id,
+SELECT connection_id, external_user_id, chat_id, workspace_id, issue_id,
        issue_identifier, issue_title, inbox_item_id, expires_at
 FROM channel_reply_context
 WHERE connection_id = $1
@@ -89,7 +88,6 @@ WHERE connection_id = $1
 		&item.ConnectionID,
 		&item.ExternalUserID,
 		&item.ChatID,
-		&item.ThreadID,
 		&item.WorkspaceID,
 		&item.IssueID,
 		&item.IssueIdentifier,
