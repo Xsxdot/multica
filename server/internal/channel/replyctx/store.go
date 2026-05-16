@@ -18,7 +18,7 @@ type Context struct {
 	ConnectionID   string
 	ExternalUserID string
 	ChatID         string
-	// TODO: runtime-only, do not persist
+	// TODO([STA-78](mention://issue/57050043-2ac1-461e-afe0-bf6b0df679be)-P1): runtime-only, do not persist
 	ThreadID        string
 	WorkspaceID     pgtype.UUID
 	IssueID         pgtype.UUID
