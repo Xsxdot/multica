@@ -674,6 +674,13 @@ func (r *Runtime) sweeperLoop(ctx context.Context) {
 			for _, item := range expired {
 				r.send(ctx, item.Event, "长时间没有补充信息，已停止处理，请重新发送完整需求。")
 			}
+			if r.cfg.ReplyContext != nil {
+				if n, err := r.cfg.ReplyContext.DeleteExpired(ctx, time.Now()); err != nil {
+					slog.Error("channel inbound runtime: delete expired reply contexts failed", "error", err)
+				} else if n > 0 {
+					slog.Info("channel inbound runtime: deleted expired reply contexts", "count", n)
+				}
+			}
 		}
 	}
 }
@@ -701,7 +708,7 @@ func (r *Runtime) applyReplyContext(ctx context.Context, req chintent.IntentRequ
 	if r.cfg.ReplyContext == nil || evt.ChatType != port.ChatTypeDirect {
 		return req
 	}
-	rc, ok, err := r.cfg.ReplyContext.Lookup(ctx, evt.ConnectionID(), evt.SenderID, time.Now())
+	rc, ok, err := r.cfg.ReplyContext.Lookup(ctx, evt.ConnectionID(), evt.SenderID, evt.ChatID, time.Now())
 	if err != nil {
 		slog.Error("channel inbound runtime: lookup reply context failed",
 			"connection_id", evt.ConnectionID(),

@@ -238,7 +238,7 @@ func (d *dispatchStep) replyContextForEvent(ctx context.Context, evt port.Inboun
 	if evt.ChatType != port.ChatTypeDirect || d.cfg.ReplyContext == nil {
 		return replyctx.Context{}, false, nil
 	}
-	return d.cfg.ReplyContext.Lookup(ctx, evt.ConnectionID(), evt.SenderID, time.Now())
+	return d.cfg.ReplyContext.Lookup(ctx, evt.ConnectionID(), evt.SenderID, evt.ChatID, time.Now())
 }
 
 func (d *dispatchStep) saveReplyContext(ctx context.Context, evt port.InboundEvent, wsID pgtype.UUID, issueID pgtype.UUID, issueIdentifier, issueTitle string) {
@@ -248,6 +248,7 @@ func (d *dispatchStep) saveReplyContext(ctx context.Context, evt port.InboundEve
 	if err := d.cfg.ReplyContext.Upsert(ctx, replyctx.Context{
 		ConnectionID:    evt.ConnectionID(),
 		ExternalUserID:  evt.SenderID,
+		ChatID:          evt.ChatID,
 		WorkspaceID:     wsID,
 		IssueID:         issueID,
 		IssueIdentifier: issueIdentifier,

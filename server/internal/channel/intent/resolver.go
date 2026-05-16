@@ -152,9 +152,18 @@ func BuildChatIntentPrompt(req IntentRequest) string {
 	b.WriteString("- Use QueryProgress with params.scope=projects for questions about all project progress.\n")
 	b.WriteString("- QueryIssue without params.issue_key is only for todo-list requests such as 我的待办, 待办列表, 看一下待办, 我有哪些待办.\n")
 	b.WriteString("- For CreateIssue, include params.assignee when the user says 指派给/分配给 someone.\n")
-	b.WriteString("- For comments or mutations on an existing issue, require an explicit issue key in the message.\n")
+	if req.ContextIssueKey != "" {
+		b.WriteString("- The user is referring to a previously discussed issue in this conversation.\n")
+		b.WriteString("- If the message uses pronouns such as \"it\", \"that\", \"this\", \"the issue\", or \"刚才那个\", treat them as referring to the context issue below.\n")
+		b.WriteString("- Use the context issue for comments or mutations when no explicit issue key is present in the message.\n")
+	} else {
+		b.WriteString("- For comments or mutations on an existing issue, require an explicit issue key in the message.\n")
+	}
 	b.WriteString("- If the user appears to ask about a specific issue but the issue key or action is unclear, return mode=clarify and intent=ASK_CLARIFY with a human user_reply_draft.\n")
 	b.WriteString("- user_reply_draft must never contain internal tags such as [ASK_CLARIFY] or UNKNOWN.\n\n")
+	if req.ContextIssueKey != "" {
+		fmt.Fprintf(&b, "Reply context:\n- Current conversation issue: %s\n\n", req.ContextIssueKey)
+	}
 	fmt.Fprintf(&b, "Workspace ID: %s\nDefault project ID: %s\nChannel: %s\nConnection ID: %s\nChat type: %s\nSender: %s (%s)\n", req.WorkspaceID, req.DefaultProjectID, req.Channel, req.ConnectionID, req.ChatType, req.SenderName, req.SenderID)
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "User message:\n%s\n", req.Text)
@@ -175,7 +184,15 @@ func BuildChannelAgentTurnPrompt(req IntentRequest) string {
 	b.WriteString("- For issue progress questions, use `multica issue get <id> --output json` and `multica issue comment list <id> --output json`. Include status, assignee if useful, the latest meaningful member/agent reply, and the next step.\n")
 	b.WriteString("- For creates and updates, use the existing CLI such as `multica issue create`, `multica issue status`, `multica issue assign`, and `multica issue comment add --content-stdin`.\n")
 	b.WriteString("- For comments, if the user named the issue but did not provide comment body, ask what they want to write. Do not invent the comment.\n")
-	b.WriteString("- For comments or mutations on an existing issue, require an explicit issue key in the message.\n\n")
+	if req.ContextIssueKey != "" {
+		b.WriteString("- The user is referring to a previously discussed issue. If pronouns such as \"it\", \"that\", \"this\", or \"刚才那个\" are used, treat them as referring to the context issue below.\n")
+	} else {
+		b.WriteString("- For comments or mutations on an existing issue, require an explicit issue key in the message.\n")
+	}
+	b.WriteString("\n")
+	if req.ContextIssueKey != "" {
+		fmt.Fprintf(&b, "Reply context:\n- Current conversation issue: %s\n\n", req.ContextIssueKey)
+	}
 	fmt.Fprintf(&b, "Workspace ID: %s\nDefault project ID: %s\nChannel: %s\nConnection ID: %s\nChat ID: %s\nChat type: %s\nSender: %s (%s)\n", req.WorkspaceID, req.DefaultProjectID, req.Channel, req.ConnectionID, req.ChatID, req.ChatType, req.SenderName, req.SenderID)
 	b.WriteString("\nUser message:\n")
 	b.WriteString(req.Text)
