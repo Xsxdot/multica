@@ -283,7 +283,7 @@ func (f *fakeReplyContextStore) Upsert(_ context.Context, item replyctx.Context)
 	return nil
 }
 
-func (f *fakeReplyContextStore) Clear(_ context.Context, _, _ string) error {
+func (f *fakeReplyContextStore) Clear(_ context.Context, _, _, _ string) error {
 	return nil
 }
 

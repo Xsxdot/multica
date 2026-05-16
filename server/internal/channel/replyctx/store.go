@@ -31,7 +31,7 @@ type Context struct {
 type Store interface {
 	Upsert(ctx context.Context, item Context) error
 	Lookup(ctx context.Context, connectionID, externalUserID, chatID string, now time.Time) (Context, bool, error)
-	Clear(ctx context.Context, connectionID, externalUserID string) error
+	Clear(ctx context.Context, connectionID, externalUserID, chatID string) error
 	DeleteExpired(ctx context.Context, before time.Time) (int64, error)
 }
 
@@ -47,7 +47,7 @@ func (s *DBStore) Upsert(ctx context.Context, item Context) error {
 	if s == nil || s.pool == nil {
 		return errors.New("reply context store is not configured")
 	}
-	if item.ConnectionID == "" || item.ExternalUserID == "" || !item.WorkspaceID.Valid || !item.IssueID.Valid || item.ExpiresAt.IsZero() {
+	if item.ConnectionID == "" || item.ExternalUserID == "" || item.ChatID == "" || !item.WorkspaceID.Valid || !item.IssueID.Valid || item.ExpiresAt.IsZero() {
 		return errors.New("reply context: invalid context")
 	}
 	_, err := s.pool.Exec(ctx, `
@@ -104,14 +104,14 @@ WHERE connection_id = $1
 	return item, true, nil
 }
 
-func (s *DBStore) Clear(ctx context.Context, connectionID, externalUserID string) error {
+func (s *DBStore) Clear(ctx context.Context, connectionID, externalUserID, chatID string) error {
 	if s == nil || s.pool == nil {
 		return nil
 	}
 	_, err := s.pool.Exec(ctx, `
 DELETE FROM channel_reply_context
-WHERE connection_id = $1 AND external_user_id = $2
-`, connectionID, externalUserID)
+WHERE connection_id = $1 AND external_user_id = $2 AND chat_id = $3
+`, connectionID, externalUserID, chatID)
 	return err
 }
 

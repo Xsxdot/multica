@@ -2,7 +2,6 @@ package replyctx
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 )
@@ -47,15 +46,11 @@ func (s *InMemoryStore) Lookup(_ context.Context, connectionID, externalUserID, 
 	return item, true, nil
 }
 
-// Clear removes the reply context for the given connection + user.
-func (s *InMemoryStore) Clear(_ context.Context, connectionID, externalUserID string) error {
+// Clear removes the reply context for the given connection + user + chat.
+func (s *InMemoryStore) Clear(_ context.Context, connectionID, externalUserID, chatID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for k := range s.items {
-		if strings.HasPrefix(k, connectionID+"\x00"+externalUserID+"\x00") {
-			delete(s.items, k)
-		}
-	}
+	delete(s.items, s.key(connectionID, externalUserID, chatID))
 	return nil
 }
 
