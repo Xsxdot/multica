@@ -153,10 +153,14 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 		Priority:      "none",
 		AssigneeType:  pgtype.Text{String: "agent", Valid: true},
 		AssigneeID:    ap.AssigneeID,
-		CreatorType:   ap.CreatedByType,
-		CreatorID:     ap.CreatedByID,
+		// The agent that the autopilot dispatches to is the issue's creator,
+		// not the human who originally configured the autopilot. The latter
+		// is captured separately via origin_type=autopilot + origin_id.
+		CreatorType:   "agent",
+		CreatorID:     ap.AssigneeID,
 		ParentIssueID: pgtype.UUID{},
 		Position:      0,
+		StartDate:     pgtype.Timestamptz{},
 		DueDate:       pgtype.Timestamptz{},
 		Number:        issueNumber,
 		ProjectID:     pgtype.UUID{},
@@ -187,8 +191,8 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 	s.Bus.Publish(events.Event{
 		Type:        protocol.EventIssueCreated,
 		WorkspaceID: util.UUIDToString(ap.WorkspaceID),
-		ActorType:   ap.CreatedByType,
-		ActorID:     util.UUIDToString(ap.CreatedByID),
+		ActorType:   "agent",
+		ActorID:     util.UUIDToString(ap.AssigneeID),
 		Payload: map[string]any{
 			"issue": issueToMap(issue, prefix),
 		},

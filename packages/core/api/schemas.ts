@@ -148,6 +148,7 @@ const IssueSchema = z.object({
   parent_issue_id: z.string().nullable(),
   project_id: z.string().nullable(),
   position: z.number(),
+  start_date: z.string().nullable(),
   due_date: z.string().nullable(),
   reactions: z.array(z.unknown()).optional(),
   labels: z.array(z.unknown()).optional(),
@@ -237,6 +238,15 @@ const DashboardAgentRunTimeSchema = z.object({
 }).loose();
 
 export const DashboardAgentRunTimeListSchema = z.array(DashboardAgentRunTimeSchema);
+
+const DashboardRunTimeDailySchema = z.object({
+  date: z.string(),
+  total_seconds: z.number().default(0),
+  task_count: z.number().default(0),
+  failed_count: z.number().default(0),
+}).loose();
+
+export const DashboardRunTimeDailyListSchema = z.array(DashboardRunTimeDailySchema);
 
 // ---------------------------------------------------------------------------
 // Agent template catalog — `/api/agent-templates*` and the

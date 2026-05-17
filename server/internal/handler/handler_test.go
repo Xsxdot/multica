@@ -1016,6 +1016,100 @@ func TestScheduledAutopilotDuplicateIssueSkipsRun(t *testing.T) {
 	assertAutopilotNotFailureMonitorCandidate(t, ctx, autopilotID)
 }
 
+// TestAutopilotCreatedIssueCreatorIsAssigneeAgent locks in that an issue spawned
+// by an autopilot reports the assignee agent — not the human who configured the
+// autopilot — as its creator. The matching issue:created event must carry the
+// same actor identity so downstream activity / notification listeners stay in
+// sync with the issue row.
+func TestAutopilotCreatedIssueCreatorIsAssigneeAgent(t *testing.T) {
+	ctx := context.Background()
+	title := fmt.Sprintf("Autopilot creator attribution %d", time.Now().UnixNano())
+	var autopilotID, issueID string
+	defer func() {
+		if issueID != "" {
+			testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+		}
+		if autopilotID != "" {
+			testPool.Exec(ctx, `DELETE FROM autopilot WHERE id = $1`, autopilotID)
+		}
+	}()
+
+	var agentID string
+	if err := testPool.QueryRow(ctx, `SELECT id FROM agent WHERE workspace_id = $1 LIMIT 1`, testWorkspaceID).Scan(&agentID); err != nil {
+		t.Fatalf("load test agent: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/autopilots?workspace_id="+testWorkspaceID, map[string]any{
+		"title":                "Creator attribution autopilot",
+		"assignee_id":          agentID,
+		"execution_mode":       "create_issue",
+		"issue_title_template": title,
+	})
+	testHandler.CreateAutopilot(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateAutopilot: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var autopilot AutopilotResponse
+	if err := json.NewDecoder(w.Body).Decode(&autopilot); err != nil {
+		t.Fatalf("decode autopilot: %v", err)
+	}
+	autopilotID = autopilot.ID
+	if autopilot.CreatedByType != "member" || autopilot.CreatedByID != testUserID {
+		t.Fatalf("autopilot created_by = %s/%s, want member/%s", autopilot.CreatedByType, autopilot.CreatedByID, testUserID)
+	}
+
+	gotEvent := make(chan events.Event, 1)
+	testHandler.Bus.Subscribe(protocol.EventIssueCreated, func(e events.Event) {
+		select {
+		case gotEvent <- e:
+		default:
+		}
+	})
+
+	queries := db.New(testPool)
+	ap, err := queries.GetAutopilot(ctx, parseUUID(autopilotID))
+	if err != nil {
+		t.Fatalf("GetAutopilot: %v", err)
+	}
+	run, err := testHandler.AutopilotService.DispatchAutopilot(ctx, ap, pgtype.UUID{}, "manual", nil)
+	if err != nil {
+		t.Fatalf("DispatchAutopilot: %v", err)
+	}
+	if run == nil || run.Status != "issue_created" {
+		t.Fatalf("dispatch result = %+v, want status issue_created", run)
+	}
+
+	var creatorType, creatorID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT id, creator_type, creator_id
+		FROM issue
+		WHERE workspace_id = $1 AND title = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, testWorkspaceID, title).Scan(&issueID, &creatorType, &creatorID); err != nil {
+		t.Fatalf("load autopilot-created issue: %v", err)
+	}
+	if creatorType != "agent" {
+		t.Fatalf("issue creator_type = %q, want agent", creatorType)
+	}
+	if creatorID != agentID {
+		t.Fatalf("issue creator_id = %q, want assignee agent %q", creatorID, agentID)
+	}
+
+	select {
+	case ev := <-gotEvent:
+		if ev.ActorType != "agent" {
+			t.Fatalf("issue:created ActorType = %q, want agent", ev.ActorType)
+		}
+		if ev.ActorID != agentID {
+			t.Fatalf("issue:created ActorID = %q, want %q", ev.ActorID, agentID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive issue:created event")
+	}
+}
+
 func assertAutopilotDuplicateRunSkipped(t *testing.T, ctx context.Context, autopilotID, issueID, identifier, title string) {
 	t.Helper()
 	var status, failureReason string
