@@ -287,6 +287,12 @@ func (r *Runtime) processRecord(ctx context.Context, rec *InboundEventRecord) er
 			}
 			if outcome.Decision == DecisionSkip {
 				r.discardDeferredProcessingAck(rec.ID)
+				chatCtx := r.lookupChatContext(ctx, next)
+				if chatCtx.WorkspaceID == "" {
+					chatCtx.WorkspaceID = rec.WorkspaceID
+					chatCtx.DefaultProjectID = rec.DefaultProjectID
+				}
+				r.recordSkippedTurn(ctx, rec, next, chatCtx, outcome)
 				return r.cfg.Store.MarkProcessed(ctx, rec.ID)
 			}
 			chatCtx := r.lookupChatContext(ctx, next)
@@ -487,8 +493,36 @@ func (r *Runtime) recordIntentTurn(ctx context.Context, rec *InboundEventRecord,
 		WaitKind:         waitKind,
 		WaitTaskID:       waitTaskID,
 		StartedAt:        time.Now().UTC(),
+		CompletedAt:      completedAtForTurnStatus(status),
 	}); err != nil {
 		slog.Error("channel inbound runtime: upsert channel turn failed", "event_row_id", rec.ID, "error", err)
+	}
+}
+
+func (r *Runtime) recordSkippedTurn(ctx context.Context, rec *InboundEventRecord, evt port.InboundEvent, chatCtx ChatBindingContext, outcome Outcome) {
+	if evt.Type != port.EventTypeMessageReceived {
+		return
+	}
+	intent := chintent.Intent{
+		Kind:       chintent.IntentUnknown,
+		Confidence: 0,
+		Source:     chintent.SourceRule,
+		Params: map[string]string{
+			"_channel_skip_step": outcome.Terminal,
+		},
+	}
+	r.recordIntentTurn(ctx, rec, evt, intent, chatCtx, channelconversation.TurnStatusSkipped, "", "")
+}
+
+func completedAtForTurnStatus(status string) time.Time {
+	switch status {
+	case channelconversation.TurnStatusCompleted,
+		channelconversation.TurnStatusFailed,
+		channelconversation.TurnStatusDead,
+		channelconversation.TurnStatusSkipped:
+		return time.Now().UTC()
+	default:
+		return time.Time{}
 	}
 }
 

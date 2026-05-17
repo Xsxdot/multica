@@ -181,10 +181,11 @@ func TestResolveMessageContextReply_PlainShortReplyWithoutContextDoesNotResolve(
 }
 
 type fakeConversationStore struct {
-	byPlatform map[string]channelconversation.Message
-	byInbound  map[string]channelconversation.Message
-	refs       map[string][]channelconversation.EntityRef
-	recent     []channelconversation.Message
+	byPlatform    map[string]channelconversation.Message
+	byInbound     map[string]channelconversation.Message
+	refs          map[string][]channelconversation.EntityRef
+	recent        []channelconversation.Message
+	upsertedTurns []channelconversation.Turn
 }
 
 func (f *fakeConversationStore) EnsureConversation(context.Context, channelconversation.Conversation) (channelconversation.Conversation, error) {
@@ -231,8 +232,9 @@ func (f *fakeConversationStore) CreateTurn(context.Context, channelconversation.
 	return channelconversation.Turn{}, nil
 }
 
-func (f *fakeConversationStore) UpsertTurn(context.Context, channelconversation.Turn) (channelconversation.Turn, error) {
-	return channelconversation.Turn{}, nil
+func (f *fakeConversationStore) UpsertTurn(_ context.Context, turn channelconversation.Turn) (channelconversation.Turn, error) {
+	f.upsertedTurns = append(f.upsertedTurns, turn)
+	return turn, nil
 }
 
 func (f *fakeConversationStore) CompleteTurn(context.Context, string, string, string, json.RawMessage, string) error {

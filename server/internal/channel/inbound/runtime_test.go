@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	channelconversation "github.com/multica-ai/multica/server/internal/channel/conversation"
 	"github.com/multica-ai/multica/server/internal/channel/conversationctx"
 	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/port"
@@ -126,9 +127,20 @@ func TestRuntimeProcessRecord_SendsDeferredAckAfterPreContinue(t *testing.T) {
 func TestRuntimeProcessRecord_DoesNotSendDeferredAckAfterPreSkip(t *testing.T) {
 	store := &fakeRuntimeStore{}
 	sink := &recordingReplySink{}
+	convStore := &fakeConversationStore{
+		byInbound: map[string]channelconversation.Message{
+			"row-1": {
+				ID:             "msg-inbound",
+				Provider:       "feishu",
+				ConnectionID:   "conn-1",
+				ConversationID: "conv-1",
+			},
+		},
+	}
 	rt := NewRuntime(RuntimeConfig{
-		Store:     store,
-		ReplySink: sink,
+		Store:             store,
+		ReplySink:         sink,
+		ConversationStore: convStore,
 		PrePipeline: NewPipeline(fnStep{
 			name: "pre",
 			run: func(_ context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
@@ -142,13 +154,14 @@ func TestRuntimeProcessRecord_DoesNotSendDeferredAckAfterPreSkip(t *testing.T) {
 		ID:    "row-1",
 		Phase: InboundPhasePre,
 		Event: port.InboundEvent{
-			ChannelName: "feishu",
-			EventID:     "evt-1",
-			Type:        port.EventTypeMessageReceived,
-			ChatID:      "oc_1",
-			ChatType:    port.ChatTypeGroup,
-			SenderID:    "ou_1",
-			Text:        "hello",
+			ChannelName:         "feishu",
+			ChannelConnectionID: "conn-1",
+			EventID:             "evt-1",
+			Type:                port.EventTypeMessageReceived,
+			ChatID:              "oc_1",
+			ChatType:            port.ChatTypeGroup,
+			SenderID:            "ou_1",
+			Text:                "hello",
 		},
 	})
 	if err != nil {
@@ -159,6 +172,19 @@ func TestRuntimeProcessRecord_DoesNotSendDeferredAckAfterPreSkip(t *testing.T) {
 	}
 	if _, ok := rt.pendingAckByEvent["row-1"]; ok {
 		t.Fatal("deferred ack should be discarded when pre-pipeline skips")
+	}
+	if len(convStore.upsertedTurns) != 1 {
+		t.Fatalf("upserted turns = %d, want 1", len(convStore.upsertedTurns))
+	}
+	turn := convStore.upsertedTurns[0]
+	if turn.Status != channelconversation.TurnStatusSkipped {
+		t.Fatalf("turn status = %q, want skipped", turn.Status)
+	}
+	if turn.IntentKind != string(chintent.IntentUnknown) {
+		t.Fatalf("turn intent = %q, want Unknown", turn.IntentKind)
+	}
+	if turn.CompletedAt.IsZero() {
+		t.Fatal("skipped turn should be terminal with completed_at set")
 	}
 }
 

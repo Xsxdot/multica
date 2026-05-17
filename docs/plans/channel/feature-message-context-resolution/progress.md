@@ -271,3 +271,25 @@
 - `CHANNEL_MIGRATION_TEST_DATABASE_URL=... go test ./internal/channel/conversation -run TestMigration093DDL -count=1` 通过。
 - `CHANNEL_MIGRATION_TEST_DATABASE_URL=... go test ./internal/channel/inbound -run TestDBInboundEventStore_AcceptEventCreatesChannelMessage -count=1` 通过。
 - `make test` 未执行完成：该命令会读取当前 `.env` 并对远程 `multica` 数据库执行迁移，风险范围超过本次临时 `test_multica` 验证库。
+
+## 功能缺口补齐
+
+### 本阶段实现内容
+
+- 补齐 task_failed retry handoff：
+  - 当失败通知没有显式 agent mention 时，将失败事件的 actor agent 同时记录为 `source` 和 `handoff_target`。
+  - 用户引用失败通知回复“重试”时，生成 issue comment 的同时会追加对应 agent mention。
+- 补齐 pre-pipeline skip 的 turn 审计：
+  - pre pipeline 短路处理用户消息时，写入 `channel_turn`，状态为 `skipped`。
+  - `skipped` 作为终态写入 `completed_at`，方便后续排查“消息被哪个 step 消费/拦截”。
+- 补充回归测试：
+  - `task_failed` actor agent 被记录为 retry handoff target。
+  - pre-pipeline skip 会写入 skipped turn，并保留 skip step 信息。
+
+### 验证
+
+- `go test ./internal/channel/inbound -run 'TestRuntimeProcessRecord_DoesNotSendDeferredAckAfterPreSkip|TestResolveMessageContextReply' -count=1` 通过。
+- `go test ./internal/channel/outbound -run 'TestNotificationEntityRefs' -count=1` 通过。
+- `go test ./internal/channel/...` 通过。
+- `go test ./cmd/server` 通过。
+- `git diff --check` 通过。

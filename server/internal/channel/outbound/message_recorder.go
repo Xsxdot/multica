@@ -215,6 +215,7 @@ func notificationEntityRefs(items []OutboxNotification) []channelconversation.En
 	refs := make([]channelconversation.EntityRef, 0, len(items)*4)
 	for _, item := range items {
 		workspaceID := uuidText(item.WorkspaceID)
+		explicitAgentMention := false
 		if item.IssueID.Valid || strings.TrimSpace(item.IssueIdentifier) != "" {
 			refs = append(refs, channelconversation.EntityRef{
 				WorkspaceID: workspaceID,
@@ -245,6 +246,7 @@ func notificationEntityRefs(items []OutboxNotification) []channelconversation.En
 			if mention.Type != "agent" {
 				continue
 			}
+			explicitAgentMention = true
 			refs = append(refs, channelconversation.EntityRef{
 				WorkspaceID: workspaceID,
 				EntityType:  channelconversation.EntityTypeAgent,
@@ -261,9 +263,26 @@ func notificationEntityRefs(items []OutboxNotification) []channelconversation.En
 				Display:     "Agent",
 				Role:        channelconversation.EntityRoleSource,
 			})
+			if itemNeedsRetryTarget(item) && !explicitAgentMention {
+				refs = append(refs, channelconversation.EntityRef{
+					WorkspaceID: workspaceID,
+					EntityType:  channelconversation.EntityTypeAgent,
+					EntityID:    uuidText(item.ActorID),
+					Display:     "Agent",
+					Role:        channelconversation.EntityRoleHandoffTarget,
+				})
+			}
 		}
 	}
 	return refs
+}
+
+func itemNeedsRetryTarget(item OutboxNotification) bool {
+	text := strings.ToLower(item.Title + "\n" + item.Body + "\n" + item.EventKind)
+	return strings.Contains(text, "task_failed") ||
+		strings.Contains(text, "failed") ||
+		strings.Contains(text, "error") ||
+		strings.Contains(item.Body, "失败")
 }
 
 func dedupeStrings(values []string) []string {

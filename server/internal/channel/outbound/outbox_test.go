@@ -136,6 +136,28 @@ func TestNotificationEntityRefs_ExplicitAgentMentionIsHandoffTarget(t *testing.T
 	}
 }
 
+func TestNotificationEntityRefs_TaskFailedActorIsRetryTarget(t *testing.T) {
+	t.Parallel()
+
+	actorID := pgtype.UUID{Bytes: [16]byte{0x11}, Valid: true}
+	refs := notificationEntityRefs([]OutboxNotification{{
+		EventKind:       "task_failed",
+		ActorType:       "agent",
+		ActorID:         actorID,
+		IssueIdentifier: "STA-9",
+		Body:            "Agent 任务失败，请查看此 Issue。",
+	}})
+
+	for _, ref := range refs {
+		if ref.EntityType == channelconversation.EntityTypeAgent &&
+			ref.EntityID == uuidStr(actorID) &&
+			ref.Role == channelconversation.EntityRoleHandoffTarget {
+			return
+		}
+	}
+	t.Fatal("task_failed actor agent must be recorded as handoff target for retry replies")
+}
+
 func TestOutboxWorker_MergesReplyableNotificationsInGroupPolicy(t *testing.T) {
 	t.Parallel()
 
