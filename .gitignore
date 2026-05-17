@@ -7,6 +7,7 @@ dist
 # build outputs
 .turbo
 .next
+.next-standalone
 out
 build
 bin
