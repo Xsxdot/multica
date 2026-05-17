@@ -65,14 +65,14 @@ INSERT INTO channel_conversation (
 `); err != nil {
 		t.Fatalf("seed migration prerequisites: %v", err)
 	}
-	upSQL, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "092_channel_message_model.up.sql"))
+	upSQL, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "093_channel_message_model.up.sql"))
 	if err != nil {
 		t.Fatalf("read migration 092 up: %v", err)
 	}
 	if _, err := tx.Exec(ctx, string(upSQL)); err != nil {
 		t.Fatalf("run migration 092 up: %v", err)
 	}
-	downSQL, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "092_channel_message_model.down.sql"))
+	downSQL, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "093_channel_message_model.down.sql"))
 	if err != nil {
 		t.Fatalf("read migration 092 down: %v", err)
 	}

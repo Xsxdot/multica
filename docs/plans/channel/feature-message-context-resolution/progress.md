@@ -4,7 +4,7 @@
 
 ### 本阶段实现内容
 
-- 新增 `092_channel_message_model` migration：
+- 新增 `093_channel_message_model` migration：
   - 新建 `channel_processing_lock`，承接原 `channel_conversation.active_event_id / active_since` 的入站串行化职责。
   - 重塑 `channel_conversation` 为真实外部会话主表，增加 `id`、`conversation_type`、`external_thread_id`、`workspace_id`、`last_message_at` 等字段。
   - 新建 `channel_message`、`channel_message_entity_ref`、`channel_turn`，作为后续 quote/reply、agent handoff、短回复解析的主事实模型。

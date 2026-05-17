@@ -47,7 +47,7 @@ func TestDBInboundEventStore_AcceptEventCreatesChannelMessage(t *testing.T) {
 	if _, err := pool.Exec(ctx, runtimeStoreMessagePrerequisites); err != nil {
 		t.Fatalf("create prerequisites: %v", err)
 	}
-	upSQL, err := os.ReadFile(migrationPath(t, "092_channel_message_model.up.sql"))
+	upSQL, err := os.ReadFile(migrationPath(t, "093_channel_message_model.up.sql"))
 	if err != nil {
 		t.Fatalf("read migration 092 up: %v", err)
 	}
