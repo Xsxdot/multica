@@ -30,9 +30,9 @@ const (
 	InboundPhasePost   = "post"
 	InboundPhaseDone   = "done"
 
-	WaitKindIntent      = "intent"
-	WaitKindAction      = "action"
-	WaitKindChannelTurn = "channel_turn"
+	WaitKindLegacyIntent = "intent"
+	WaitKindAction       = "action"
+	WaitKindChannelTurn  = "channel_turn"
 )
 
 type AcceptOptions struct {

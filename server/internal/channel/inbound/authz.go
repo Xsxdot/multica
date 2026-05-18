@@ -134,7 +134,7 @@ type AuthzConfig struct {
 }
 
 // authzStep is the Step that enforces authorization policies on every
-// inbound event. It sits in the pipeline after intent-recog (so it can
+// inbound event. It sits in the pipeline after command-recog (so it can
 // inspect IntentKind) and before dispatch (so it can block unauthorised
 // actions before they reach the facade layer).
 //

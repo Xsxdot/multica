@@ -6,12 +6,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multica-ai/multica/server/internal/channel/binding"
+	chcommand "github.com/multica-ai/multica/server/internal/channel/command"
 	channelconversation "github.com/multica-ai/multica/server/internal/channel/conversation"
 	"github.com/multica-ai/multica/server/internal/channel/facade"
 	"github.com/multica-ai/multica/server/internal/channel/facadeimpl"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
-	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	chturn "github.com/multica-ai/multica/server/internal/channel/turn"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -22,15 +23,15 @@ type channelPipelineOptions struct {
 	FileDownloader port.FileDownloader
 	Gateway        port.ChannelGateway
 	Observer       inbound.Observer
-	ChannelTurn    chintent.ChannelAgentTurnClient
+	ChannelTurn    chturn.AgentClient
 	TaskService    *service.TaskService
 }
 
 type channelInboundRuntimeComponents struct {
 	PrePipeline        *inbound.Pipeline
 	PostPipeline       *inbound.Pipeline
-	RuleResolvers      []chintent.IntentResolver
-	ChannelTurn        chintent.ChannelAgentTurnClient
+	RuleResolvers      []chcommand.Resolver
+	ChannelTurn        chturn.AgentClient
 	DispatchStore      inbound.DispatchCompletionStore
 	ConversationStore  channelconversation.Store
 	ContextMaxEntities int
@@ -52,8 +53,8 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 	}
 	replySink := inbound.NewGatewayReplySink(opt.Gateway, inbound.WithGatewayReplyConversationStore(conversationStore))
 
-	ruleResolvers := []chintent.IntentResolver{
-		chintent.NewRuleResolver(chintent.NewRuleMatcher()),
+	ruleResolvers := []chcommand.Resolver{
+		chcommand.NewRuleResolver(chcommand.NewRuleMatcher()),
 	}
 	channelTurn := opt.ChannelTurn
 	if channelTurn == nil && opt.TaskService != nil {

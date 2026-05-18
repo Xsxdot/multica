@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
+	chturn "github.com/multica-ai/multica/server/internal/channel/turn"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -36,7 +36,7 @@ func NewTaskBackedChannelTurnClient(queries *db.Queries, tasks *service.TaskServ
 	}
 }
 
-func (c *TaskBackedChannelTurnClient) StartAgentTurn(ctx context.Context, req chintent.IntentRequest) (string, error) {
+func (c *TaskBackedChannelTurnClient) StartAgentTurn(ctx context.Context, req chturn.Request) (string, error) {
 	if c == nil || c.queries == nil || c.tasks == nil {
 		return "", fmt.Errorf("channel turn client is not configured")
 	}
@@ -65,7 +65,7 @@ func (c *TaskBackedChannelTurnClient) StartAgentTurn(ctx context.Context, req ch
 		return "", err
 	}
 	task, err := c.tasks.EnqueueChannelTurnTask(ctx, workspaceID, agent.ID, service.ChannelTurnTaskParams{
-		Prompt:          chintent.BuildChannelAgentTurnPrompt(req),
+		Prompt:          chturn.BuildPrompt(req),
 		Message:         req.Text,
 		RequesterID:     requesterID,
 		Channel:         req.Channel,
@@ -110,7 +110,7 @@ func (c *TaskBackedChannelTurnClient) ParseAgentTurnResult(ctx context.Context, 
 	}
 }
 
-func (c *TaskBackedChannelTurnClient) authorizeRequester(ctx context.Context, req chintent.IntentRequest, workspaceID pgtype.UUID) (string, error) {
+func (c *TaskBackedChannelTurnClient) authorizeRequester(ctx context.Context, req chturn.Request, workspaceID pgtype.UUID) (string, error) {
 	if c.access == nil {
 		return "", nil
 	}
@@ -141,7 +141,7 @@ const (
 )
 
 func channelAgentUnavailable(message, reason string) error {
-	return &chintent.ChannelAgentUnavailableError{Message: message, Reason: reason}
+	return &chturn.ChannelAgentUnavailableError{Message: message, Reason: reason}
 }
 
 func boundChannelAgentUnavailable(reason string) error {
@@ -152,7 +152,7 @@ func noChannelAgentAvailable(reason string) error {
 	return channelAgentUnavailable(noChannelAgentAvailableMessage, reason)
 }
 
-func (c *TaskBackedChannelTurnClient) selectAgent(ctx context.Context, workspaceID pgtype.UUID, req chintent.IntentRequest, capability string) (db.Agent, error) {
+func (c *TaskBackedChannelTurnClient) selectAgent(ctx context.Context, workspaceID pgtype.UUID, req chturn.Request, capability string) (db.Agent, error) {
 	if aid := strings.TrimSpace(req.AgentID); aid != "" {
 		agentUUID, err := util.ParseUUID(aid)
 		if err != nil {
@@ -237,4 +237,4 @@ func taskCompletionOutput(task db.AgentTaskQueue, label string) (string, error) 
 	return output, nil
 }
 
-var _ chintent.ChannelAgentTurnClient = (*TaskBackedChannelTurnClient)(nil)
+var _ chturn.AgentClient = (*TaskBackedChannelTurnClient)(nil)

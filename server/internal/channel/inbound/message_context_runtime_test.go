@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
+	chaction "github.com/multica-ai/multica/server/internal/channel/action"
 	channelconversation "github.com/multica-ai/multica/server/internal/channel/conversation"
-	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 )
 
@@ -64,7 +64,7 @@ func TestResolveMessageContextReply_QuotedHandoffCreatesCommentIntent(t *testing
 	if !ok {
 		t.Fatal("expected quoted handoff reply to resolve")
 	}
-	if result.Intent.Kind != chintent.IntentAddComment {
+	if result.Intent.Kind != chaction.KindAddComment {
 		t.Fatalf("intent kind = %s, want AddComment", result.Intent.Kind)
 	}
 	if result.Intent.Params["issue_key"] != "STA-9" {
@@ -324,8 +324,11 @@ type fakeConversationStore struct {
 	refs             map[string][]channelconversation.EntityRef
 	recentRefs       []channelconversation.EntityRef
 	recent           []channelconversation.Message
+	latestTurn       channelconversation.Turn
+	latestTurnOK     bool
 	created          []channelconversation.Message
 	upsertedTurns    []channelconversation.Turn
+	mergedTurnStates []json.RawMessage
 	lastRecentSender string
 }
 
@@ -378,6 +381,10 @@ func (f *fakeConversationStore) ListRecentHandoffMessages(_ context.Context, _, 
 	return append([]channelconversation.Message(nil), f.recent...), nil
 }
 
+func (f *fakeConversationStore) FindLatestCompletedTurn(context.Context, string, string, string, string, time.Time) (channelconversation.Turn, bool, error) {
+	return f.latestTurn, f.latestTurnOK, nil
+}
+
 func (f *fakeConversationStore) CreateTurn(context.Context, channelconversation.Turn) (channelconversation.Turn, error) {
 	return channelconversation.Turn{}, nil
 }
@@ -392,6 +399,11 @@ func (f *fakeConversationStore) CompleteTurn(context.Context, string, string, st
 }
 
 func (f *fakeConversationStore) CompleteTurnForInboundEvent(context.Context, string, string, string, json.RawMessage, string) error {
+	return nil
+}
+
+func (f *fakeConversationStore) MergeTurnResultForInboundEvent(_ context.Context, _ string, payload json.RawMessage) error {
+	f.mergedTurnStates = append(f.mergedTurnStates, append(json.RawMessage(nil), payload...))
 	return nil
 }
 

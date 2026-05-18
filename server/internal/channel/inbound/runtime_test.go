@@ -2,13 +2,16 @@ package inbound
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
+	chaction "github.com/multica-ai/multica/server/internal/channel/action"
+	chcommand "github.com/multica-ai/multica/server/internal/channel/command"
 	channelconversation "github.com/multica-ai/multica/server/internal/channel/conversation"
-	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	chturn "github.com/multica-ai/multica/server/internal/channel/turn"
 )
 
 func TestConversationKey_GroupIgnoresSender(t *testing.T) {
@@ -185,7 +188,7 @@ func TestRuntimeProcessRecord_DoesNotSendDeferredAckAfterPreSkip(t *testing.T) {
 	if turn.Status != channelconversation.TurnStatusSkipped {
 		t.Fatalf("turn status = %q, want skipped", turn.Status)
 	}
-	if turn.IntentKind != string(chintent.IntentUnknown) {
+	if turn.IntentKind != string(chaction.KindUnknown) {
 		t.Fatalf("turn intent = %q, want Unknown", turn.IntentKind)
 	}
 	if turn.CompletedAt.IsZero() {
@@ -206,14 +209,14 @@ func TestRuntimeProcessRecord_DeterministicCommandUsesRules(t *testing.T) {
 	})
 	rt := NewRuntime(RuntimeConfig{
 		Store: store,
-		RuleResolvers: []chintent.IntentResolver{fakeResolver{
-			result: chintent.IntentResult{
+		RuleResolvers: []chcommand.Resolver{fakeResolver{
+			result: chaction.Result{
 				Matched: true,
-				Intent: chintent.Intent{
-					Kind:       chintent.IntentCreateIssue,
+				Intent: chaction.Intent{
+					Kind:       chaction.KindCreateIssue,
 					Confidence: 1,
 					Params:     map[string]string{"title": "from channel"},
-					Source:     chintent.SourceRule,
+					Source:     chaction.SourceRule,
 				},
 			},
 		}},
@@ -250,14 +253,14 @@ func TestRuntimeProcessRecord_NaturalLanguageWithoutChannelTurnDoesNotUseRules(t
 	rt := NewRuntime(RuntimeConfig{
 		Store:     store,
 		ReplySink: sink,
-		RuleResolvers: []chintent.IntentResolver{fakeResolver{
-			result: chintent.IntentResult{
+		RuleResolvers: []chcommand.Resolver{fakeResolver{
+			result: chaction.Result{
 				Matched: true,
-				Intent: chintent.Intent{
-					Kind:       chintent.IntentCreateIssue,
+				Intent: chaction.Intent{
+					Kind:       chaction.KindCreateIssue,
 					Confidence: 1,
 					Params:     map[string]string{"title": "from old rules"},
-					Source:     chintent.SourceRule,
+					Source:     chaction.SourceRule,
 				},
 			},
 		}},
@@ -294,7 +297,7 @@ func TestRuntimeProcessRecord_NaturalLanguageWithoutChannelTurnDoesNotUseRules(t
 	}
 }
 
-func TestRuntimeApplyIntentResult_ClarifyContinuesToPostPipeline(t *testing.T) {
+func TestRuntimeApplyCommandResult_ClarifyContinuesToPostPipeline(t *testing.T) {
 	store := &fakeRuntimeStore{}
 	rt := NewRuntime(RuntimeConfig{
 		Store: store,
@@ -304,16 +307,16 @@ func TestRuntimeApplyIntentResult_ClarifyContinuesToPostPipeline(t *testing.T) {
 		Phase: InboundPhaseIntent,
 		Event: port.InboundEvent{ChannelName: "feishu", EventID: "evt-1", ChatID: "oc_1", SenderID: "ou_1"},
 	}
-	waiting, err := rt.applyIntentResult(context.Background(), rec, chintent.IntentResult{
+	waiting, err := rt.applyCommandResult(context.Background(), rec, chaction.Result{
 		Matched: true,
-		Intent: chintent.Intent{
-			Kind:   chintent.IntentASKClarify,
+		Intent: chaction.Intent{
+			Kind:   chaction.KindAskClarify,
 			Params: map[string]string{},
-			Source: chintent.SourceChat,
+			Source: chaction.SourceAgent,
 		},
 	}, ChatBindingContext{}, false)
 	if err != nil {
-		t.Fatalf("applyIntentResult: %v", err)
+		t.Fatalf("applyCommandResult: %v", err)
 	}
 	if waiting {
 		t.Fatal("ASKClarify should continue through the post pipeline")
@@ -327,10 +330,10 @@ func TestRuntimeProcessRecord_NaturalLanguageStartsChannelTurnBeforeRules(t *tes
 	store := &fakeRuntimeStore{}
 	rt := NewRuntime(RuntimeConfig{
 		Store: store,
-		RuleResolvers: []chintent.IntentResolver{fakeResolver{
-			result: chintent.IntentResult{
+		RuleResolvers: []chcommand.Resolver{fakeResolver{
+			result: chaction.Result{
 				Matched: true,
-				Intent:  chintent.Intent{Kind: chintent.IntentQueryProgress, Params: map[string]string{"scope": "projects"}},
+				Intent:  chaction.Intent{Kind: chaction.KindQueryProgress, Params: map[string]string{"scope": "projects"}},
 			},
 		}},
 		ChannelTurn: fakeAsyncIntentClient{taskID: "550e8400-e29b-41d4-a716-446655440000"},
@@ -434,14 +437,14 @@ func TestRuntimeProcessRecord_FillsRuleIntentIssueKeyBeforePostPhase(t *testing.
 	rt := NewRuntime(RuntimeConfig{
 		Store:             store,
 		ConversationStore: conversationStore,
-		RuleResolvers: []chintent.IntentResolver{fakeResolver{
-			result: chintent.IntentResult{
+		RuleResolvers: []chcommand.Resolver{fakeResolver{
+			result: chaction.Result{
 				Matched: true,
-				Intent: chintent.Intent{
-					Kind:       chintent.IntentSetStatus,
+				Intent: chaction.Intent{
+					Kind:       chaction.KindSetStatus,
 					Confidence: 1,
 					Params:     map[string]string{"status": "done"},
-					Source:     chintent.SourceRule,
+					Source:     chaction.SourceRule,
 				},
 			},
 		}},
@@ -608,7 +611,7 @@ func TestRuntimeStartChannelTurnFailureUsesUserVisibleMessage(t *testing.T) {
 	rt := NewRuntime(RuntimeConfig{
 		Store:     store,
 		ReplySink: sink,
-		ChannelTurn: fakeAsyncIntentClient{err: &chintent.ChannelAgentUnavailableError{
+		ChannelTurn: fakeAsyncIntentClient{err: &chturn.ChannelAgentUnavailableError{
 			Message: "指定智能体当前不可用，或对应运行时不支持群聊语义处理。请换一个智能体，或重启/更新运行时后再试。",
 			Reason:  "bound agent runtime does not advertise channel_turn",
 		}},
@@ -712,11 +715,55 @@ func TestRuntimeResumeChannelTurnFailureUsesFailureOnce(t *testing.T) {
 	}
 }
 
+func TestRuntimeResumeChannelTurnStripsAndPersistsPendingAction(t *testing.T) {
+	store := &fakeRuntimeStore{
+		load: &InboundEventRecord{
+			ID: "row-1",
+			Event: port.InboundEvent{
+				ChannelName:         "feishu",
+				ChannelConnectionID: "conn-1",
+				EventID:             "evt-1",
+				ChatID:              "oc_1",
+				ChatType:            port.ChatTypeGroup,
+				SenderID:            "ou_1",
+			},
+		},
+	}
+	conversationStore := &fakeConversationStore{}
+	sink := &recordingReplySink{}
+	reply := "你想关掉哪个 Issue？\n<multica_channel_state>\n" +
+		`{"pending_action":{"kind":"SetStatus","params":{"status":"cancelled"},"missing":["issue_key"],"candidates":["STA-82"],"question":"Which issue should I cancel?"}}` +
+		"\n</multica_channel_state>"
+	rt := NewRuntime(RuntimeConfig{
+		Store:             store,
+		ReplySink:         sink,
+		ConversationStore: conversationStore,
+		ChannelTurn:       fakeAsyncIntentClient{done: true, reply: reply},
+	})
+
+	item := WaitingAgentEvent{ID: "row-1", WaitKind: WaitKindChannelTurn, WaitTaskID: "550e8400-e29b-41d4-a716-446655440000"}
+	rt.resumeChannelTurn(context.Background(), item)
+
+	if got := sink.last(); got != "你想关掉哪个 Issue？" {
+		t.Fatalf("reply = %q, want visible reply without state block", got)
+	}
+	if len(conversationStore.mergedTurnStates) != 1 {
+		t.Fatalf("merged states = %d, want 1", len(conversationStore.mergedTurnStates))
+	}
+	var state chturn.StatePayload
+	if err := json.Unmarshal(conversationStore.mergedTurnStates[0], &state); err != nil {
+		t.Fatalf("unmarshal merged state: %v", err)
+	}
+	if state.PendingAction == nil || state.PendingAction.Params["status"] != "cancelled" {
+		t.Fatalf("pending action = %+v, want cancelled status update", state.PendingAction)
+	}
+}
+
 func TestRuntimeResumeWaitingAgents_MarksLegacyIntentDead(t *testing.T) {
 	store := &fakeRuntimeStore{
 		waiting: []WaitingAgentEvent{{
 			ID:         "row-1",
-			WaitKind:   WaitKindIntent,
+			WaitKind:   WaitKindLegacyIntent,
 			WaitTaskID: "550e8400-e29b-41d4-a716-446655440000",
 			UpdatedAt:  time.Now(),
 		}},
@@ -922,13 +969,13 @@ func (s *fakeDispatchStore) completion(id string) (string, bool) {
 }
 
 type fakeResolver struct {
-	result chintent.IntentResult
+	result chaction.Result
 	err    error
 }
 
 func (r fakeResolver) Name() string { return "fake" }
 
-func (r fakeResolver) Resolve(context.Context, chintent.IntentRequest) (chintent.IntentResult, error) {
+func (r fakeResolver) Resolve(context.Context, chcommand.Request) (chaction.Result, error) {
 	return r.result, r.err
 }
 
@@ -939,7 +986,7 @@ type fakeAsyncIntentClient struct {
 	reply  string
 }
 
-func (f fakeAsyncIntentClient) StartAgentTurn(context.Context, chintent.IntentRequest) (string, error) {
+func (f fakeAsyncIntentClient) StartAgentTurn(context.Context, chturn.Request) (string, error) {
 	return f.taskID, f.err
 }
 
@@ -953,13 +1000,13 @@ func (f fakeAsyncIntentClient) ParseAgentTurnResult(context.Context, string) (st
 
 type recordingChannelTurnClient struct {
 	taskID    string
-	startReqs []chintent.IntentRequest
+	startReqs []chturn.Request
 	reply     string
 	done      bool
 	err       error
 }
 
-func (f *recordingChannelTurnClient) StartAgentTurn(_ context.Context, req chintent.IntentRequest) (string, error) {
+func (f *recordingChannelTurnClient) StartAgentTurn(_ context.Context, req chturn.Request) (string, error) {
 	f.startReqs = append(f.startReqs, req)
 	return f.taskID, nil
 }
