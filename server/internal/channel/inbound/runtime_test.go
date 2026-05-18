@@ -88,11 +88,16 @@ func TestRuntimeAccept_UserACKs(t *testing.T) {
 }
 
 func TestRuntimeProcessRecord_SendsDeferredAckAfterPreContinue(t *testing.T) {
-	store := &fakeRuntimeStore{}
+	store := &fakeRuntimeStore{chatCtx: ChatBindingContext{
+		WorkspaceID: "550e8400-e29b-41d4-a716-446655440001",
+	}}
 	sink := &recordingReplySink{}
 	rt := NewRuntime(RuntimeConfig{
 		Store:     store,
 		ReplySink: sink,
+		ChatIntent: fakeAsyncIntentClient{
+			taskID: "550e8400-e29b-41d4-a716-446655440000",
+		},
 		PrePipeline: NewPipeline(fnStep{
 			name: "pre",
 			run: func(_ context.Context, evt port.InboundEvent) (port.InboundEvent, Decision, error) {
@@ -103,8 +108,9 @@ func TestRuntimeProcessRecord_SendsDeferredAckAfterPreContinue(t *testing.T) {
 	rt.deferProcessingAck("row-1")
 
 	err := rt.processRecord(context.Background(), &InboundEventRecord{
-		ID:    "row-1",
-		Phase: InboundPhasePre,
+		ID:          "row-1",
+		Phase:       InboundPhasePre,
+		WorkspaceID: "550e8400-e29b-41d4-a716-446655440001",
 		Event: port.InboundEvent{
 			ChannelName: "feishu",
 			EventID:     "evt-1",
@@ -187,7 +193,7 @@ func TestRuntimeProcessRecord_DoesNotSendDeferredAckAfterPreSkip(t *testing.T) {
 	}
 }
 
-func TestRuntimeProcessRecord_RuleIntentDoesNotWaitForAgent(t *testing.T) {
+func TestRuntimeProcessRecord_DeterministicCommandUsesRules(t *testing.T) {
 	store := &fakeRuntimeStore{}
 	post := NewPipeline(fnStep{
 		name: "post",
@@ -224,7 +230,7 @@ func TestRuntimeProcessRecord_RuleIntentDoesNotWaitForAgent(t *testing.T) {
 			ChatID:      "oc_1",
 			ChatType:    port.ChatTypeGroup,
 			SenderID:    "ou_1",
-			Text:        "create issue",
+			Text:        "/create from channel",
 		},
 	})
 	if err != nil {
@@ -235,6 +241,56 @@ func TestRuntimeProcessRecord_RuleIntentDoesNotWaitForAgent(t *testing.T) {
 	}
 	if !store.processed {
 		t.Fatal("post pipeline completion should mark event processed")
+	}
+}
+
+func TestRuntimeProcessRecord_NaturalLanguageWithoutChannelTurnDoesNotUseRules(t *testing.T) {
+	store := &fakeRuntimeStore{}
+	sink := &recordingReplySink{}
+	rt := NewRuntime(RuntimeConfig{
+		Store:     store,
+		ReplySink: sink,
+		RuleResolvers: []chintent.IntentResolver{fakeResolver{
+			result: chintent.IntentResult{
+				Matched: true,
+				Intent: chintent.Intent{
+					Kind:       chintent.IntentCreateIssue,
+					Confidence: 1,
+					Params:     map[string]string{"title": "from old rules"},
+					Source:     chintent.SourceRule,
+				},
+			},
+		}},
+	})
+
+	err := rt.processRecord(context.Background(), &InboundEventRecord{
+		ID:          "row-1",
+		Phase:       InboundPhaseIntent,
+		WorkspaceID: "550e8400-e29b-41d4-a716-446655440001",
+		Event: port.InboundEvent{
+			ChannelName: "feishu",
+			EventID:     "evt-1",
+			Type:        port.EventTypeMessageReceived,
+			ChatID:      "oc_1",
+			ChatType:    port.ChatTypeGroup,
+			SenderID:    "ou_1",
+			Text:        "create issue",
+		},
+	})
+	if err != nil {
+		t.Fatalf("processRecord: %v", err)
+	}
+	if store.savedPhase != "" {
+		t.Fatalf("natural language should not save a rule intent phase, got %q", store.savedPhase)
+	}
+	if store.waitingAgent {
+		t.Fatal("missing channel turn should not enter waiting_agent")
+	}
+	if !store.processed {
+		t.Fatal("missing channel turn should mark event processed after failure notice")
+	}
+	if got := sink.last(); got != "我现在找不到可用的 channel agent，先不继续刷屏。等 agent 恢复后你可以再发一次。" {
+		t.Fatalf("failure reply = %q", got)
 	}
 }
 

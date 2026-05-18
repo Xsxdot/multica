@@ -352,15 +352,8 @@ func (r *Runtime) resolveIntent(ctx context.Context, rec *InboundEventRecord) (b
 	}
 
 	if r.cfg.ChannelTurn == nil || chatCtx.WorkspaceID == "" {
-		result, ok, err := r.resolveByRules(ctx, req)
-		if err != nil {
-			return false, err
-		}
-		if ok {
-			result = applyRequestContextToIntentResult(result, req)
-			return r.applyIntentResult(ctx, rec, result, chatCtx, false)
-		}
-		return r.applyIntentResult(ctx, rec, fallbackRuleUnknown(), chatCtx, false)
+		r.sendFailureOnce(ctx, rec, failureCodeNoChannelAgent, userMessageForChannelAgentError(errors.New("channel agent unavailable")), true)
+		return true, nil
 	}
 
 	taskID, err := r.cfg.ChannelTurn.StartAgentTurn(ctx, req)
