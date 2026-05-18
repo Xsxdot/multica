@@ -15,10 +15,6 @@ import { useT } from "../../i18n";
 
 export type RuntimeFilter = "mine" | "all";
 
-// Pulled out of create-agent-dialog so the template-detail step can reuse the
-// same picker without duplicating the ~90-line popover. Internal UI state
-// (popover open, filter toggle) lives here; selection lives in the parent
-// because both the form and the template-create call read selectedRuntime.
 export function RuntimePicker({
   runtimes,
   runtimesLoading,

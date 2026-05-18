@@ -6,35 +6,35 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multica-ai/multica/server/internal/channel/binding"
+	chcommand "github.com/multica-ai/multica/server/internal/channel/command"
+	channelconversation "github.com/multica-ai/multica/server/internal/channel/conversation"
 	"github.com/multica-ai/multica/server/internal/channel/facade"
 	"github.com/multica-ai/multica/server/internal/channel/facadeimpl"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
-	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/port"
+	chturn "github.com/multica-ai/multica/server/internal/channel/turn"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 type channelPipelineOptions struct {
-	Storage         storage.Storage
-	FileDownloader  port.FileDownloader
-	Gateway         port.ChannelGateway
-	Observer        inbound.Observer
-	ChatIntent      chintent.ChatIntentClient
-	AsyncChatIntent chintent.AsyncChatIntentClient
-	TaskService     *service.TaskService
+	Storage        storage.Storage
+	FileDownloader port.FileDownloader
+	Gateway        port.ChannelGateway
+	Observer       inbound.Observer
+	ChannelTurn    chturn.AgentClient
+	TaskService    *service.TaskService
 }
 
 type channelInboundRuntimeComponents struct {
-	PrePipeline   *inbound.Pipeline
-	PostPipeline  *inbound.Pipeline
-	RuleResolvers []chintent.IntentResolver
-	ChatIntent    chintent.AsyncChatIntentClient
-	TurnPlanner   chintent.ChannelTurnPlanner
-	ChannelTurn   chintent.ChannelAgentTurnClient
-	DispatchStore inbound.DispatchCompletionStore
-	ReplyContext  inbound.ReplyContextLookup
+	PrePipeline        *inbound.Pipeline
+	PostPipeline       *inbound.Pipeline
+	RuleResolvers      []chcommand.Resolver
+	ChannelTurn        chturn.AgentClient
+	DispatchStore      inbound.DispatchCompletionStore
+	ConversationStore  channelconversation.Store
+	ContextMaxEntities int
 }
 
 func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipelineOptions) channelInboundRuntimeComponents {
@@ -45,24 +45,20 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 	bindings := inbound.NewDBChatBindingLookup(pool)
 	userResolver := inbound.NewDBUserInfoResolver(pool)
 	issuer := binding.NewTokenIssuer(queries)
+	conversationStore := channelconversation.NewDBStore(pool)
 
 	var opt channelPipelineOptions
 	if len(opts) > 0 {
 		opt = opts[0]
 	}
-	replySink := inbound.NewGatewayReplySink(opt.Gateway)
+	replySink := inbound.NewGatewayReplySink(opt.Gateway, inbound.WithGatewayReplyConversationStore(conversationStore))
 
-	ruleResolvers := []chintent.IntentResolver{
-		chintent.NewRuleResolver(chintent.NewRuleMatcher()),
+	ruleResolvers := []chcommand.Resolver{
+		chcommand.NewRuleResolver(chcommand.NewRuleMatcher()),
 	}
-	asyncChatIntent := opt.AsyncChatIntent
-	if asyncChatIntent == nil {
-		if typed, ok := opt.ChatIntent.(chintent.AsyncChatIntentClient); ok {
-			asyncChatIntent = typed
-		}
-	}
-	if asyncChatIntent == nil && opt.TaskService != nil {
-		asyncChatIntent = facadeimpl.NewTaskBackedChatIntentClient(queries, opt.TaskService, bindings)
+	channelTurn := opt.ChannelTurn
+	if channelTurn == nil && opt.TaskService != nil {
+		channelTurn = facadeimpl.NewTaskBackedChannelTurnClient(queries, opt.TaskService, bindings)
 	}
 
 	pre := inbound.NewPipeline(
@@ -114,26 +110,11 @@ func newChannelInboundRuntimeComponents(pool *pgxpool.Pool, opts ...channelPipel
 	post.SetObserver(opt.Observer)
 
 	return channelInboundRuntimeComponents{
-		PrePipeline:   pre,
-		PostPipeline:  post,
-		RuleResolvers: ruleResolvers,
-		ChatIntent:    asyncChatIntent,
-		TurnPlanner:   turnPlannerFromAsync(asyncChatIntent),
-		ChannelTurn:   channelTurnFromAsync(asyncChatIntent),
-		DispatchStore: inbound.NewDBDispatchCompletionStore(pool),
+		PrePipeline:       pre,
+		PostPipeline:      post,
+		RuleResolvers:     ruleResolvers,
+		ChannelTurn:       channelTurn,
+		DispatchStore:     inbound.NewDBDispatchCompletionStore(pool),
+		ConversationStore: conversationStore,
 	}
-}
-
-func turnPlannerFromAsync(client chintent.AsyncChatIntentClient) chintent.ChannelTurnPlanner {
-	if planner, ok := client.(chintent.ChannelTurnPlanner); ok {
-		return planner
-	}
-	return nil
-}
-
-func channelTurnFromAsync(client chintent.AsyncChatIntentClient) chintent.ChannelAgentTurnClient {
-	if turn, ok := client.(chintent.ChannelAgentTurnClient); ok {
-		return turn
-	}
-	return nil
 }

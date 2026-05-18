@@ -38,9 +38,8 @@ const (
 	defaultChannelInboundGlobalLimit       = 5000
 	defaultChannelInboundWorkers           = 16
 	defaultChannelInboundClaimBatch        = 32
-	defaultChannelIntentTaskTimeout        = 15 * time.Minute
+	defaultChannelAgentTaskTimeout        = 15 * time.Minute
 	defaultChannelActionTaskTimeout        = 30 * time.Minute
-	defaultChannelClarificationTimeout     = 30 * time.Minute
 	defaultChannelInboundProcessingLease   = 5 * time.Minute
 )
 
@@ -139,8 +138,8 @@ func main() {
 	if os.Getenv("JWT_SECRET") == "" {
 		slog.Warn("JWT_SECRET is not set — using insecure default. Set JWT_SECRET for production use.")
 	}
-	if os.Getenv("RESEND_API_KEY") == "" {
-		slog.Warn("RESEND_API_KEY is not set — email verification codes will be printed to the log instead of emailed.")
+	if os.Getenv("RESEND_API_KEY") == "" && strings.TrimSpace(os.Getenv("SMTP_HOST")) == "" {
+		slog.Warn("no email backend configured (RESEND_API_KEY and SMTP_HOST both empty) — verification codes will be printed to the log instead of emailed.")
 	}
 	if os.Getenv("MULTICA_DEV_VERIFICATION_CODE") != "" {
 		if strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production") {
@@ -283,23 +282,21 @@ func main() {
 			}
 			components := newChannelInboundRuntimeComponents(pool, pipelineOpt)
 			return channelmanager.RuntimeComponents{
-				PrePipeline:   components.PrePipeline,
-				PostPipeline:  components.PostPipeline,
-				RuleResolvers: components.RuleResolvers,
-				ChatIntent:    components.ChatIntent,
-				TurnPlanner:   components.TurnPlanner,
-				ChannelTurn:   components.ChannelTurn,
-				DispatchStore: components.DispatchStore,
-				ReplyContext:  components.ReplyContext,
+				PrePipeline:        components.PrePipeline,
+				PostPipeline:       components.PostPipeline,
+				RuleResolvers:      components.RuleResolvers,
+				ChannelTurn:        components.ChannelTurn,
+				DispatchStore:      components.DispatchStore,
+				ConversationStore:  components.ConversationStore,
+				ContextMaxEntities: components.ContextMaxEntities,
 			}
 		},
 		ConversationLimit:      envPositiveInt("CHANNEL_INBOUND_CONVERSATION_LIMIT", defaultChannelInboundConversationLimit),
 		GlobalLimit:            envPositiveInt("CHANNEL_INBOUND_GLOBAL_PENDING_LIMIT", defaultChannelInboundGlobalLimit),
 		Workers:                envPositiveInt("CHANNEL_INBOUND_WORKERS", defaultChannelInboundWorkers),
 		ClaimBatch:             envPositiveInt("CHANNEL_INBOUND_CLAIM_BATCH", defaultChannelInboundClaimBatch),
-		IntentTaskTimeout:      envDuration("CHANNEL_INTENT_TASK_TIMEOUT", defaultChannelIntentTaskTimeout),
+		AgentTaskTimeout:       envDuration("CHANNEL_AGENT_TASK_TIMEOUT", defaultChannelAgentTaskTimeout),
 		ActionTaskTimeout:      envDuration("CHANNEL_ACTION_TASK_TIMEOUT", defaultChannelActionTaskTimeout),
-		ClarificationTimeout:   envDuration("CHANNEL_CLARIFICATION_TIMEOUT", defaultChannelClarificationTimeout),
 		ProcessingLease:        envDuration("CHANNEL_INBOUND_PROCESSING_LEASE", defaultChannelInboundProcessingLease),
 		OutboundCleanupEnabled: true,
 	})

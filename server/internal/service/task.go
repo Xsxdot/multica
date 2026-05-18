@@ -441,6 +441,20 @@ func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, trig
 // Unlike EnqueueTaskForIssue, this takes an explicit agent ID rather than
 // deriving it from the issue assignee.
 func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, false)
+}
+
+// EnqueueTaskForSquadLeader is the leader-role variant of EnqueueTaskForMention.
+// The resulting task carries is_leader_task=true so that downstream
+// self-trigger guards can distinguish a comment posted while the agent was
+// acting as the squad's leader (skip) from one posted while it was acting
+// as a worker (do not skip). This matters for agents that are simultaneously
+// the leader and a worker of the same squad — see migration 090.
+func (s *TaskService) EnqueueTaskForSquadLeader(ctx context.Context, issue db.Issue, leaderID pgtype.UUID, triggerCommentID pgtype.UUID) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTask(ctx, issue, leaderID, triggerCommentID, true)
+}
+
+func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool) (db.AgentTaskQueue, error) {
 	agent, err := s.Queries.GetAgent(ctx, agentID)
 	if err != nil {
 		slog.Error("mention task enqueue failed: agent not found", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
@@ -462,13 +476,14 @@ func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue,
 		Priority:         priorityToInt(issue.Priority),
 		TriggerCommentID: triggerCommentID,
 		TriggerSummary:   s.buildCommentTriggerSummary(ctx, triggerCommentID),
+		IsLeaderTask:     pgtype.Bool{Bool: isLeader, Valid: isLeader},
 	})
 	if err != nil {
 		slog.Error("mention task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
 		return db.AgentTaskQueue{}, fmt.Errorf("create task: %w", err)
 	}
 
-	slog.Info("mention task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
+	slog.Info("mention task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "is_leader_task", isLeader)
 	// See EnqueueTaskForIssue for ordering rationale.
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
 	s.NotifyTaskEnqueued(ctx, task)
@@ -503,71 +518,38 @@ type QuickCreateContext struct {
 // QuickCreateContextType marks a task as a quick-create job.
 const QuickCreateContextType = "quick_create"
 
-// ChannelIntentContext is the JSON payload stored on an internal channel
-// intent task. These tasks reuse the daemon/agent runtime to classify a
-// channel message, but they are not user-visible chat sessions and must not
-// perform business side effects directly.
-type ChannelIntentContext struct {
-	Type           string `json:"type"`
-	Prompt         string `json:"prompt"`
-	Message        string `json:"message"`
-	WorkspaceID    string `json:"workspace_id"`
-	RequesterID    string `json:"requester_id,omitempty"`
-	Channel        string `json:"channel,omitempty"`
-	ChatID         string `json:"chat_id,omitempty"`
-	ChatType       string `json:"chat_type,omitempty"`
-	SenderID       string `json:"sender_id,omitempty"`
-	SenderName     string `json:"sender_name,omitempty"`
-	InboundEventID string `json:"channel_inbound_event_id,omitempty"`
-}
-
-// ChannelIntentContextType marks an internal channel intent classification job.
-const ChannelIntentContextType = "channel_intent"
-
 // ChannelTurnContext is the JSON payload stored on an internal channel agent
 // turn. These tasks reuse the daemon/agent runtime as the product path for
 // natural-language channel messages.
 type ChannelTurnContext struct {
-	Type              string `json:"type"`
-	Prompt            string `json:"prompt"`
-	Message           string `json:"message"`
-	WorkspaceID       string `json:"workspace_id"`
-	RequesterID       string `json:"requester_id,omitempty"`
-	Channel           string `json:"channel,omitempty"`
-	ChatID            string `json:"chat_id,omitempty"`
-	ChatType          string `json:"chat_type,omitempty"`
-	SenderID          string `json:"sender_id,omitempty"`
-	SenderName        string `json:"sender_name,omitempty"`
-	InboundEventID    string `json:"channel_inbound_event_id,omitempty"`
-	ReplyContextIssue string `json:"reply_context_issue,omitempty"`
+	Type            string `json:"type"`
+	Prompt          string `json:"prompt"`
+	Message         string `json:"message"`
+	WorkspaceID     string `json:"workspace_id"`
+	RequesterID     string `json:"requester_id,omitempty"`
+	Channel         string `json:"channel,omitempty"`
+	ChatID          string `json:"chat_id,omitempty"`
+	ChatType        string `json:"chat_type,omitempty"`
+	SenderID        string `json:"sender_id,omitempty"`
+	SenderName      string `json:"sender_name,omitempty"`
+	InboundEventID  string `json:"channel_inbound_event_id,omitempty"`
+	ContextIssueKey string `json:"context_issue_key,omitempty"`
 }
 
 // ChannelTurnContextType marks an internal channel agent turn.
 const ChannelTurnContextType = "channel_turn"
 
-type ChannelIntentTaskParams struct {
-	Prompt         string
-	Message        string
-	RequesterID    string
-	Channel        string
-	ChatID         string
-	ChatType       string
-	SenderID       string
-	SenderName     string
-	InboundEventID string
-}
-
 type ChannelTurnTaskParams struct {
-	Prompt            string
-	Message           string
-	RequesterID       string
-	Channel           string
-	ChatID            string
-	ChatType          string
-	SenderID          string
-	SenderName        string
-	InboundEventID    string
-	ReplyContextIssue string
+	Prompt          string
+	Message         string
+	RequesterID     string
+	Channel         string
+	ChatID          string
+	ChatType        string
+	SenderID        string
+	SenderName      string
+	InboundEventID  string
+	ContextIssueKey string
 }
 
 // EnqueueQuickCreateTask creates a queued task that has no issue / chat /
@@ -641,62 +623,9 @@ func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, r
 	return task, nil
 }
 
-// EnqueueChannelIntentTask creates an internal queued task for semantic
-// channel intent classification. It intentionally skips task broadcasts:
-// callers synchronously wait for the task result, and no user-facing activity
-// row or chat message should appear for this resolver implementation detail.
-func (s *TaskService) EnqueueChannelIntentTask(ctx context.Context, workspaceID pgtype.UUID, agentID pgtype.UUID, params ChannelIntentTaskParams) (db.AgentTaskQueue, error) {
-	agent, err := s.Queries.GetAgent(ctx, agentID)
-	if err != nil {
-		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
-	}
-	if agent.ArchivedAt.Valid {
-		return db.AgentTaskQueue{}, fmt.Errorf("agent is archived")
-	}
-	if !agent.RuntimeID.Valid {
-		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
-	}
-
-	payload := ChannelIntentContext{
-		Type:           ChannelIntentContextType,
-		Prompt:         params.Prompt,
-		Message:        params.Message,
-		WorkspaceID:    util.UUIDToString(workspaceID),
-		RequesterID:    params.RequesterID,
-		Channel:        params.Channel,
-		ChatID:         params.ChatID,
-		ChatType:       params.ChatType,
-		SenderID:       params.SenderID,
-		SenderName:     params.SenderName,
-		InboundEventID: params.InboundEventID,
-	}
-	contextJSON, err := json.Marshal(payload)
-	if err != nil {
-		return db.AgentTaskQueue{}, fmt.Errorf("marshal channel intent context: %w", err)
-	}
-
-	task, err := s.Queries.CreateChannelIntentTask(ctx, db.CreateChannelIntentTaskParams{
-		AgentID:   agentID,
-		RuntimeID: agent.RuntimeID,
-		Priority:  priorityToInt("high"),
-		Context:   contextJSON,
-	})
-	if err != nil {
-		return db.AgentTaskQueue{}, fmt.Errorf("create channel intent task: %w", err)
-	}
-
-	slog.Info("channel intent task enqueued",
-		"task_id", util.UUIDToString(task.ID),
-		"workspace_id", util.UUIDToString(workspaceID),
-		"agent_id", util.UUIDToString(agentID),
-	)
-	s.notifyTaskAvailable(task)
-	return task, nil
-}
-
 // EnqueueChannelTurnTask creates an internal queued task for a channel agent
-// turn. Unlike channel-intent tasks, this is the product path for natural
-// language channel messages and the agent may use the Multica CLI.
+// turn. This is the product path for natural-language channel messages and
+// the agent may use the Multica CLI.
 func (s *TaskService) EnqueueChannelTurnTask(ctx context.Context, workspaceID pgtype.UUID, agentID pgtype.UUID, params ChannelTurnTaskParams) (db.AgentTaskQueue, error) {
 	agent, err := s.Queries.GetAgent(ctx, agentID)
 	if err != nil {
@@ -710,18 +639,18 @@ func (s *TaskService) EnqueueChannelTurnTask(ctx context.Context, workspaceID pg
 	}
 
 	payload := ChannelTurnContext{
-		Type:              ChannelTurnContextType,
-		Prompt:            params.Prompt,
-		Message:           params.Message,
-		WorkspaceID:       util.UUIDToString(workspaceID),
-		RequesterID:       params.RequesterID,
-		Channel:           params.Channel,
-		ChatID:            params.ChatID,
-		ChatType:          params.ChatType,
-		SenderID:          params.SenderID,
-		SenderName:        params.SenderName,
-		InboundEventID:    params.InboundEventID,
-		ReplyContextIssue: params.ReplyContextIssue,
+		Type:            ChannelTurnContextType,
+		Prompt:          params.Prompt,
+		Message:         params.Message,
+		WorkspaceID:     util.UUIDToString(workspaceID),
+		RequesterID:     params.RequesterID,
+		Channel:         params.Channel,
+		ChatID:          params.ChatID,
+		ChatType:        params.ChatType,
+		SenderID:        params.SenderID,
+		SenderName:      params.SenderName,
+		InboundEventID:  params.InboundEventID,
+		ContextIssueKey: params.ContextIssueKey,
 	}
 	contextJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -1528,12 +1457,13 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, trigg
 
 // enqueueRerunTask enqueues a fresh task for the given agent on the issue.
 // For agent-assigned issues it uses enqueueIssueTask (which reads AssigneeID);
-// for squad-assigned issues it uses EnqueueTaskForMention with the leader ID.
+// for squad-assigned issues the rerun targets the squad leader and is flagged
+// as a leader task so the self-trigger guard treats it correctly.
 func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID) (db.AgentTaskQueue, error) {
 	if issue.AssigneeType.String == "agent" {
 		return s.enqueueIssueTask(ctx, issue, triggerCommentID, true)
 	}
-	return s.EnqueueTaskForMention(ctx, issue, agentID, triggerCommentID)
+	return s.EnqueueTaskForSquadLeader(ctx, issue, agentID, triggerCommentID)
 }
 
 // HandleFailedTasks runs the post-failure side effects for a batch of
@@ -1885,9 +1815,6 @@ func (s *TaskService) ResolveTaskWorkspaceID(ctx context.Context, task db.AgentT
 	if qc, ok := s.parseQuickCreateContext(task); ok {
 		return qc.WorkspaceID
 	}
-	if ci, ok := s.parseChannelIntentContext(task); ok {
-		return ci.WorkspaceID
-	}
 	if ct, ok := s.parseChannelTurnContext(task); ok {
 		return ct.WorkspaceID
 	}
@@ -2063,6 +1990,7 @@ func issueToMap(issue db.Issue, issuePrefix string) map[string]any {
 		"creator_id":      util.UUIDToString(issue.CreatorID),
 		"parent_issue_id": util.UUIDToPtr(issue.ParentIssueID),
 		"position":        issue.Position,
+		"start_date":      util.TimestampToPtr(issue.StartDate),
 		"due_date":        util.TimestampToPtr(issue.DueDate),
 		"created_at":      util.TimestampToString(issue.CreatedAt),
 		"updated_at":      util.TimestampToString(issue.UpdatedAt),
@@ -2091,23 +2019,6 @@ func (s *TaskService) parseQuickCreateContext(task db.AgentTaskQueue) (QuickCrea
 	return qc, true
 }
 
-func (s *TaskService) parseChannelIntentContext(task db.AgentTaskQueue) (ChannelIntentContext, bool) {
-	if task.IssueID.Valid || task.ChatSessionID.Valid || task.AutopilotRunID.Valid {
-		return ChannelIntentContext{}, false
-	}
-	if len(task.Context) == 0 {
-		return ChannelIntentContext{}, false
-	}
-	var ci ChannelIntentContext
-	if err := json.Unmarshal(task.Context, &ci); err != nil {
-		return ChannelIntentContext{}, false
-	}
-	if ci.Type != ChannelIntentContextType {
-		return ChannelIntentContext{}, false
-	}
-	return ci, true
-}
-
 func (s *TaskService) parseChannelTurnContext(task db.AgentTaskQueue) (ChannelTurnContext, bool) {
 	if task.IssueID.Valid || task.ChatSessionID.Valid || task.AutopilotRunID.Valid {
 		return ChannelTurnContext{}, false
@@ -2125,15 +2036,7 @@ func (s *TaskService) parseChannelTurnContext(task db.AgentTaskQueue) (ChannelTu
 	return ct, true
 }
 
-func (s *TaskService) isChannelIntentTask(task db.AgentTaskQueue) bool {
-	_, ok := s.parseChannelIntentContext(task)
-	return ok
-}
-
 func (s *TaskService) isInternalChannelTask(task db.AgentTaskQueue) bool {
-	if s.isChannelIntentTask(task) {
-		return true
-	}
 	_, ok := s.parseChannelTurnContext(task)
 	return ok
 }

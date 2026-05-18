@@ -56,7 +56,7 @@ func formatProjectResource(r ProjectResourceForEnv) string {
 // For Codex:    writes {workDir}/AGENTS.md  (skills discovered natively via CODEX_HOME)
 // For Copilot:  writes {workDir}/AGENTS.md  (skills discovered natively from .github/skills/)
 // For OpenCode: writes {workDir}/AGENTS.md  (skills discovered natively from .opencode/skills/)
-// For OpenClaw: writes {workDir}/AGENTS.md  (skills discovered natively from .openclaw/skills/)
+// For OpenClaw: writes {workDir}/AGENTS.md  (skills discovered natively from {workDir}/skills/ via per-task openclaw-config.json that pins agents.defaults.workspace)
 // For Hermes:   writes {workDir}/AGENTS.md  (skills fall back to .agent_context/skills/; AGENTS.md points there)
 // For Gemini:   writes {workDir}/GEMINI.md  (discovered natively by the Gemini CLI)
 // For Pi:       writes {workDir}/AGENTS.md  (skills discovered natively from .pi/skills/)
@@ -233,13 +233,6 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("- For low-risk issue writes requested by the user, use the existing CLI commands. Do not invent missing comment bodies or assignees.\n")
 		b.WriteString("- Do not perform delete or irreversible/destructive operations from channel; explain that those need the Web UI or a more explicit workflow.\n")
 		b.WriteString("- Final assistant output is sent directly back to the channel, so write only the user-facing reply.\n\n")
-	} else if ctx.ChannelIntentPrompt != "" {
-		// Channel intent task: internal semantic classification mode.
-		b.WriteString("**You are resolving a channel message into a structured intent.** This is an internal classifier task, not a chat session and not an issue assignment.\n\n")
-		b.WriteString("- Return only the JSON object requested in the user message.\n")
-		b.WriteString("- Do NOT call the `multica` CLI or modify workspace data.\n")
-		b.WriteString("- Do NOT create issues, comments, labels, assignees, or status changes directly.\n")
-		b.WriteString("- Destructive requests such as delete must be classified as `Unsupported`.\n\n")
 	} else if ctx.QuickCreatePrompt != "" {
 		// Quick-create task: detailed field / output rules live in the
 		// per-turn prompt (BuildPrompt → buildQuickCreatePrompt) so they
@@ -321,11 +314,16 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 			// Claude discovers skills natively from .claude/skills/ — just list names.
 			b.WriteString("You have the following skills installed (discovered automatically):\n\n")
 		case "codex", "copilot", "opencode", "openclaw", "pi", "cursor", "kimi", "kiro":
-			// Codex, Copilot, OpenCode, OpenClaw, Pi, Cursor, Kimi, and Kiro discover skills natively from their respective paths — just list names.
+			// Codex, Copilot, OpenCode, OpenClaw, Pi, Cursor, Kimi, and Kiro discover skills
+			// natively from their respective paths. For OpenClaw, the daemon also writes a
+			// per-task openclaw-config.json (exported via OPENCLAW_CONFIG_PATH) that pins
+			// agents.defaults.workspace to the task workdir so the CLI's scanner picks up
+			// {workDir}/skills/.
 			b.WriteString("You have the following skills installed (discovered automatically):\n\n")
 		case "gemini", "hermes":
-			// Gemini reads GEMINI.md directly; Hermes has no native skills discovery path
-			// wired up in resolveSkillsDir, so both fall back to .agent_context/skills/.
+			// Gemini reads GEMINI.md directly. Hermes has no native skills discovery
+			// path wired up in resolveSkillsDir; both fall back to referencing the
+			// files explicitly under .agent_context/skills/.
 			b.WriteString("Detailed skill instructions are in `.agent_context/skills/`. Each subdirectory contains a `SKILL.md`.\n\n")
 		default:
 			b.WriteString("Detailed skill instructions are in `.agent_context/skills/`. Each subdirectory contains a `SKILL.md`.\n\n")
@@ -372,12 +370,10 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("This is a run-only autopilot task, so there may be no issue comment to post. Your final assistant output is captured automatically as the autopilot run result. Keep it concise and state the outcome.\n")
 	case ctx.ChannelTurnPrompt != "":
 		b.WriteString("This is a channel agent turn. Your final assistant output is sent directly back to the external channel. Do not output JSON, internal tags, or execution logs; just write the reply the user should see.\n")
-	case ctx.ChannelIntentPrompt != "":
-		b.WriteString("This is an internal channel intent task. Print exactly one JSON object and nothing else. The JSON is parsed by the server; no user sees free-form assistant text.\n")
 	case ctx.QuickCreatePrompt != "":
 		b.WriteString("This is a quick-create task. There is NO existing issue to comment on. Your final stdout is captured automatically and the platform writes the user's success/failure inbox notification based on whether `multica issue create` succeeded.\n\n")
 		b.WriteString("- Do NOT call `multica issue comment add` — the issue you just created has no conversation context for this run.\n")
-		b.WriteString("- Print exactly one final line: `Created MUL-<n>: <title>` after a successful `multica issue create`.\n")
+		b.WriteString("- Print exactly one final line: `Created <identifier-or-id>: <title>` after a successful `multica issue create`. Use the created issue's `identifier` from JSON output when available; otherwise use its `id`. Do not assume any workspace issue prefix such as `MUL-`; workspaces can use custom prefixes.\n")
 		b.WriteString("- On CLI failure, exit with the CLI error as the only output. The platform translates that into a `quick_create_failed` inbox item carrying the original prompt for the user.\n")
 	default:
 		if ctx.IsSquadLeader {

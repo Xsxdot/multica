@@ -17,27 +17,28 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multica-ai/multica/server/internal/channel"
+	chcommand "github.com/multica-ai/multica/server/internal/channel/command"
+	channelconversation "github.com/multica-ai/multica/server/internal/channel/conversation"
 	"github.com/multica-ai/multica/server/internal/channel/gateway"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
-	chintent "github.com/multica-ai/multica/server/internal/channel/intent"
 	"github.com/multica-ai/multica/server/internal/channel/leader"
 	channelmetrics "github.com/multica-ai/multica/server/internal/channel/metrics"
 	"github.com/multica-ai/multica/server/internal/channel/outbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	"github.com/multica-ai/multica/server/internal/channel/provider"
+	chturn "github.com/multica-ai/multica/server/internal/channel/turn"
 	"github.com/multica-ai/multica/server/internal/events"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 type RuntimeComponents struct {
-	PrePipeline   *inbound.Pipeline
-	PostPipeline  *inbound.Pipeline
-	RuleResolvers []chintent.IntentResolver
-	ChatIntent    chintent.AsyncChatIntentClient
-	TurnPlanner   chintent.ChannelTurnPlanner
-	ChannelTurn   chintent.ChannelAgentTurnClient
-	DispatchStore inbound.DispatchCompletionStore
-	ReplyContext  inbound.ReplyContextLookup
+	PrePipeline        *inbound.Pipeline
+	PostPipeline       *inbound.Pipeline
+	RuleResolvers      []chcommand.Resolver
+	ChannelTurn        chturn.AgentClient
+	DispatchStore      inbound.DispatchCompletionStore
+	ConversationStore  channelconversation.Store
+	ContextMaxEntities int
 }
 
 type RuntimeBuilder func() RuntimeComponents
@@ -55,9 +56,8 @@ type Config struct {
 	GlobalLimit            int
 	Workers                int
 	ClaimBatch             int
-	IntentTaskTimeout      time.Duration
+	AgentTaskTimeout       time.Duration
 	ActionTaskTimeout      time.Duration
-	ClarificationTimeout   time.Duration
 	ProcessingLease        time.Duration
 	OutboundCleanupEnabled bool
 }
@@ -322,22 +322,20 @@ func (m *Manager) startInboundRuntimeLocked(ctx context.Context) {
 	}
 	components := m.cfg.RuntimeBuilder()
 	inboundRuntime := inbound.NewRuntime(inbound.RuntimeConfig{
-		Store:                inbound.NewDBInboundEventStore(m.cfg.Pool),
-		PrePipeline:          components.PrePipeline,
-		PostPipeline:         components.PostPipeline,
-		RuleResolvers:        components.RuleResolvers,
-		ChatIntent:           components.ChatIntent,
-		TurnPlanner:          components.TurnPlanner,
-		ChannelTurn:          components.ChannelTurn,
-		DispatchStore:        components.DispatchStore,
-		ReplyContext:         components.ReplyContext,
-		ReplySink:            inbound.NewGatewayReplySink(m.cfg.Gateway),
-		Workers:              m.cfg.Workers,
-		ClaimBatch:           m.cfg.ClaimBatch,
-		IntentTaskTimeout:    m.cfg.IntentTaskTimeout,
-		ActionTaskTimeout:    m.cfg.ActionTaskTimeout,
-		ClarificationTimeout: m.cfg.ClarificationTimeout,
-		ProcessingLease:      m.cfg.ProcessingLease,
+		Store:              inbound.NewDBInboundEventStore(m.cfg.Pool),
+		PrePipeline:        components.PrePipeline,
+		PostPipeline:       components.PostPipeline,
+		RuleResolvers:      components.RuleResolvers,
+		ChannelTurn:        components.ChannelTurn,
+		DispatchStore:      components.DispatchStore,
+		ConversationStore:  components.ConversationStore,
+		ContextMaxEntities: components.ContextMaxEntities,
+		ReplySink:          inbound.NewGatewayReplySink(m.cfg.Gateway, inbound.WithGatewayReplyConversationStore(channelconversation.NewDBStore(m.cfg.Pool))),
+		Workers:            m.cfg.Workers,
+		ClaimBatch:         m.cfg.ClaimBatch,
+		AgentTaskTimeout:   m.cfg.AgentTaskTimeout,
+		ActionTaskTimeout:  m.cfg.ActionTaskTimeout,
+		ProcessingLease:    m.cfg.ProcessingLease,
 	})
 	runtimeCtx, cancel := context.WithCancel(ctx)
 	m.cancels = append(m.cancels, cancel)
@@ -575,7 +573,6 @@ func (m *Manager) drainAdapterEvents(ctx context.Context, cfg provider.Connectio
 				"row_id", result.EventID,
 				"duplicate", result.Duplicate,
 				"rejected_backpressure", result.RejectedBackpressure,
-				"clarification_consumed", result.ClarificationConsumed,
 			)
 		}
 	}
@@ -654,6 +651,7 @@ func (m *Manager) startOutbox(ctx context.Context) {
 	outboxCtx, cancel := context.WithCancel(ctx)
 	m.cancels = append(m.cancels, cancel)
 	worker := outbound.NewOutboxWorker(outbound.NewDBNotificationStore(m.cfg.Pool), newRegistryRetrySender(m.cfg.Registry))
+	worker.SetMessageRecorder(outbound.NewConversationMessageRecorder(channelconversation.NewDBStore(m.cfg.Pool)))
 	worker.SetReadyConnectionsFunc(m.readyConnectionIDs)
 	go worker.Run(outboxCtx)
 	if m.cfg.OutboundCleanupEnabled {
@@ -795,22 +793,21 @@ func newRegistryRetrySender(registry *channel.Registry) *registryRetrySender {
 	return &registryRetrySender{registry: registry}
 }
 
-func (s *registryRetrySender) SendCard(ctx context.Context, connectionID string, target port.OutboundTarget, payload outbound.RetryPayload) error {
+func (s *registryRetrySender) SendCard(ctx context.Context, connectionID string, target port.OutboundTarget, payload outbound.RetryPayload) (port.SendResult, error) {
 	ch, err := s.registry.Get(connectionID)
 	if err != nil {
-		return outbound.WrapRetryable(fmt.Errorf("retry sender: get %s: %w", connectionID, err))
+		return port.SendResult{Retryable: true}, outbound.WrapRetryable(fmt.Errorf("retry sender: get %s: %w", connectionID, err))
 	}
 	result, err := ch.SendCard(ctx, port.OutboundCardMessage{
 		Target:   target,
-		ChatID:   target.ID,
 		Title:    payload.Title,
 		Body:     payload.Body,
 		Mentions: payload.Mentions,
 	})
 	if err != nil && result.Retryable {
-		return outbound.WrapRetryable(err)
+		return result, outbound.WrapRetryable(err)
 	}
-	return err
+	return result, err
 }
 
 var (

@@ -16,6 +16,7 @@ import (
 // Codex:    skills → handled separately in Prepare via codex-home
 // Copilot:  skills → {workDir}/.github/skills/{name}/SKILL.md  (native project-level discovery)
 // OpenCode: skills → {workDir}/.opencode/skills/{name}/SKILL.md  (native discovery)
+// OpenClaw: skills → {workDir}/skills/{name}/SKILL.md  (native discovery — paired with a per-task synthesized openclaw-config.json that pins agents.defaults.workspace to workDir; see openclaw_config.go)
 // Pi:       skills → {workDir}/.pi/skills/{name}/SKILL.md  (native discovery)
 // Cursor:   skills → {workDir}/.cursor/skills/{name}/SKILL.md  (native discovery)
 // Kimi:     skills → {workDir}/.kimi/skills/{name}/SKILL.md  (native discovery)
@@ -133,6 +134,14 @@ func resolveSkillsDir(workDir, provider string) (string, error) {
 	case "opencode":
 		// OpenCode natively discovers skills from .opencode/skills/ in the workdir.
 		skillsDir = filepath.Join(workDir, ".opencode", "skills")
+	case "openclaw":
+		// OpenClaw's native skill scanner reads <workspaceDir>/skills/. The
+		// daemon pairs this with a per-task synthesized openclaw-config.json
+		// (see openclaw_config.go) that pins agents.defaults.workspace to
+		// workDir, so writing here is what the CLI actually scans. Before
+		// MUL-2219 this used to fall back to .agent_context/skills/, which
+		// no openclaw scan path ever inspected.
+		skillsDir = filepath.Join(workDir, "skills")
 	case "pi":
 		// Pi natively discovers skills from .pi/skills/ in the workdir.
 		skillsDir = filepath.Join(workDir, ".pi", "skills")
@@ -211,9 +220,6 @@ func renderIssueContext(provider string, ctx TaskContextForEnv) string {
 	if ctx.QuickCreatePrompt != "" {
 		return renderQuickCreateContext(ctx)
 	}
-	if ctx.ChannelIntentPrompt != "" {
-		return renderChannelIntentContext(ctx)
-	}
 	if ctx.ChannelTurnPrompt != "" {
 		return renderChannelTurnContext(ctx)
 	}
@@ -242,20 +248,6 @@ func renderIssueContext(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("\n")
 	}
 
-	return b.String()
-}
-
-func renderChannelIntentContext(ctx TaskContextForEnv) string {
-	var b strings.Builder
-	b.WriteString("# Channel Intent Classification\n\n")
-	b.WriteString("This is an internal classifier task. Return only the requested JSON intent. Do not perform workspace mutations.\n\n")
-	if len(ctx.AgentSkills) > 0 {
-		b.WriteString("## Agent Skills\n\n")
-		for _, skill := range ctx.AgentSkills {
-			fmt.Fprintf(&b, "- **%s**\n", skill.Name)
-		}
-		b.WriteString("\n")
-	}
 	return b.String()
 }
 

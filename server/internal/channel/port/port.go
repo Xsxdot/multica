@@ -25,10 +25,9 @@ const (
 	EventTypeMessageRecalled EventType = "message_recalled"
 )
 
-// IntentKind is the high-level command category. Defined here (in port)
-// rather than imported from the intent package to avoid a circular
-// dependency: port is imported by intent-recog (T9/T10) which produces
-// Intents, and by dispatch (T11) which consumes them.
+// IntentKind is the high-level command category attached to deterministic
+// slash/source-command events. Defined here (in port) to avoid a circular
+// dependency: port is imported by command parsing and by dispatch.
 type IntentKind string
 
 const (
@@ -60,9 +59,9 @@ const (
 	SourceChat    IntentSource = "chat"
 )
 
-// InboundIntent carries the parsed intent attached to an InboundEvent by
-// the intent-recog step (T9/T10). The dispatch step (T11) reads this
-// field to route the event to the correct facade handler.
+// InboundIntent carries the structured action attached to an InboundEvent.
+// Dispatch reads this field to route deterministic slash/source commands to
+// the correct facade handler.
 type InboundIntent struct {
 	Kind       IntentKind
 	Confidence float64
@@ -86,7 +85,7 @@ const (
 // InboundEvent is the canonical, platform-agnostic envelope every adapter
 // emits on its Events() channel. The shape is deliberately platform-neutral —
 // adapter-specific quirks (e.g. Feishu's @_user_xxx mention markers) are
-// stripped during normalisation so downstream code (intent parsing,
+// stripped during normalisation so downstream code (command parsing,
 // dispatching, idempotency) never needs to know which platform an event
 // originated on.
 //
@@ -125,6 +124,23 @@ type InboundEvent struct {
 	Intent              InboundIntent
 	Attachments         []AttachmentInfo
 	RawPayload          json.RawMessage
+
+	// QuotedMessageID is the platform message ID the user explicitly quoted
+	// (e.g. Feishu quote block). Empty if the user did not quote any message.
+	QuotedMessageID string
+
+	// QuotedText is a truncated text summary (~200 runes max) of the quoted
+	// message, extracted directly from the quote block so the LLM can use it
+	// without a second round-trip to fetch the original message.
+	QuotedText string
+
+	// ReplyToMessageID is the platform message ID the user is replying to
+	// (e.g. Feishu "reply to message" parent_id). Empty for standalone msgs.
+	ReplyToMessageID string
+
+	// ThreadID is the platform thread / topic root message ID.
+	// Empty if the message is not inside a thread.
+	ThreadID string
 }
 
 func (e InboundEvent) ConnectionID() string {
@@ -190,10 +206,10 @@ func TargetUser(id string) OutboundTarget {
 // Text is the canonical field name (mirroring InboundEvent.Text) so call sites
 // reading and writing share vocabulary.
 type OutboundMessage struct {
-	Target OutboundTarget
-	// ChatID is the legacy chat target. New call sites should set Target.
-	ChatID string
-	Text   string
+	Target           OutboundTarget
+	Text             string
+	HandoffKind      string
+	SuggestedActions []string
 }
 
 // OutboundRichMessage is a platform-neutral rich message to be sent to the
@@ -201,13 +217,13 @@ type OutboundMessage struct {
 // while each adapter owns the platform-specific rendering (Feishu interactive
 // card, Slack Block Kit, WeCom markdown/template card, etc.).
 type OutboundRichMessage struct {
-	Target OutboundTarget
-	// ChatID is the legacy chat target. New call sites should set Target.
-	ChatID   string
-	Title    string
-	Body     string
-	Actions  []OutboundAction
-	Mentions []OutboundMention
+	Target           OutboundTarget
+	Title            string
+	Body             string
+	Actions          []OutboundAction
+	Mentions         []OutboundMention
+	HandoffKind      string
+	SuggestedActions []string
 }
 
 type OutboundAction struct {

@@ -268,7 +268,7 @@ func (noopCommentService) AddComment(_ context.Context, _ facade.AddCommentReq) 
 	return facade.Comment{}, errors.New("noopCommentService: not implemented for M2 tests")
 }
 
-// staticIntentStep — test-time intent-recog step. Production (T9/T10)
+// staticIntentStep — test-time command-recog step. Production (T9/T10)
 // has rule + chat resolvers; the M2 integration tests do not exercise
 // classification accuracy (that lives in TC-risk-1~3 in STA-65 and the
 // resolver unit tests). They DO exercise the dispatcher's response to
@@ -323,11 +323,9 @@ func (d *fnDispatch) Run(ctx context.Context, evt port.InboundEvent) (port.Inbou
 // without re-writing the rule engine.
 //
 // Identity resolution is delegated to the production dispatch step's
-// UserResolver (which looks up channel_user_binding by the *external*
-// SenderID). The M1 in-test identity-bind step is intentionally NOT
-// in this pipeline because it overwrites evt.SenderID with the
-// Multica user_id — that contract is M1-only and is incompatible
-// with the M2 production dispatcher's resolver shape.
+// UserResolver, which looks up channel_user_binding by the external
+// SenderID. This fixture keeps SenderID in platform identity form so
+// dispatcher behaviour matches the production pipeline.
 // ---------------------------------------------------------------------------
 
 func newM2Pipeline(

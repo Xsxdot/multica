@@ -285,6 +285,56 @@ export function createEnDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.3.1",
+        date: "2026-05-15",
+        title: "Faster Navigation, Background Updates & More Reliable Squads",
+        changes: [],
+        features: [
+          "Member and agent detail pages now show related tasks so teams can review who is working on what",
+          "The desktop app downloads updates in the background so a new version is ready when you are",
+          "Self-hosted deployments can send email through SMTP as an alternative to Resend",
+          "Create Squad has a clearer setup flow with member selection that works better for team coordination",
+        ],
+        improvements: [
+          "Page transitions are faster, with issue pages prepared ahead of time and smoother loading states",
+          "Long issue activity blocks collapse so comments and conclusions are easier to scan",
+          "Agents and Squads remember the Mine/All view when you return to the list",
+          "Repository setup accepts more SSH URL formats across settings, projects, and quick create",
+          "Squad handoffs are more dependable when agents have multiple roles or delegate to a specific member",
+        ],
+        fixes: [
+          "Self-hosted local file cards render and preview correctly",
+          "Agent-run tasks are more dependable when local tools or skills need to be found automatically",
+          "Claude usage totals match more of the model names reported by connected tools",
+          "After switching workspaces, live updates come from the correct workspace and show the right source",
+          "Chat session menus and runtime names hold their shape in narrower spaces",
+        ],
+      },
+      {
+        version: "0.3.0",
+        date: "2026-05-14",
+        title: "Squads & Attachment Previews",
+        changes: [],
+        features: [
+          "Squads let teams assign work to a group, with a leader agent coordinating the next step",
+          "Attachments can be previewed in place for PDFs, audio, video, markdown, code, logs, and plain text",
+          "Chinese names can be found by pinyin across mentions, assignees, subscribers, agents, projects, and squads",
+        ],
+        improvements: [
+          "Squad pages now include member management, faster agent creation from a squad, clearer row actions, and a wider detail layout",
+          "Quick-create and picker flows are easier to search and now include squad-aware routing",
+          "Usage charts can switch between cost and token views, with the same timezone controls used by runtimes",
+          "Workspace operators get command-line controls for managing squads and stopping a runaway issue run",
+          "Shared interface labels are translated more consistently in English and Chinese",
+        ],
+        fixes: [
+          "Squad leaders stay quiet when a human already routed the conversation to someone specific",
+          "Mentioning a squad now wakes the right leader while preserving private-agent access rules",
+          "Issue lists stay fresher after deletes and follow-up comments no longer trigger stale Done replies",
+          "Attachment previews keep working for files added while writing or editing issues and comments",
+        ],
+      },
+      {
         version: "0.2.32",
         date: "2026-05-13",
         title: "Usage Insights, Chat Renaming & Smoother Desktop Flows",

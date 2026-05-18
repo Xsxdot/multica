@@ -285,6 +285,56 @@ export function createZhDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.3.1",
+        date: "2026-05-15",
+        title: "更快的导航、后台更新与更可靠的小队协作",
+        changes: [],
+        features: [
+          "成员和 agent 详情页现在可以看到关联任务，方便回看每个人和每个 agent 正在推进的工作",
+          "桌面端会在后台提前下载新版本，等你准备好时再安装更新",
+          "自托管部署可以使用 SMTP 发送邮件，不再只依赖 Resend",
+          "创建 Squad 的流程更清晰，成员选择和初始设置更适合团队协作",
+        ],
+        improvements: [
+          "页面切换更快，Issue 页面会提前准备内容，并在加载时展示更自然的过渡状态",
+          "Issue 时间线会把较长的活动记录收起，重点评论和结论更容易扫读",
+          "Agents 和 Squads 页会记住你上次选择的 Mine/All 视图，返回列表时不再重置",
+          "仓库设置、项目资源和快速创建流程更好地支持 SSH 形式的仓库地址",
+          "小队分工更稳定，leader 能正确接续双角色 agent 的回复，也会更明确地把任务交给指定成员",
+        ],
+        fixes: [
+          "自托管本地文件卡片可以正常展示和预览",
+          "Agent 在自动寻找本地工具、加载技能以及无人值守运行时更可靠",
+          "Claude 用量统计能识别更多接入工具上报的模型名称",
+          "切换 workspace 后，实时更新会来自正确的 workspace，消息来源也更准确",
+          "聊天会话下拉菜单和 runtime 名称展示在窄空间里更稳定",
+        ],
+      },
+      {
+        version: "0.3.0",
+        date: "2026-05-14",
+        title: "Squads 与附件预览",
+        changes: [],
+        features: [
+          "Squads 支持把任务交给一个小组，由 leader agent 负责协调下一步",
+          "附件可以直接预览，支持 PDF、音频、视频、Markdown、代码、日志和纯文本",
+          "中文姓名支持用拼音搜索，适用于 mention、负责人、订阅人、agents、projects 和 squads",
+        ],
+        improvements: [
+          "Squad 页面补齐成员管理、从 squad 内快速创建 agent、清晰的成员操作按钮，以及更宽的详情布局",
+          "快速创建和各类选择器更容易搜索，并能识别 squad 相关的指派和提及",
+          "Usage 图表可以在费用和 token 视图之间切换，并复用 runtime 的时区控制",
+          "工作区管理员可以通过命令行管理 squads，并在必要时停止失控的 issue 执行",
+          "共享界面文案的中英文翻译更完整",
+        ],
+        fixes: [
+          "当成员已经明确把讨论指向某个人或小组时，Squad leader 不再重复发言",
+          "提及 squad 时会正确唤起对应 leader，同时保留私有 agent 的访问限制",
+          "删除 Issue 后列表刷新更准确，后续评论也不再触发过期的 Done 回复",
+          "在撰写或编辑 issue 和评论时新增的附件，也可以稳定使用预览",
+        ],
+      },
+      {
         version: "0.2.32",
         date: "2026-05-13",
         title: "用量洞察、聊天重命名与桌面体验优化",

@@ -344,6 +344,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Route("/api/issues", func(r chi.Router) {
 				r.Get("/search", h.SearchIssues)
 				r.Get("/child-progress", h.ChildIssueProgress)
+				r.Get("/grouped", h.ListGroupedIssues)
 				r.Get("/", h.ListIssues)
 				r.Post("/", h.CreateIssue)
 				r.Post("/quick-create", h.QuickCreateIssue)
@@ -520,6 +521,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Get("/usage/daily", h.GetDashboardUsageDaily)
 				r.Get("/usage/by-agent", h.GetDashboardUsageByAgent)
 				r.Get("/agent-runtime", h.GetDashboardAgentRunTime)
+				r.Get("/runtime/daily", h.GetDashboardRunTimeDaily)
 			})
 
 			// Runtimes

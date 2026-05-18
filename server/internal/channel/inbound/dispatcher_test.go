@@ -15,7 +15,6 @@ import (
 	"github.com/multica-ai/multica/server/internal/channel/gateway"
 	"github.com/multica-ai/multica/server/internal/channel/inbound"
 	"github.com/multica-ai/multica/server/internal/channel/port"
-	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 )
 
 // ---------------------------------------------------------------------------
@@ -251,30 +250,6 @@ func (f *fakeActionProposalStore) FindActionProposal(_ context.Context, _, _, _,
 func (f *fakeActionProposalStore) MarkActionProposalStatus(_ context.Context, _ pgtype.UUID, status string) error {
 	f.marked = append(f.marked, status)
 	return nil
-}
-
-type fakeReplyContextLookup struct {
-	ctx inboundReplyContext
-	ok  bool
-	err error
-}
-
-type inboundReplyContext = struct {
-	WorkspaceID     pgtype.UUID
-	IssueID         pgtype.UUID
-	IssueIdentifier string
-	IssueTitle      string
-	ExpiresAt       time.Time
-}
-
-func (f fakeReplyContextLookup) Lookup(_ context.Context, _, _ string, _ time.Time) (replyctx.Context, bool, error) {
-	return replyctx.Context{
-		WorkspaceID:     f.ctx.WorkspaceID,
-		IssueID:         f.ctx.IssueID,
-		IssueIdentifier: f.ctx.IssueIdentifier,
-		IssueTitle:      f.ctx.IssueTitle,
-		ExpiresAt:       f.ctx.ExpiresAt,
-	}, f.ok, f.err
 }
 
 func (f *fakeCommentService) AddComment(_ context.Context, req facade.AddCommentReq) (facade.Comment, error) {
@@ -673,6 +648,100 @@ func TestDispatchStep_AddComment_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(recCh.sends[0].Text, "COMMENT_ADDED") {
 		t.Errorf("reply missing COMMENT_ADDED: %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_AddComment_WithProposalStore_ProposesWhenNoContextMessage(t *testing.T) {
+	t.Parallel()
+
+	cfg, _, commentSvc, recCh := buildDispatchConfig()
+	store := &fakeActionProposalStore{}
+	cfg.ProposalStore = store
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentAddComment, map[string]string{
+		"issue_key": "STA-2",
+		"comment":   "已找产品确认",
+	})
+	evt.RuntimeEventID = "11111111-1111-1111-1111-111111111111"
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(commentSvc.added) != 0 {
+		t.Fatalf("AddComment called %d times before confirm, want 0", len(commentSvc.added))
+	}
+	if len(store.created) != 1 {
+		t.Fatalf("CreateActionProposal called %d times, want 1", len(store.created))
+	}
+	if !strings.Contains(recCh.sends[0].Text, "ACTION_PROPOSED") {
+		t.Fatalf("proposal reply = %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_AddComment_ContextReplyBypassesProposal(t *testing.T) {
+	t.Parallel()
+
+	cfg, issueSvc, commentSvc, recCh := buildDispatchConfig()
+	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x30), Identifier: "STA-2", Title: "t", Status: "todo"}
+	store := &fakeActionProposalStore{}
+	cfg.ProposalStore = store
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentAddComment, map[string]string{
+		"issue_key":                   "STA-2",
+		"comment":                     "同意 [@Orion](mention://agent/11111111-1111-1111-1111-111111111111)",
+		"_channel_context_message_id": "channel-message-1",
+	})
+	evt.RuntimeEventID = "11111111-1111-1111-1111-111111111111"
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(store.created) != 0 {
+		t.Fatalf("CreateActionProposal called %d times, want 0", len(store.created))
+	}
+	if len(commentSvc.added) != 1 {
+		t.Fatalf("AddComment called %d times, want 1", len(commentSvc.added))
+	}
+	if !strings.Contains(commentSvc.added[0].Content, "@Orion") {
+		t.Fatalf("comment content = %q, want agent mention", commentSvc.added[0].Content)
+	}
+	if !strings.Contains(recCh.sends[0].Text, "COMMENT_ADDED") || strings.Contains(recCh.sends[0].Text, "ACTION_PROPOSED") {
+		t.Fatalf("reply = %q", recCh.sends[0].Text)
+	}
+}
+
+func TestDispatchStep_AddComment_ChannelContextParamStillProposes(t *testing.T) {
+	t.Parallel()
+
+	cfg, _, commentSvc, recCh := buildDispatchConfig()
+	store := &fakeActionProposalStore{}
+	cfg.ProposalStore = store
+	step := inbound.NewDispatchStep(cfg)
+
+	evt := makeEvt(port.IntentAddComment, map[string]string{
+		"issue_key":                   "STA-2",
+		"comment":                     "同意",
+		"_channel_context_message_id": "channel-message-1",
+	})
+	evt.Intent.Source = port.SourceChat
+	evt.RuntimeEventID = "11111111-1111-1111-1111-111111111111"
+	_, _, err := step.Run(context.Background(), evt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(commentSvc.added) != 0 {
+		t.Fatalf("AddComment called %d times before confirm, want 0", len(commentSvc.added))
+	}
+	if len(store.created) != 1 {
+		t.Fatalf("CreateActionProposal called %d times, want 1", len(store.created))
+	}
+	if !strings.Contains(recCh.sends[0].Text, "ACTION_PROPOSED") {
+		t.Fatalf("proposal reply = %q", recCh.sends[0].Text)
 	}
 }
 
@@ -1551,76 +1620,6 @@ func TestDispatchStep_QueryIssue_NoTodos(t *testing.T) {
 
 	if !strings.Contains(recCh.sends[0].Text, "没有待办") {
 		t.Errorf("reply should say no todos: %q", recCh.sends[0].Text)
-	}
-}
-
-func TestDispatchStep_DirectUnknown_UsesReplyContextAsComment(t *testing.T) {
-	t.Parallel()
-
-	cfg, _, commentSvc, recCh := buildDispatchConfig()
-	cfg.ReplyContext = fakeReplyContextLookup{
-		ok: true,
-		ctx: inboundReplyContext{
-			WorkspaceID:     uuid(0x01),
-			IssueID:         uuid(0x71),
-			IssueIdentifier: "STA-71",
-			IssueTitle:      "远程 agent",
-			ExpiresAt:       time.Now().Add(time.Hour),
-		},
-	}
-	step := inbound.NewDispatchStep(cfg)
-
-	evt := makeEvt(port.IntentUnknown, map[string]string{})
-	evt.ChatType = port.ChatTypeDirect
-	evt.Text = "我看过了，按方案 2 做"
-	_, _, err := step.Run(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(commentSvc.added) != 1 {
-		t.Fatalf("expected 1 comment, got %d", len(commentSvc.added))
-	}
-	if commentSvc.added[0].IssueID != uuid(0x71) || commentSvc.added[0].Content != evt.Text {
-		t.Fatalf("comment = %#v", commentSvc.added[0])
-	}
-	if len(recCh.sends) != 1 || !strings.Contains(recCh.sends[0].Text, "STA-71") {
-		t.Fatalf("reply should mention target issue, got %#v", recCh.sends)
-	}
-}
-
-func TestDispatchStep_DirectMutation_UsesReplyContextIssue(t *testing.T) {
-	t.Parallel()
-
-	cfg, issueSvc, _, recCh := buildDispatchConfig()
-	cfg.ChatBinding = &fakeChatBinding{err: errors.New("direct chat has no workspace binding")}
-	cfg.ReplyContext = fakeReplyContextLookup{
-		ok: true,
-		ctx: inboundReplyContext{
-			WorkspaceID:     uuid(0x01),
-			IssueID:         uuid(0x72),
-			IssueIdentifier: "STA-72",
-			IssueTitle:      "远程 agent",
-			ExpiresAt:       time.Now().Add(time.Hour),
-		},
-	}
-	issueSvc.getByIdentifierRet = facade.Issue{ID: uuid(0x72), Identifier: "STA-72", Title: "远程 agent", Status: "in_review"}
-	step := inbound.NewDispatchStep(cfg)
-
-	evt := makeEvt(port.IntentSetStatus, map[string]string{"status": "done"})
-	evt.ChatType = port.ChatTypeDirect
-	evt.Text = "改成 done"
-	_, _, err := step.Run(context.Background(), evt)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(issueSvc.gotByID) != 1 || issueSvc.gotByID[0].Identifier != "STA-72" {
-		t.Fatalf("gotByID = %#v", issueSvc.gotByID)
-	}
-	if len(issueSvc.setStatus) != 1 || issueSvc.setStatus[0].Status != "done" {
-		t.Fatalf("setStatus = %#v", issueSvc.setStatus)
-	}
-	if len(recCh.sends) != 1 || !strings.Contains(recCh.sends[0].Text, "STATUS_CHANGED") {
-		t.Fatalf("reply = %#v", recCh.sends)
 	}
 }
 

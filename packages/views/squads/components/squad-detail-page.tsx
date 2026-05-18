@@ -252,18 +252,17 @@ export function SquadDetailPage() {
       )}
 
       {/* Squad-scoped create flow: same dialog as the Agents page but
-          with squadId set, so the dialog runs addSquadMember after
-          createAgent / createAgentFromTemplate and skips the
-          agent-detail navigation. Only mounted for workspace
-          owner/admin since AddSquadMember is owner/admin-gated
-          server-side; for everyone else the trigger never renders. */}
+          with squadId set, so the dialog runs api.addSquadMember after
+          api.createAgent and skips the agent-detail navigation. Only
+          mounted for workspace owner/admin since AddSquadMember is
+          owner/admin-gated server-side; for everyone else the trigger
+          never renders. */}
       {showCreateAgent && isWorkspaceAdmin && (
         <CreateAgentDialog
           runtimes={runtimes}
           runtimesLoading={runtimesLoading}
           members={wsMembers}
           currentUserId={currentUser?.id ?? null}
-          existingAgentNames={agents.map((a: Agent) => a.name)}
           squadId={squadId}
           onClose={() => setShowCreateAgent(false)}
           onCreate={handleCreateAgent}

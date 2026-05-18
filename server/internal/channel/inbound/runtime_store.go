@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	channelconversation "github.com/multica-ai/multica/server/internal/channel/conversation"
 	"github.com/multica-ai/multica/server/internal/channel/port"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -21,7 +21,6 @@ const (
 	InboundStatusProcessing           = "processing"
 	InboundStatusProcessed            = "processed"
 	InboundStatusWaitingAgent         = "waiting_agent"
-	InboundStatusWaitingUser          = "waiting_user"
 	InboundStatusFailed               = "failed"
 	InboundStatusDead                 = "dead"
 	InboundStatusRejectedBackpressure = "rejected_backpressure"
@@ -31,10 +30,9 @@ const (
 	InboundPhasePost   = "post"
 	InboundPhaseDone   = "done"
 
-	WaitKindIntent      = "intent"
-	WaitKindAction      = "action"
-	WaitKindChannelTurn = "channel_turn"
-	WaitKindUser        = "user_clarification"
+	WaitKindLegacyIntent = "intent"
+	WaitKindAction       = "action"
+	WaitKindChannelTurn  = "channel_turn"
 )
 
 type AcceptOptions struct {
@@ -44,13 +42,11 @@ type AcceptOptions struct {
 }
 
 type AcceptResult struct {
-	EventID                  string
-	Duplicate                bool
-	Accepted                 bool
-	RejectedBackpressure     bool
-	ClarificationConsumed    bool
-	QueueDepth               int
-	ActiveWaitingForUserText string
+	EventID              string
+	Duplicate            bool
+	Accepted             bool
+	RejectedBackpressure bool
+	QueueDepth           int
 }
 
 type RetryResult struct {
@@ -62,7 +58,7 @@ type InboundEventRecord struct {
 	Event            port.InboundEvent
 	Status           string
 	Phase            string
-	ConversationKey  string
+	ProcessingKey    string
 	WaitKind         string
 	WaitTaskID       string
 	WorkspaceID      string
@@ -79,16 +75,12 @@ type WaitingAgentEvent struct {
 	UpdatedAt  time.Time
 }
 
-type ExpiredWaitingUserEvent struct {
-	ID    string
-	Event port.InboundEvent
-}
-
 type ChatBindingContext struct {
 	WorkspaceID      string
 	DefaultProjectID string
 	ListenMode       string
 	AgentID          string
+	IssuePrefix      string
 }
 
 type InboundEventStore interface {
@@ -98,14 +90,12 @@ type InboundEventStore interface {
 	SaveEvent(ctx context.Context, id string, evt port.InboundEvent, phase string, chatCtx ChatBindingContext) error
 	MarkQueued(ctx context.Context, id string, evt port.InboundEvent, phase string, chatCtx ChatBindingContext) error
 	MarkWaitingAgent(ctx context.Context, id string, evt port.InboundEvent, taskID string, chatCtx ChatBindingContext, waitKind string) error
-	MarkWaitingUser(ctx context.Context, id string, evt port.InboundEvent, replyText string, chatCtx ChatBindingContext, expiresAt time.Time) error
 	MarkProcessed(ctx context.Context, id string) error
 	MarkRetry(ctx context.Context, id string, err error) (RetryResult, error)
 	MarkDead(ctx context.Context, id string, err error) error
 	ListWaitingAgent(ctx context.Context, limit int) ([]WaitingAgentEvent, error)
 	LookupChatContext(ctx context.Context, channelName, chatID string) (ChatBindingContext, error)
 	RequeueStaleProcessing(ctx context.Context, olderThan time.Duration) (int64, error)
-	ExpireWaitingUser(ctx context.Context, limit int) ([]ExpiredWaitingUserEvent, error)
 }
 
 type DBInboundEventStore struct {
@@ -117,6 +107,18 @@ func NewDBInboundEventStore(pool *pgxpool.Pool) *DBInboundEventStore {
 }
 
 func ConversationKey(evt port.InboundEvent) string {
+	chatType := normalizedRuntimeChatType(evt)
+	threadID := strings.TrimSpace(evt.ThreadID)
+	if threadID != "" {
+		return strings.Join([]string{evt.ConnectionID(), "thread", evt.ChatID, threadID}, ":")
+	}
+	if chatType == string(port.ChatTypeDirect) {
+		return strings.Join([]string{evt.ConnectionID(), chatType, evt.SenderID}, ":")
+	}
+	return strings.Join([]string{evt.ConnectionID(), chatType, evt.ChatID}, ":")
+}
+
+func ProcessingKey(evt port.InboundEvent) string {
 	chatType := normalizedRuntimeChatType(evt)
 	if chatType == string(port.ChatTypeDirect) {
 		return strings.Join([]string{evt.ConnectionID(), chatType, evt.SenderID}, ":")
@@ -140,9 +142,13 @@ func (s *DBInboundEventStore) AcceptEvent(ctx context.Context, evt port.InboundE
 	if connectionID == "" {
 		return AcceptResult{}, errors.New("inbound accept: missing connection_id")
 	}
-	key := ConversationKey(evt)
-	if key == "" {
+	conversationKey := ConversationKey(evt)
+	if conversationKey == "" {
 		return AcceptResult{}, errors.New("inbound accept: missing conversation key")
+	}
+	processingKey := ProcessingKey(evt)
+	if processingKey == "" {
+		return AcceptResult{}, errors.New("inbound accept: missing processing key")
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -163,16 +169,21 @@ WHERE connection_id = $1 AND event_id = $2
 		return AcceptResult{}, err
 	}
 
+	conv, err := ensureConversation(ctx, tx, evt, conversationKey)
+	if err != nil {
+		return AcceptResult{}, err
+	}
+
 	if opts.GlobalLimit > 0 {
 		var pending int
 		if err := tx.QueryRow(ctx, `
 SELECT count(*) FROM channel_inbound_event
-WHERE status IN ('queued', 'processing', 'waiting_agent', 'waiting_user')
+WHERE status IN ('queued', 'processing', 'waiting_agent')
 `).Scan(&pending); err != nil {
 			return AcceptResult{}, err
 		}
 		if pending >= opts.GlobalLimit {
-			id, err := insertInboundEvent(ctx, tx, evt, key, InboundStatusRejectedBackpressure, InboundPhaseDone)
+			id, err := insertInboundEventWithMessage(ctx, tx, evt, processingKey, conv.ID, InboundStatusRejectedBackpressure, InboundPhaseDone)
 			if err != nil {
 				return AcceptResult{}, err
 			}
@@ -183,42 +194,26 @@ WHERE status IN ('queued', 'processing', 'waiting_agent', 'waiting_user')
 		}
 	}
 
-	if err := upsertConversation(ctx, tx, evt, key); err != nil {
+	if err := upsertProcessingLock(ctx, tx, evt, processingKey); err != nil {
 		return AcceptResult{}, err
 	}
 
 	var activeID string
 	if err := tx.QueryRow(ctx, `
 SELECT COALESCE(active_event_id::text, '')
-FROM channel_conversation
-WHERE connection_id = $1 AND conversation_key = $2
+FROM channel_processing_lock
+WHERE connection_id = $1 AND processing_key = $2
 FOR UPDATE
-`, connectionID, key).Scan(&activeID); err != nil {
+`, connectionID, processingKey).Scan(&activeID); err != nil {
 		return AcceptResult{}, err
 	}
 	if activeID != "" {
-		activeStatus, _, waitExpiresAt, terminal, err := loadActiveEventState(ctx, tx, activeID)
+		_, terminal, err := loadActiveEventState(ctx, tx, activeID)
 		if err != nil {
 			return AcceptResult{}, err
 		}
 		if terminal {
-			if err := clearConversationActive(ctx, tx, connectionID, key, activeID); err != nil {
-				return AcceptResult{}, err
-			}
-			activeID = ""
-		} else if activeStatus == InboundStatusWaitingUser && !waitExpiresAt.IsZero() && !time.Now().Before(waitExpiresAt) {
-			if err := markDeadTx(ctx, tx, activeID, "user clarification timed out"); err != nil {
-				return AcceptResult{}, err
-			}
-			if err := clearConversationActive(ctx, tx, connectionID, key, activeID); err != nil {
-				return AcceptResult{}, err
-			}
-			activeID = ""
-		} else if activeStatus == InboundStatusWaitingUser {
-			if err := markDeadTx(ctx, tx, activeID, "superseded by a new channel turn"); err != nil {
-				return AcceptResult{}, err
-			}
-			if err := clearConversationActive(ctx, tx, connectionID, key, activeID); err != nil {
+			if err := clearProcessingActive(ctx, tx, connectionID, processingKey, activeID); err != nil {
 				return AcceptResult{}, err
 			}
 			activeID = ""
@@ -229,14 +224,14 @@ FOR UPDATE
 	if err := tx.QueryRow(ctx, `
 SELECT count(*) FROM channel_inbound_event
 WHERE connection_id = $1
-  AND conversation_key = $2
-  AND status IN ('queued', 'processing', 'waiting_agent', 'waiting_user')
-`, connectionID, key).Scan(&depth); err != nil {
+  AND processing_key = $2
+  AND status IN ('queued', 'processing', 'waiting_agent')
+`, connectionID, processingKey).Scan(&depth); err != nil {
 		return AcceptResult{}, err
 	}
 
 	if !opts.BypassLimit && opts.ConversationLimit > 0 && depth >= opts.ConversationLimit {
-		id, err := insertInboundEvent(ctx, tx, evt, key, InboundStatusRejectedBackpressure, InboundPhaseDone)
+		id, err := insertInboundEventWithMessage(ctx, tx, evt, processingKey, conv.ID, InboundStatusRejectedBackpressure, InboundPhaseDone)
 		if err != nil {
 			return AcceptResult{}, err
 		}
@@ -246,7 +241,7 @@ WHERE connection_id = $1
 		return AcceptResult{EventID: id, RejectedBackpressure: true, QueueDepth: depth}, nil
 	}
 
-	id, err := insertInboundEvent(ctx, tx, evt, key, InboundStatusQueued, InboundPhasePre)
+	id, err := insertInboundEventWithMessage(ctx, tx, evt, processingKey, conv.ID, InboundStatusQueued, InboundPhasePre)
 	if err != nil {
 		return AcceptResult{}, err
 	}
@@ -267,15 +262,15 @@ func (s *DBInboundEventStore) ClaimNext(ctx context.Context, workerID string) (*
 	err = tx.QueryRow(ctx, `
 SELECT e.id::text
 FROM channel_inbound_event e
-JOIN channel_conversation c
-  ON c.connection_id = e.connection_id
- AND c.conversation_key = e.conversation_key
+JOIN channel_processing_lock l
+  ON l.connection_id = e.connection_id
+ AND l.processing_key = e.processing_key
 WHERE e.status = 'queued'
   AND e.next_attempt_at <= now()
-  AND (c.active_event_id IS NULL OR c.active_event_id = e.id)
+  AND (l.active_event_id IS NULL OR l.active_event_id = e.id)
 ORDER BY e.created_at ASC
 LIMIT 1
-FOR UPDATE OF e, c SKIP LOCKED
+FOR UPDATE OF e, l SKIP LOCKED
 `).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, tx.Commit(ctx)
@@ -285,14 +280,14 @@ FOR UPDATE OF e, c SKIP LOCKED
 	}
 
 	if _, err := tx.Exec(ctx, `
-UPDATE channel_conversation c
+UPDATE channel_processing_lock l
 SET active_event_id = e.id,
-    active_since = COALESCE(c.active_since, now()),
+    active_since = COALESCE(l.active_since, now()),
     updated_at = now()
 FROM channel_inbound_event e
 WHERE e.id = $1
-  AND c.connection_id = e.connection_id
-  AND c.conversation_key = e.conversation_key
+  AND l.connection_id = e.connection_id
+  AND l.processing_key = e.processing_key
 `, id); err != nil {
 		return nil, err
 	}
@@ -328,7 +323,7 @@ func (s *DBInboundEventStore) SaveEvent(ctx context.Context, id string, evt port
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `
+	if _, err = s.pool.Exec(ctx, `
 UPDATE channel_inbound_event
 SET text = $2,
     sender_external_id = $3,
@@ -341,8 +336,10 @@ SET text = $2,
     default_project_id = nullif($10, '')::uuid,
     updated_at = now()
 WHERE id = $1
-`, id, evt.Text, evt.SenderID, evt.SenderName, evt.MessageID, canonical, raw, phase, chatCtx.WorkspaceID, chatCtx.DefaultProjectID)
-	return err
+`, id, evt.Text, evt.SenderID, evt.SenderName, evt.MessageID, canonical, raw, phase, chatCtx.WorkspaceID, chatCtx.DefaultProjectID); err != nil {
+		return err
+	}
+	return updateInboundMessageForEvent(ctx, channelconversation.NewDBStore(s.pool), id, evt, chatCtx)
 }
 
 func (s *DBInboundEventStore) MarkQueued(ctx context.Context, id string, evt port.InboundEvent, phase string, chatCtx ChatBindingContext) error {
@@ -350,13 +347,12 @@ func (s *DBInboundEventStore) MarkQueued(ctx context.Context, id string, evt por
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `
+	if _, err = s.pool.Exec(ctx, `
 UPDATE channel_inbound_event
 SET status = 'queued',
     phase = $2,
     wait_kind = NULL,
     wait_task_id = NULL,
-    wait_expires_at = NULL,
     text = $3,
     canonical_event = $4,
     raw_payload = $5,
@@ -368,8 +364,10 @@ SET status = 'queued',
     last_error = NULL,
     updated_at = now()
 WHERE id = $1
-`, id, phase, evt.Text, canonical, raw, chatCtx.WorkspaceID, chatCtx.DefaultProjectID)
-	return err
+`, id, phase, evt.Text, canonical, raw, chatCtx.WorkspaceID, chatCtx.DefaultProjectID); err != nil {
+		return err
+	}
+	return updateInboundMessageForEvent(ctx, channelconversation.NewDBStore(s.pool), id, evt, chatCtx)
 }
 
 func (s *DBInboundEventStore) MarkWaitingAgent(ctx context.Context, id string, evt port.InboundEvent, taskID string, chatCtx ChatBindingContext, waitKind string) error {
@@ -378,15 +376,14 @@ func (s *DBInboundEventStore) MarkWaitingAgent(ctx context.Context, id string, e
 		return err
 	}
 	if waitKind == "" {
-		waitKind = WaitKindIntent
+		waitKind = WaitKindChannelTurn
 	}
-	_, err = s.pool.Exec(ctx, `
+	if _, err = s.pool.Exec(ctx, `
 UPDATE channel_inbound_event
 SET status = 'waiting_agent',
     phase = 'intent',
     wait_kind = $8,
     wait_task_id = nullif($2, '')::uuid,
-    wait_expires_at = NULL,
     text = $3,
     canonical_event = $4,
     raw_payload = $5,
@@ -396,34 +393,10 @@ SET status = 'waiting_agent',
     locked_by = NULL,
     updated_at = now()
 WHERE id = $1
-`, id, taskID, evt.Text, canonical, raw, chatCtx.WorkspaceID, chatCtx.DefaultProjectID, waitKind)
-	return err
-}
-
-func (s *DBInboundEventStore) MarkWaitingUser(ctx context.Context, id string, evt port.InboundEvent, replyText string, chatCtx ChatBindingContext, expiresAt time.Time) error {
-	canonical, raw, err := marshalEvent(evt)
-	if err != nil {
+`, id, taskID, evt.Text, canonical, raw, chatCtx.WorkspaceID, chatCtx.DefaultProjectID, waitKind); err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `
-UPDATE channel_inbound_event
-SET status = 'waiting_user',
-    phase = 'intent',
-    wait_kind = 'user_clarification',
-    wait_task_id = NULL,
-    wait_expires_at = $8,
-    text = $3,
-    canonical_event = $4,
-    raw_payload = $5,
-    workspace_id = nullif($6, '')::uuid,
-    default_project_id = nullif($7, '')::uuid,
-    last_error = $2,
-    locked_at = NULL,
-    locked_by = NULL,
-    updated_at = now()
-WHERE id = $1
-`, id, replyText, evt.Text, canonical, raw, chatCtx.WorkspaceID, chatCtx.DefaultProjectID, expiresAt)
-	return err
+	return updateInboundMessageForEvent(ctx, channelconversation.NewDBStore(s.pool), id, evt, chatCtx)
 }
 
 func (s *DBInboundEventStore) MarkProcessed(ctx context.Context, id string) error {
@@ -437,7 +410,6 @@ UPDATE channel_inbound_event
 SET status = 'processed',
     phase = 'done',
     completed_at = now(),
-    wait_expires_at = NULL,
     locked_at = NULL,
     locked_by = NULL,
     updated_at = now(),
@@ -446,7 +418,7 @@ WHERE id = $1
 `, id); err != nil {
 		return err
 	}
-	if err := clearConversationActiveForEvent(ctx, tx, id); err != nil {
+	if err := clearProcessingActiveForEvent(ctx, tx, id); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -469,7 +441,7 @@ SELECT attempts, max_attempts FROM channel_inbound_event WHERE id = $1 FOR UPDAT
 		if err := markDeadTx(ctx, tx, id, msg); err != nil {
 			return RetryResult{}, err
 		}
-		if err := clearConversationActiveForEvent(ctx, tx, id); err != nil {
+		if err := clearProcessingActiveForEvent(ctx, tx, id); err != nil {
 			return RetryResult{}, err
 		}
 		return RetryResult{Dead: true}, tx.Commit(ctx)
@@ -505,7 +477,7 @@ func (s *DBInboundEventStore) MarkDead(ctx context.Context, id string, runErr er
 	if err := markDeadTx(ctx, tx, id, truncateErr(runErr)); err != nil {
 		return err
 	}
-	if err := clearConversationActiveForEvent(ctx, tx, id); err != nil {
+	if err := clearProcessingActiveForEvent(ctx, tx, id); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -555,6 +527,7 @@ func (s *DBInboundEventStore) LookupChatContext(ctx context.Context, connectionI
 		DefaultProjectID: sqlcOptionalString(row.DefaultProjectID),
 		ListenMode:       listen,
 		AgentID:          sqlcOptionalString(row.AgentID),
+		IssuePrefix:      row.IssuePrefix,
 	}, nil
 }
 
@@ -593,75 +566,38 @@ WHERE status = 'processing'
 	return tag.RowsAffected(), nil
 }
 
-func (s *DBInboundEventStore) ExpireWaitingUser(ctx context.Context, limit int) ([]ExpiredWaitingUserEvent, error) {
-	if limit <= 0 {
-		limit = 32
+func ensureConversation(ctx context.Context, tx pgx.Tx, evt port.InboundEvent, key string) (channelconversation.Conversation, error) {
+	chatType := normalizedRuntimeChatType(evt)
+	conversationType := chatType
+	threadID := strings.TrimSpace(evt.ThreadID)
+	if threadID != "" {
+		conversationType = channelconversation.ConversationTypeThread
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return nil, err
+	senderID := ""
+	if chatType == string(port.ChatTypeDirect) {
+		senderID = evt.SenderID
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	rows, err := tx.Query(ctx, `
-SELECT id::text
-FROM channel_inbound_event
-WHERE status = 'waiting_user'
-  AND wait_expires_at IS NOT NULL
-  AND wait_expires_at <= now()
-ORDER BY wait_expires_at ASC
-LIMIT $1
-FOR UPDATE SKIP LOCKED
-`, limit)
-	if err != nil {
-		return nil, err
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	rows.Close()
-
-	out := make([]ExpiredWaitingUserEvent, 0, len(ids))
-	for _, id := range ids {
-		rec, err := loadInboundEventRecord(ctx, tx, id)
-		if err != nil {
-			return nil, err
-		}
-		if err := markDeadTx(ctx, tx, id, "user clarification timed out"); err != nil {
-			return nil, err
-		}
-		if err := clearConversationActiveForEvent(ctx, tx, id); err != nil {
-			return nil, err
-		}
-		out = append(out, ExpiredWaitingUserEvent{ID: id, Event: rec.Event})
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return channelconversation.NewTxStore(tx).EnsureConversation(ctx, channelconversation.Conversation{
+		Provider:         evt.ChannelName,
+		ConnectionID:     evt.ConnectionID(),
+		ConversationKey:  key,
+		ChatID:           evt.ChatID,
+		ChatType:         chatType,
+		ConversationType: conversationType,
+		ExternalThreadID: threadID,
+		SenderExternalID: senderID,
+		LastMessageAt:    time.Now().UTC(),
+	})
 }
 
-func upsertConversation(ctx context.Context, tx pgx.Tx, evt port.InboundEvent, key string) error {
-	chatType := normalizedRuntimeChatType(evt)
+func upsertProcessingLock(ctx context.Context, tx pgx.Tx, evt port.InboundEvent, key string) error {
 	_, err := tx.Exec(ctx, `
-INSERT INTO channel_conversation (provider, connection_id, conversation_key, chat_id, chat_type, sender_external_id)
-VALUES ($1, $2, $3, $4, $5, $6)
-ON CONFLICT (connection_id, conversation_key) DO UPDATE SET
-    chat_id = EXCLUDED.chat_id,
-    chat_type = EXCLUDED.chat_type,
-    sender_external_id = EXCLUDED.sender_external_id,
+INSERT INTO channel_processing_lock (provider, connection_id, processing_key)
+VALUES ($1, $2, $3)
+ON CONFLICT (connection_id, processing_key) DO UPDATE SET
+    provider = EXCLUDED.provider,
     updated_at = now()
-`, evt.ChannelName, evt.ConnectionID(), key, evt.ChatID, chatType, evt.SenderID)
+`, evt.ChannelName, evt.ConnectionID(), key)
 	return err
 }
 
@@ -673,7 +609,7 @@ func insertInboundEvent(ctx context.Context, tx pgx.Tx, evt port.InboundEvent, k
 	var id string
 	err = tx.QueryRow(ctx, `
 INSERT INTO channel_inbound_event (
-    provider, connection_id, event_id, event_type, conversation_key, chat_id, chat_type,
+    provider, connection_id, event_id, event_type, processing_key, chat_id, chat_type,
     sender_external_id, sender_name, message_id, text, canonical_event,
     raw_payload, status, phase
 ) VALUES (
@@ -685,6 +621,155 @@ RETURNING id::text
 `, evt.ChannelName, evt.ConnectionID(), evt.EventID, string(evt.Type), key, evt.ChatID, normalizedRuntimeChatType(evt),
 		evt.SenderID, evt.SenderName, evt.MessageID, evt.Text, canonical, raw, status, phase).Scan(&id)
 	return id, err
+}
+
+func insertInboundEventWithMessage(ctx context.Context, tx pgx.Tx, evt port.InboundEvent, key, conversationID, status, phase string) (string, error) {
+	id, err := insertInboundEvent(ctx, tx, evt, key, status, phase)
+	if err != nil {
+		return "", err
+	}
+	if err := insertInboundMessage(ctx, tx, evt, conversationID, id, ChatBindingContext{}); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func insertInboundMessage(ctx context.Context, tx pgx.Tx, evt port.InboundEvent, conversationID, inboundEventID string, chatCtx ChatBindingContext) error {
+	store := channelconversation.NewTxStore(tx)
+	replyToID, err := lookupPlatformMessageID(ctx, store, evt.ConnectionID(), evt.ReplyToMessageID)
+	if err != nil {
+		return err
+	}
+	quotedID, err := lookupPlatformMessageID(ctx, store, evt.ConnectionID(), evt.QuotedMessageID)
+	if err != nil {
+		return err
+	}
+	msg, err := inboundMessageFromEvent(evt, conversationID, inboundEventID, chatCtx, replyToID, quotedID)
+	if err != nil {
+		return err
+	}
+	_, err = store.CreateMessage(ctx, msg)
+	return err
+}
+
+func updateInboundMessageForEvent(ctx context.Context, store channelconversation.Store, inboundEventID string, evt port.InboundEvent, chatCtx ChatBindingContext) error {
+	if store == nil {
+		return nil
+	}
+	msg, err := inboundMessageFromEvent(evt, "", inboundEventID, chatCtx, "", "")
+	if err != nil {
+		return err
+	}
+	if err := store.UpdateMessageForInboundEvent(ctx, inboundEventID, msg); err != nil {
+		return err
+	}
+	if strings.TrimSpace(chatCtx.WorkspaceID) == "" {
+		return nil
+	}
+	saved, ok, err := store.FindMessageByInboundEventID(ctx, inboundEventID)
+	if err != nil || !ok {
+		return err
+	}
+	return store.AddEntityRefs(ctx, saved.ID, entityRefsFromInboundEvent(chatCtx.WorkspaceID, chatCtx.IssuePrefix, evt))
+}
+
+func lookupPlatformMessageID(ctx context.Context, store channelconversation.Store, connectionID, platformMessageID string) (string, error) {
+	if strings.TrimSpace(platformMessageID) == "" {
+		return "", nil
+	}
+	msg, ok, err := store.FindMessageByPlatformID(ctx, connectionID, platformMessageID)
+	if err != nil || !ok {
+		return "", err
+	}
+	return msg.ID, nil
+}
+
+func inboundMessageFromEvent(evt port.InboundEvent, conversationID, inboundEventID string, chatCtx ChatBindingContext, replyToID, quotedID string) (channelconversation.Message, error) {
+	body, err := marshalInboundMessageBody(evt)
+	if err != nil {
+		return channelconversation.Message{}, err
+	}
+	metadata, err := marshalInboundMessageMetadata(evt)
+	if err != nil {
+		return channelconversation.Message{}, err
+	}
+	messageType, senderType, platformMessageID := inboundMessageClassification(evt)
+	return channelconversation.Message{
+		Provider:                 evt.ChannelName,
+		ConnectionID:             evt.ConnectionID(),
+		ConversationID:           conversationID,
+		WorkspaceID:              chatCtx.WorkspaceID,
+		ChatID:                   evt.ChatID,
+		ChatType:                 normalizedRuntimeChatType(evt),
+		ThreadID:                 evt.ThreadID,
+		PlatformMessageID:        platformMessageID,
+		EventID:                  evt.EventID,
+		InboundEventID:           inboundEventID,
+		Direction:                channelconversation.DirectionInbound,
+		MessageType:              messageType,
+		SenderType:               senderType,
+		SenderExternalID:         evt.SenderID,
+		Text:                     evt.Text,
+		Body:                     body,
+		ContentFormat:            channelconversation.ContentFormatPlain,
+		ReplyToPlatformMessageID: evt.ReplyToMessageID,
+		QuotedPlatformMessageID:  evt.QuotedMessageID,
+		ReplyToMessageID:         replyToID,
+		QuotedMessageID:          quotedID,
+		HandoffKind:              channelconversation.HandoffKindNone,
+		SuggestedActions:         json.RawMessage(`[]`),
+		Metadata:                 metadata,
+		OccurredAt:               time.Now().UTC(),
+	}, nil
+}
+
+func entityRefsFromInboundEvent(workspaceID, issuePrefix string, evt port.InboundEvent) []channelconversation.EntityRef {
+	refs := channelconversation.ExtractIssueEntityRefs(workspaceID, evt.Text, channelconversation.EntityRoleMentioned)
+	quoted := channelconversation.ExtractIssueEntityRefs(workspaceID, evt.QuotedText, channelconversation.EntityRoleContext)
+	if len(quoted) > 0 {
+		refs = append(refs, quoted...)
+	}
+	return channelconversation.FilterIssueEntityRefsByPrefix(refs, issuePrefix)
+}
+
+func inboundMessageClassification(evt port.InboundEvent) (messageType, senderType, platformMessageID string) {
+	if evt.Type == port.EventTypeMessageRecalled {
+		return channelconversation.MessageTypeSystem, channelconversation.SenderTypeSystem, ""
+	}
+	return channelconversation.MessageTypeUser, channelconversation.SenderTypeUser, evt.MessageID
+}
+
+func marshalInboundMessageBody(evt port.InboundEvent) (json.RawMessage, error) {
+	raw := evt.RawPayload
+	if len(raw) == 0 || !json.Valid(raw) {
+		raw = json.RawMessage(`{}`)
+	}
+	body := struct {
+		EventType   port.EventType        `json:"event_type"`
+		QuotedText  string                `json:"quoted_text,omitempty"`
+		Attachments []port.AttachmentInfo `json:"attachments,omitempty"`
+		RawPayload  json.RawMessage       `json:"raw_payload"`
+		Intent      *port.InboundIntent   `json:"intent,omitempty"`
+		Recall      map[string]string     `json:"recall,omitempty"`
+	}{EventType: evt.Type, QuotedText: evt.QuotedText, Attachments: evt.Attachments, RawPayload: raw}
+	if evt.Intent.Kind != "" {
+		body.Intent = &evt.Intent
+	}
+	if evt.Type == port.EventTypeMessageRecalled && evt.MessageID != "" {
+		body.Recall = map[string]string{"platform_message_id": evt.MessageID}
+	}
+	return json.Marshal(body)
+}
+
+func marshalInboundMessageMetadata(evt port.InboundEvent) (json.RawMessage, error) {
+	metadata := struct {
+		RuntimeEventID            string `json:"runtime_event_id,omitempty"`
+		RecalledPlatformMessageID string `json:"recalled_platform_message_id,omitempty"`
+	}{RuntimeEventID: evt.RuntimeEventID}
+	if evt.Type == port.EventTypeMessageRecalled {
+		metadata.RecalledPlatformMessageID = evt.MessageID
+	}
+	return json.Marshal(metadata)
 }
 
 func normalizedRuntimeChatType(evt port.InboundEvent) string {
@@ -707,7 +792,7 @@ func loadInboundEventRecord(ctx context.Context, q interface {
 		connectionID     string
 	)
 	err := q.QueryRow(ctx, `
-SELECT id::text, canonical_event, status, phase, conversation_key,
+SELECT id::text, canonical_event, status, phase, processing_key,
        COALESCE(wait_kind, ''), COALESCE(wait_task_id::text, ''),
        COALESCE(workspace_id::text, ''), COALESCE(default_project_id::text, ''),
        attempts, max_attempts, updated_at, connection_id
@@ -718,7 +803,7 @@ WHERE id = $1
 		&canonical,
 		&rec.Status,
 		&rec.Phase,
-		&rec.ConversationKey,
+		&rec.ProcessingKey,
 		&waitKind,
 		&waitTaskID,
 		&workspaceID,
@@ -745,25 +830,21 @@ WHERE id = $1
 	return &rec, nil
 }
 
-func loadActiveEventState(ctx context.Context, tx pgx.Tx, id string) (status, text string, waitExpiresAt time.Time, terminal bool, err error) {
-	var waitExpires pgtype.Timestamptz
+func loadActiveEventState(ctx context.Context, tx pgx.Tx, id string) (status string, terminal bool, err error) {
 	err = tx.QueryRow(ctx, `
-SELECT status, text, wait_expires_at FROM channel_inbound_event WHERE id = $1 FOR UPDATE
-`, id).Scan(&status, &text, &waitExpires)
+SELECT status FROM channel_inbound_event WHERE id = $1 FOR UPDATE
+`, id).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", time.Time{}, true, nil
+		return "", true, nil
 	}
 	if err != nil {
-		return "", "", time.Time{}, false, err
-	}
-	if waitExpires.Valid {
-		waitExpiresAt = waitExpires.Time
+		return "", false, err
 	}
 	switch status {
 	case InboundStatusProcessed, InboundStatusDead, InboundStatusRejectedBackpressure:
-		return status, text, waitExpiresAt, true, nil
+		return status, true, nil
 	default:
-		return status, text, waitExpiresAt, false, nil
+		return status, false, nil
 	}
 }
 
@@ -779,42 +860,30 @@ func marshalEvent(evt port.InboundEvent) ([]byte, []byte, error) {
 	return canonical, raw, nil
 }
 
-func combineClarification(original, clarification string) string {
-	original = strings.TrimSpace(original)
-	clarification = strings.TrimSpace(clarification)
-	if original == "" {
-		return clarification
-	}
-	if clarification == "" {
-		return original
-	}
-	return original + "\n\n用户补充：" + clarification
-}
-
-func clearConversationActive(ctx context.Context, tx pgx.Tx, connectionID, key, activeID string) error {
+func clearProcessingActive(ctx context.Context, tx pgx.Tx, connectionID, key, activeID string) error {
 	_, err := tx.Exec(ctx, `
-UPDATE channel_conversation
+UPDATE channel_processing_lock
 SET active_event_id = NULL,
     active_since = NULL,
     updated_at = now()
 WHERE connection_id = $1
-  AND conversation_key = $2
+  AND processing_key = $2
   AND active_event_id = $3
 `, connectionID, key, activeID)
 	return err
 }
 
-func clearConversationActiveForEvent(ctx context.Context, tx pgx.Tx, id string) error {
+func clearProcessingActiveForEvent(ctx context.Context, tx pgx.Tx, id string) error {
 	_, err := tx.Exec(ctx, `
-UPDATE channel_conversation c
+UPDATE channel_processing_lock l
 SET active_event_id = NULL,
     active_since = NULL,
     updated_at = now()
 FROM channel_inbound_event e
 WHERE e.id = $1
-  AND c.connection_id = e.connection_id
-  AND c.conversation_key = e.conversation_key
-  AND c.active_event_id = e.id
+  AND l.connection_id = e.connection_id
+  AND l.processing_key = e.processing_key
+  AND l.active_event_id = e.id
 `, id)
 	return err
 }
@@ -825,7 +894,6 @@ UPDATE channel_inbound_event
 SET status = 'dead',
     phase = 'done',
     completed_at = now(),
-    wait_expires_at = NULL,
     locked_at = NULL,
     locked_by = NULL,
     last_error = $2,

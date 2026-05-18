@@ -18,7 +18,6 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/channel/facade"
 	"github.com/multica-ai/multica/server/internal/channel/port"
-	"github.com/multica-ai/multica/server/internal/channel/replyctx"
 	"github.com/multica-ai/multica/server/internal/util"
 )
 
@@ -43,6 +42,8 @@ const (
 	replyInternalError      = "INTERNAL_ERROR"
 	replyPrivateUnsupported = "PRIVATE_UNSUPPORTED"
 	replyMessageRecalled    = "MESSAGE_RECALLED"
+
+	contextMessageIDIntentParam = "_channel_context_message_id"
 )
 
 type ChatBindingLookup interface {
@@ -55,10 +56,6 @@ type UserInfoResolver interface {
 
 type ProjectWorkspaceValidator interface {
 	ValidateProjectInWorkspace(ctx context.Context, workspaceID, projectID pgtype.UUID) error
-}
-
-type ReplyContextLookup interface {
-	Lookup(ctx context.Context, connectionID, externalUserID string, now time.Time) (replyctx.Context, bool, error)
 }
 
 type ResolvedUser struct {
@@ -76,7 +73,6 @@ type DispatchConfig struct {
 	ProjectValidator  ProjectWorkspaceValidator
 	DispatchStore     DispatchCompletionStore
 	ProposalStore     ActionProposalStore
-	ReplyContext      ReplyContextLookup
 }
 
 type dispatchStep struct {
@@ -116,11 +112,6 @@ func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inb
 		return evt, DecisionContinue, nil
 	}
 
-	var err error
-	evt, err = d.withReplyContextIssue(ctx, evt)
-	if err != nil {
-		return evt, DecisionContinue, err
-	}
 	intent := evt.Intent
 
 	slog.Debug("dispatch: routing intent",
@@ -133,7 +124,7 @@ func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inb
 
 	var reply string
 	var rich *port.OutboundRichMessage
-	err = nil
+	var err error
 
 	switch intent.Kind {
 	case port.IntentCreateIssue, port.IntentAddComment, port.IntentSetStatus, port.IntentSetAssignee, port.IntentSetPriority, port.IntentSetLabel:
@@ -186,7 +177,6 @@ func (d *dispatchStep) Run(ctx context.Context, evt port.InboundEvent) (port.Inb
 	if sendErr := d.sendReply(ctx, evt, reply); sendErr != nil {
 		return evt, DecisionContinue, fmt.Errorf("send dispatch reply: %w", sendErr)
 	}
-
 	return evt, DecisionContinue, nil
 }
 
@@ -200,57 +190,7 @@ func (d *dispatchStep) persistDispatchCompletion(ctx context.Context, evt port.I
 	return nil
 }
 
-func (d *dispatchStep) withReplyContextIssue(ctx context.Context, evt port.InboundEvent) (port.InboundEvent, error) {
-	if !intentCanUseReplyContextIssue(evt.Intent.Kind) || strings.TrimSpace(evt.Intent.Params["issue_key"]) != "" {
-		return evt, nil
-	}
-	rc, ok, err := d.replyContextForEvent(ctx, evt)
-	if err != nil || !ok || strings.TrimSpace(rc.IssueIdentifier) == "" {
-		return evt, err
-	}
-	params := make(map[string]string, len(evt.Intent.Params)+2)
-	for k, v := range evt.Intent.Params {
-		params[k] = v
-	}
-	params["issue_key"] = rc.IssueIdentifier
-	if evt.Intent.Kind == port.IntentQueryProgress && strings.TrimSpace(params["scope"]) == "" {
-		params["scope"] = "issue"
-	}
-	evt.Intent.Params = params
-	return evt, nil
-}
-
-func intentCanUseReplyContextIssue(kind port.IntentKind) bool {
-	switch kind {
-	case port.IntentAddComment,
-		port.IntentSetStatus,
-		port.IntentSetAssignee,
-		port.IntentSetPriority,
-		port.IntentSetLabel,
-		port.IntentQueryIssue,
-		port.IntentQueryProgress,
-		port.IntentIssueDetail,
-		port.IntentIssueTimeline,
-		port.IntentIssueLogs:
-		return true
-	default:
-		return false
-	}
-}
-
-func (d *dispatchStep) replyContextForEvent(ctx context.Context, evt port.InboundEvent) (replyctx.Context, bool, error) {
-	if evt.ChatType != port.ChatTypeDirect || d.cfg.ReplyContext == nil {
-		return replyctx.Context{}, false, nil
-	}
-	return d.cfg.ReplyContext.Lookup(ctx, evt.ConnectionID(), evt.SenderID, time.Now())
-}
-
 func (d *dispatchStep) lookupWorkspaceID(ctx context.Context, evt port.InboundEvent) (pgtype.UUID, error) {
-	if rc, ok, err := d.replyContextForEvent(ctx, evt); err != nil {
-		return pgtype.UUID{}, err
-	} else if ok && rc.WorkspaceID.Valid {
-		return rc.WorkspaceID, nil
-	}
 	return d.cfg.ChatBinding.LookupWorkspaceID(ctx, evt.ConnectionID(), evt.ChatID)
 }
 
@@ -328,7 +268,7 @@ func (d *dispatchStep) handleQueryProgress(ctx context.Context, evt port.Inbound
 			return "", nil, fmt.Errorf("list project progress: %w", err)
 		}
 		body := FormatProjectProgress(items)
-		return body, &port.OutboundRichMessage{ChatID: evt.ChatID, Title: "项目进展", Body: body}, nil
+		return body, &port.OutboundRichMessage{Target: port.TargetChat(evt.ChatID), Title: "项目进展", Body: body}, nil
 	case "my_todos":
 		return d.handleQueryIssue(ctx, evt)
 	case "issue":
@@ -345,7 +285,7 @@ func (d *dispatchStep) handleQueryProgress(ctx context.Context, evt port.Inbound
 		}
 		body := FormatIssueProgress(progress)
 		return body, &port.OutboundRichMessage{
-			ChatID:  evt.ChatID,
+			Target:  port.TargetChat(evt.ChatID),
 			Title:   fmt.Sprintf("%s 进展", progress.Digest.Issue.Identifier),
 			Body:    body,
 			Actions: digestActions(progress.Digest),
@@ -394,9 +334,6 @@ func (d *dispatchStep) handleAddComment(ctx context.Context, evt port.InboundEve
 }
 
 func (d *dispatchStep) handleUnknown(ctx context.Context, evt port.InboundEvent) (string, error) {
-	if msg, ok, err := d.tryReplyContextComment(ctx, evt); err != nil || ok {
-		return msg, err
-	}
 	if draft := strings.TrimSpace(evt.Intent.Params["_user_reply_draft"]); draft != "" {
 		return draft, nil
 	}
@@ -404,46 +341,19 @@ func (d *dispatchStep) handleUnknown(ctx context.Context, evt port.InboundEvent)
 }
 
 func (d *dispatchStep) handleAskClarify(ctx context.Context, evt port.InboundEvent) (string, error) {
-	if msg, ok, err := d.tryReplyContextComment(ctx, evt); err != nil || ok {
-		return msg, err
-	}
 	if draft := strings.TrimSpace(evt.Intent.Params["_user_reply_draft"]); draft != "" {
 		return draft, nil
 	}
 	return "我还需要一点上下文：是要查某个 issue、看项目进展，还是创建/回复一个 issue？", nil
 }
 
-func (d *dispatchStep) tryReplyContextComment(ctx context.Context, evt port.InboundEvent) (string, bool, error) {
-	if evt.ChatType != port.ChatTypeDirect || d.cfg.ReplyContext == nil || strings.TrimSpace(evt.Text) == "" {
-		return "", false, nil
-	}
-	rc, ok, err := d.replyContextForEvent(ctx, evt)
-	if err != nil {
-		return "", true, fmt.Errorf("lookup reply context: %w", err)
-	}
-	if !ok || !rc.IssueID.Valid {
-		return "", false, nil
-	}
-	user, err := d.cfg.UserResolver.Resolve(ctx, evt.ConnectionID(), evt.SenderID)
-	if err != nil {
-		return "", true, fmt.Errorf("resolve user: %w", err)
-	}
-	if _, err := d.cfg.CommentFacade.AddComment(ctx, facade.AddCommentReq{
-		IssueID:        rc.IssueID,
-		ActorID:        user.MulticaUserID,
-		InboundEventID: parseRuntimeEventID(evt.RuntimeEventID),
-		Content:        evt.Text,
-	}); err != nil {
-		return "", true, fmt.Errorf("add reply-context comment: %w", err)
-	}
-	label := rc.IssueIdentifier
-	if label == "" {
-		label = util.UUIDToString(rc.IssueID)
-	}
-	return fmt.Sprintf("[%s] 已回复到 %s。", replyCommentAdded, label), true, nil
-}
-
 func (d *dispatchStep) handleMutationIntent(ctx context.Context, evt port.InboundEvent) (string, error) {
+	if isContextReplyCommentIntent(evt.Intent) {
+		if msg, ok := validateMutationIntent(evt.Intent); !ok {
+			return msg, nil
+		}
+		return d.executeMutationIntent(ctx, evt)
+	}
 	if d.cfg.ProposalStore == nil {
 		return d.executeMutationIntent(ctx, evt)
 	}
@@ -467,6 +377,16 @@ func (d *dispatchStep) handleMutationIntent(ctx context.Context, evt port.Inboun
 		return "", fmt.Errorf("create action proposal: %w", err)
 	}
 	return formatProposalReply(proposal, d.describeIntentWithCurrent(ctx, wsID, proposal.Intent)), nil
+}
+
+func isContextReplyCommentIntent(intent port.InboundIntent) bool {
+	if intent.Kind != port.IntentAddComment {
+		return false
+	}
+	if intent.Source != port.SourceRule {
+		return false
+	}
+	return strings.TrimSpace(intent.Params[contextMessageIDIntentParam]) != ""
 }
 
 func (d *dispatchStep) executeMutationIntent(ctx context.Context, evt port.InboundEvent) (string, error) {
@@ -591,7 +511,7 @@ func (d *dispatchStep) handleQueryIssue(ctx context.Context, evt port.InboundEve
 		}
 		body := FormatIssueDigest(digest)
 		rich := port.OutboundRichMessage{
-			ChatID:  evt.ChatID,
+			Target:  port.TargetChat(evt.ChatID),
 			Title:   fmt.Sprintf("%s 工作摘要", digest.Issue.Identifier),
 			Body:    body,
 			Actions: digestActions(digest),
@@ -631,7 +551,7 @@ func (d *dispatchStep) handleIssueDetail(ctx context.Context, evt port.InboundEv
 	}
 	body := FormatIssueDetail(detail)
 	rich := port.OutboundRichMessage{
-		ChatID:  evt.ChatID,
+		Target:  port.TargetChat(evt.ChatID),
 		Title:   fmt.Sprintf("%s 详情", detail.Digest.Issue.Identifier),
 		Body:    body,
 		Actions: digestActions(detail.Digest),
@@ -657,7 +577,7 @@ func (d *dispatchStep) handleIssueTimeline(ctx context.Context, evt port.Inbound
 	}
 	body := FormatIssueTimeline(timeline)
 	rich := port.OutboundRichMessage{
-		ChatID: evt.ChatID,
+		Target: port.TargetChat(evt.ChatID),
 		Title:  fmt.Sprintf("%s 动态", timeline.Issue.Identifier),
 		Body:   body,
 	}
@@ -682,7 +602,7 @@ func (d *dispatchStep) handleIssueLogs(ctx context.Context, evt port.InboundEven
 	}
 	body := FormatIssueLogs(logs)
 	rich := port.OutboundRichMessage{
-		ChatID: evt.ChatID,
+		Target: port.TargetChat(evt.ChatID),
 		Title:  fmt.Sprintf("%s 执行日志", logs.Issue.Identifier),
 		Body:   body,
 	}
@@ -706,7 +626,7 @@ func (d *dispatchStep) handleSetStatus(ctx context.Context, evt port.InboundEven
 	if issueKey == "" || status == "" {
 		return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和目标状态。", replyMissingParam), nil
 	}
-	issue, user, err := d.resolveIssueAndUser(ctx, evt, issueKey)
+	issue, user, _, err := d.resolveIssueAndUser(ctx, evt, issueKey)
 	if err != nil {
 		return "", err
 	}
@@ -724,7 +644,7 @@ func (d *dispatchStep) handleSetAssignee(ctx context.Context, evt port.InboundEv
 	if issueKey == "" || assignee == "" {
 		return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和指派人。", replyMissingParam), nil
 	}
-	issue, user, err := d.resolveIssueAndUser(ctx, evt, issueKey)
+	issue, user, _, err := d.resolveIssueAndUser(ctx, evt, issueKey)
 	if err != nil {
 		return "", err
 	}
@@ -742,7 +662,7 @@ func (d *dispatchStep) handleSetPriority(ctx context.Context, evt port.InboundEv
 	if issueKey == "" || priority == "" {
 		return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和目标优先级。", replyMissingParam), nil
 	}
-	issue, user, err := d.resolveIssueAndUser(ctx, evt, issueKey)
+	issue, user, _, err := d.resolveIssueAndUser(ctx, evt, issueKey)
 	if err != nil {
 		return "", err
 	}
@@ -760,7 +680,7 @@ func (d *dispatchStep) handleSetLabel(ctx context.Context, evt port.InboundEvent
 	if issueKey == "" || label == "" {
 		return fmt.Sprintf("[%s] 缺少参数：需要 Issue 编号和标签名。", replyMissingParam), nil
 	}
-	issue, user, err := d.resolveIssueAndUser(ctx, evt, issueKey)
+	issue, user, _, err := d.resolveIssueAndUser(ctx, evt, issueKey)
 	if err != nil {
 		return "", err
 	}
@@ -779,23 +699,23 @@ func (d *dispatchStep) handleSetLabel(ctx context.Context, evt port.InboundEvent
 	return fmt.Sprintf("[%s] 已为 %s 添加标签 %s。", replyLabelAdded, issueKey, label), nil
 }
 
-func (d *dispatchStep) resolveIssueAndUser(ctx context.Context, evt port.InboundEvent, issueKey string) (facade.Issue, ResolvedUser, error) {
+func (d *dispatchStep) resolveIssueAndUser(ctx context.Context, evt port.InboundEvent, issueKey string) (facade.Issue, ResolvedUser, pgtype.UUID, error) {
 	if !ValidIdentifierFormat(issueKey) {
-		return facade.Issue{}, ResolvedUser{}, fmt.Errorf("[%s] Issue 编号格式不正确。", replyIssueNotFound)
+		return facade.Issue{}, ResolvedUser{}, pgtype.UUID{}, fmt.Errorf("[%s] Issue 编号格式不正确。", replyIssueNotFound)
 	}
 	wsID, err := d.lookupWorkspaceID(ctx, evt)
 	if err != nil {
-		return facade.Issue{}, ResolvedUser{}, fmt.Errorf("lookup workspace: %w", err)
+		return facade.Issue{}, ResolvedUser{}, pgtype.UUID{}, fmt.Errorf("lookup workspace: %w", err)
 	}
 	issue, err := d.cfg.IssueFacade.GetIssueByIdentifier(ctx, wsID, issueKey)
 	if err != nil {
-		return facade.Issue{}, ResolvedUser{}, nil // not found — caller formats reply
+		return facade.Issue{}, ResolvedUser{}, wsID, nil // not found — caller formats reply
 	}
 	user, err := d.cfg.UserResolver.Resolve(ctx, evt.ConnectionID(), evt.SenderID)
 	if err != nil {
-		return facade.Issue{}, ResolvedUser{}, fmt.Errorf("resolve user: %w", err)
+		return facade.Issue{}, ResolvedUser{}, wsID, fmt.Errorf("resolve user: %w", err)
 	}
-	return issue, user, nil
+	return issue, user, wsID, nil
 }
 
 func (d *dispatchStep) sendReply(ctx context.Context, evt port.InboundEvent, text string) error {
@@ -803,7 +723,7 @@ func (d *dispatchStep) sendReply(ctx context.Context, evt port.InboundEvent, tex
 		return nil
 	}
 	err := d.cfg.ReplySink.SendText(ctx, evt, port.OutboundMessage{
-		ChatID: evt.ChatID,
+		Target: port.TargetChat(evt.ChatID),
 		Text:   text,
 	})
 	return err
@@ -819,8 +739,8 @@ func (d *dispatchStep) sendRichReply(ctx context.Context, evt port.InboundEvent,
 	if msg.Title == "" {
 		msg.Title = "Multica"
 	}
-	if msg.ChatID == "" {
-		msg.ChatID = evt.ChatID
+	if msg.Target.ID == "" {
+		msg.Target = port.TargetChat(evt.ChatID)
 	}
 	return d.cfg.ReplySink.SendRich(ctx, evt, msg)
 }

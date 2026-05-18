@@ -2,6 +2,7 @@ import type {
   Issue,
   CreateIssueRequest,
   UpdateIssueRequest,
+  GroupedIssuesResponse,
   ListIssuesResponse,
   SearchIssuesResponse,
   SearchProjectsResponse,
@@ -9,6 +10,7 @@ import type {
   CreateMemberRequest,
   UpdateMemberRequest,
   ListIssuesParams,
+  ListGroupedIssuesParams,
   Agent,
   CreateAgentRequest,
   AgentTemplate,
@@ -45,6 +47,7 @@ import type {
   DashboardUsageDaily,
   DashboardUsageByAgent,
   DashboardAgentRunTime,
+  DashboardRunTimeDaily,
   RuntimeUpdate,
   RuntimeModelListRequest,
   RuntimeLocalSkillListRequest,
@@ -114,18 +117,37 @@ import {
   AgentTemplateSchema,
   AgentTemplateSummaryListSchema,
   AttachmentResponseSchema,
+  ChannelBindingSchema,
+  ChannelBindTokenPreviewSchema,
+  ChannelConnectionSchema,
+  ChannelConnectionTestResponseSchema,
+  ChannelUserBindingResponseSchema,
   ChildIssuesResponseSchema,
   CommentsListSchema,
   CreateAgentFromTemplateResponseSchema,
   DashboardAgentRunTimeListSchema,
+  DashboardRunTimeDailyListSchema,
   DashboardUsageByAgentListSchema,
   DashboardUsageDailyListSchema,
   EMPTY_AGENT_TEMPLATE_DETAIL,
   EMPTY_AGENT_TEMPLATE_SUMMARY_LIST,
   EMPTY_ATTACHMENT,
+  EMPTY_CHANNEL_BINDING,
+  EMPTY_CHANNEL_BIND_TOKEN_PREVIEW,
+  EMPTY_CHANNEL_CONNECTION,
+  EMPTY_CHANNEL_CONNECTION_TEST_RESPONSE,
+  EMPTY_CHANNEL_USER_BINDING_RESPONSE,
   EMPTY_CREATE_AGENT_FROM_TEMPLATE_RESPONSE,
+  EMPTY_GROUPED_ISSUES_RESPONSE,
   EMPTY_LIST_ISSUES_RESPONSE,
+  EMPTY_LIST_CHANNEL_BINDINGS_RESPONSE,
+  EMPTY_LIST_CHANNEL_CONNECTIONS_RESPONSE,
+  EMPTY_LIST_CHANNEL_PROVIDERS_RESPONSE,
   EMPTY_TIMELINE_ENTRIES,
+  GroupedIssuesResponseSchema,
+  ListChannelBindingsResponseSchema,
+  ListChannelConnectionsResponseSchema,
+  ListChannelProvidersResponseSchema,
   ListIssuesResponseSchema,
   SubscribersListSchema,
   TimelineEntriesSchema,
@@ -481,6 +503,36 @@ export class ApiClient {
     const raw = await this.fetch<unknown>(path);
     return parseWithFallback(raw, ListIssuesResponseSchema, EMPTY_LIST_ISSUES_RESPONSE, {
       endpoint: "GET /api/issues",
+    });
+  }
+
+  async listGroupedIssues(params: ListGroupedIssuesParams): Promise<GroupedIssuesResponse> {
+    const search = new URLSearchParams({ group_by: params.group_by });
+    if (params.limit) search.set("limit", String(params.limit));
+    if (params.offset) search.set("offset", String(params.offset));
+    if (params.workspace_id) search.set("workspace_id", params.workspace_id);
+    if (params.statuses?.length) search.set("statuses", params.statuses.join(","));
+    if (params.priorities?.length) search.set("priorities", params.priorities.join(","));
+    if (params.assignee_types?.length) search.set("assignee_types", params.assignee_types.join(","));
+    if (params.assignee_id) search.set("assignee_id", params.assignee_id);
+    if (params.assignee_ids?.length) search.set("assignee_ids", params.assignee_ids.join(","));
+    if (params.creator_id) search.set("creator_id", params.creator_id);
+    if (params.project_id) search.set("project_id", params.project_id);
+    if (params.assignee_filters?.length) {
+      search.set("assignee_filters", params.assignee_filters.map((f) => `${f.type}:${f.id}`).join(","));
+    }
+    if (params.include_no_assignee) search.set("include_no_assignee", "true");
+    if (params.creator_filters?.length) {
+      search.set("creator_filters", params.creator_filters.map((f) => `${f.type}:${f.id}`).join(","));
+    }
+    if (params.project_ids?.length) search.set("project_ids", params.project_ids.join(","));
+    if (params.include_no_project) search.set("include_no_project", "true");
+    if (params.label_ids?.length) search.set("label_ids", params.label_ids.join(","));
+    if (params.group_assignee_type) search.set("group_assignee_type", params.group_assignee_type);
+    if (params.group_assignee_id) search.set("group_assignee_id", params.group_assignee_id);
+    const raw = await this.fetch<unknown>(`/api/issues/grouped?${search}`);
+    return parseWithFallback(raw, GroupedIssuesResponseSchema, EMPTY_GROUPED_ISSUES_RESPONSE, {
+      endpoint: "GET /api/issues/grouped",
     });
   }
 
@@ -863,6 +915,21 @@ export class ApiClient {
       DashboardAgentRunTimeListSchema,
       [],
       { endpoint: "GET /api/dashboard/agent-runtime" },
+    );
+  }
+
+  async getDashboardRunTimeDaily(
+    params: { days?: number; project_id?: string | null },
+  ): Promise<DashboardRunTimeDaily[]> {
+    const search = new URLSearchParams();
+    if (params.days) search.set("days", String(params.days));
+    if (params.project_id) search.set("project_id", params.project_id);
+    const raw = await this.fetch<unknown>(`/api/dashboard/runtime/daily?${search}`);
+    return parseWithFallback<DashboardRunTimeDaily[]>(
+      raw,
+      DashboardRunTimeDailyListSchema,
+      [],
+      { endpoint: "GET /api/dashboard/runtime/daily" },
     );
   }
 
@@ -1474,7 +1541,7 @@ export class ApiClient {
     return this.fetch(`/api/squads/${id}`);
   }
 
-  async createSquad(data: { name: string; description?: string; leader_id: string }): Promise<Squad> {
+  async createSquad(data: { name: string; description?: string; leader_id: string; avatar_url?: string }): Promise<Squad> {
     return this.fetch("/api/squads", { method: "POST", body: JSON.stringify(data) });
   }
 
@@ -1581,24 +1648,36 @@ export class ApiClient {
 
   // Channel Bindings
   async listChannelProviders(): Promise<ListChannelProvidersResponse> {
-    return this.fetch("/api/channel-providers");
+    const raw = await this.fetch<unknown>("/api/channel-providers");
+    return parseWithFallback(raw, ListChannelProvidersResponseSchema, EMPTY_LIST_CHANNEL_PROVIDERS_RESPONSE, {
+      endpoint: "GET /api/channel-providers",
+    });
   }
 
   async listChannelConnections(): Promise<ListChannelConnectionsResponse> {
-    return this.fetch("/api/channel-connections");
+    const raw = await this.fetch<unknown>("/api/channel-connections");
+    return parseWithFallback(raw, ListChannelConnectionsResponseSchema, EMPTY_LIST_CHANNEL_CONNECTIONS_RESPONSE, {
+      endpoint: "GET /api/channel-connections",
+    });
   }
 
   async createChannelConnection(data: ChannelConnectionWriteRequest): Promise<ChannelConnection> {
-    return this.fetch("/api/channel-connections", {
+    const raw = await this.fetch<unknown>("/api/channel-connections", {
       method: "POST",
       body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, ChannelConnectionSchema, EMPTY_CHANNEL_CONNECTION, {
+      endpoint: "POST /api/channel-connections",
     });
   }
 
   async updateChannelConnection(id: string, data: ChannelConnectionWriteRequest): Promise<ChannelConnection> {
-    return this.fetch(`/api/channel-connections/${id}`, {
+    const raw = await this.fetch<unknown>(`/api/channel-connections/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, ChannelConnectionSchema, EMPTY_CHANNEL_CONNECTION, {
+      endpoint: "PATCH /api/channel-connections/:id",
     });
   }
 
@@ -1607,29 +1686,44 @@ export class ApiClient {
   }
 
   async testChannelConnection(id: string): Promise<{ ok: boolean }> {
-    return this.fetch(`/api/channel-connections/${id}/test`, { method: "POST" });
+    const raw = await this.fetch<unknown>(`/api/channel-connections/${id}/test`, { method: "POST" });
+    return parseWithFallback(raw, ChannelConnectionTestResponseSchema, EMPTY_CHANNEL_CONNECTION_TEST_RESPONSE, {
+      endpoint: "POST /api/channel-connections/:id/test",
+    });
   }
 
   async getChannelBindTokenPreview(token: string): Promise<ChannelBindTokenPreview> {
     const params = new URLSearchParams({ token });
-    return this.fetch(`/api/channel-bind-token?${params.toString()}`);
+    const raw = await this.fetch<unknown>(`/api/channel-bind-token?${params.toString()}`);
+    return parseWithFallback(raw, ChannelBindTokenPreviewSchema, EMPTY_CHANNEL_BIND_TOKEN_PREVIEW, {
+      endpoint: "GET /api/channel-bind-token",
+    });
   }
 
   async listChannelBindings(workspaceId: string): Promise<ListChannelBindingsResponse> {
-    return this.fetch(`/api/workspaces/${workspaceId}/channel-bindings`);
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/channel-bindings`);
+    return parseWithFallback(raw, ListChannelBindingsResponseSchema, EMPTY_LIST_CHANNEL_BINDINGS_RESPONSE, {
+      endpoint: "GET /api/workspaces/:id/channel-bindings",
+    });
   }
 
   async createChannelBinding(workspaceId: string, data: CreateChannelBindingRequest): Promise<ChannelBinding> {
-    return this.fetch(`/api/workspaces/${workspaceId}/channel-bindings`, {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/channel-bindings`, {
       method: "POST",
       body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, ChannelBindingSchema, EMPTY_CHANNEL_BINDING, {
+      endpoint: "POST /api/workspaces/:id/channel-bindings",
     });
   }
 
   async createChannelUserBinding(data: CreateChannelUserBindingRequest): Promise<ChannelUserBindingResponse> {
-    return this.fetch("/api/channel-user-bindings", {
+    const raw = await this.fetch<unknown>("/api/channel-user-bindings", {
       method: "POST",
       body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, ChannelUserBindingResponseSchema, EMPTY_CHANNEL_USER_BINDING_RESPONSE, {
+      endpoint: "POST /api/channel-user-bindings",
     });
   }
 
@@ -1638,9 +1732,12 @@ export class ApiClient {
   }
 
   async updateChannelBinding(workspaceId: string, bindingId: string, data: PatchChannelBindingRequest): Promise<ChannelBinding> {
-    return this.fetch(`/api/workspaces/${workspaceId}/channel-bindings/${bindingId}`, {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/channel-bindings/${bindingId}`, {
       method: "PATCH",
       body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, ChannelBindingSchema, EMPTY_CHANNEL_BINDING, {
+      endpoint: "PATCH /api/workspaces/:id/channel-bindings/:bindingId",
     });
   }
 
