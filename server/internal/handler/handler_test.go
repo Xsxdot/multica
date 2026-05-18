@@ -59,6 +59,15 @@ func TestMain(m *testing.M) {
 	bus := events.New()
 	emailSvc := service.NewEmailService()
 	testHandler = New(queries, pool, hub, bus, emailSvc, nil, nil, analytics.NoopClient{}, Config{AllowSignup: true})
+	// httptest.NewRequest defaults RemoteAddr to 192.0.2.1, so every webhook
+	// test in the suite shares one IP bucket. With the production default
+	// (30/min) the budget runs out partway through the suite and unrelated
+	// downstream tests see a 429 from the IP gate instead of the response
+	// they're asserting. Tests that exercise rate limiting deliberately
+	// swap in a tight limiter with t.Cleanup; this generous default keeps
+	// the rest of the suite hermetic.
+	testHandler.WebhookRateLimiter = NewMemoryWebhookRateLimiter(WebhookRateLimit{Limit: 1_000_000, Window: time.Minute})
+	testHandler.WebhookIPRateLimiter = NewMemoryWebhookIPRateLimiter(WebhookRateLimit{Limit: 1_000_000, Window: time.Minute})
 	testPool = pool
 
 	testUserID, testWorkspaceID, err = setupHandlerTestFixture(ctx, pool)
